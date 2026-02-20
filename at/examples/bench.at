@@ -1,0 +1,42 @@
+fn loop_sum(limit: int) -> int {
+    let i: int = 0;
+    let acc: int = 0;
+    while i < limit {
+        set acc = acc + i;
+        set i = i + 1;
+    }
+    return acc;
+}
+
+fn count_primes(limit: int) -> int {
+    let n: int = 2;
+    let count: int = 0;
+    while n < limit {
+        let d: int = 2;
+        let is_prime: int = 1;
+        while d * d <= n {
+            let divisible = if n / d * d == n { 1 } else { 0 };
+            set is_prime = if divisible { 0 } else { is_prime };
+            set d = if divisible { n } else { d + 1 };
+        }
+        set count = if is_prime { count + 1 } else { count };
+        set n = n + 1;
+    }
+    return count;
+}
+
+fn skip_sum(limit: int) -> int {
+    let i: int = 0;
+    let acc: int = 0;
+    let done: int = 0;
+    while i < limit {
+        set done = if i == 1000 { 1 } else { done };
+        set acc = if i == 7 { acc } else { acc + i };
+        set i = if done { limit } else { i + 1 };
+    }
+    return acc;
+}
+
+loop_sum(200000);
+count_primes(1000);
+skip_sum(100000);

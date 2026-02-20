@@ -1,0 +1,33 @@
+# Build artifacts
+at/target/
+target/
+
+# Cargo
+**/*.rs.bk
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# at language runtime
+.at/cache/
+.at/lock
+
+# WASM build output
+at/crates/at_wasm/pkg/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Debugging
+*.dSYM/
+*.pdb
+
+# Environment
+.env
+.env.local

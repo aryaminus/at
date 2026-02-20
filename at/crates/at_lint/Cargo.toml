@@ -1,0 +1,11 @@
+[package]
+name = "at_lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+at_syntax = { path = "../at_syntax" }
+
+[dev-dependencies]
+at_parser = { path = "../at_parser" }

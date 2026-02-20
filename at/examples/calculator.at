@@ -1,0 +1,60 @@
+// Calculator example demonstrating basic features
+
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn subtract(a: int, b: int) -> int {
+    return a - b;
+}
+
+fn multiply(a: int, b: int) -> int {
+    return a * b;
+}
+
+fn divide(a: int, b: int) -> result<int, string> {
+    return if b == 0 {
+        err("cannot divide by zero")
+    } else {
+        ok(a / b)
+    };
+}
+
+fn calculate(expression: string) -> result<int, string> {
+    // Parse a simple expression like "10 + 5"
+    // For demo, just hardcode some operations
+    let a = 10;
+    let b = 5;
+    
+    let sum = add(a, b);
+    let diff = subtract(a, b);
+    let prod = multiply(a, b);
+    let quot = divide(a, b)?;
+    
+    print("Sum: ");
+    print(sum);
+    print("Difference: ");
+    print(diff);
+    print("Product: ");
+    print(prod);
+    print("Quotient: ");
+    print(quot);
+    
+    return ok(sum);
+}
+
+fn main() {
+    print("=== Calculator Demo ===");
+    
+    let result = calculate("10 + 5");
+    
+    let final_value = match result {
+        ok(value) => value,
+        err(msg) => 0,
+    };
+    
+    print("Final result: ");
+    print(final_value);
+    
+    return final_value;
+}

@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/at_cli",
+    "crates/at_vm",
+    "crates/at_parser",
+    "crates/at_syntax",
+    "crates/at_mcp",
+    "crates/at_fmt",
+    "crates/at_wasm",
+    "crates/at_lsp",
+    "crates/at_check",
+    "crates/at_lint",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["at contributors"]

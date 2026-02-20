@@ -1,0 +1,11 @@
+fn sum(n: int) -> int {
+    let i: int = 0;
+    let acc: int = 0;
+    while i < n {
+        set acc = acc + i;
+        set i = i + 1;
+    }
+    return acc;
+}
+
+sum(100000);

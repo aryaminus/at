@@ -1,0 +1,7 @@
+fn version() -> string {
+    return "std";
+}
+
+fn now() -> int needs { time } {
+    return time.now();
+}

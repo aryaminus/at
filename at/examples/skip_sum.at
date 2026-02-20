@@ -1,0 +1,13 @@
+fn sum_skip(limit: int) -> int {
+    let i: int = 0;
+    let acc: int = 0;
+    let done: int = 0;
+    while i < limit {
+        set done = if i == 1000 { 1 } else { done };
+        set acc = if i == 7 { acc } else { acc + i };
+        set i = if done { limit } else { i + 1 };
+    }
+    return acc;
+}
+
+sum_skip(100000);

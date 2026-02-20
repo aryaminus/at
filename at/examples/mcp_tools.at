@@ -1,0 +1,19 @@
+tool fn sum(values: array<int>) -> int {
+    let total = 0;
+    for value in values {
+        set total = total + value;
+    }
+    return total;
+}
+
+tool fn has_value(values: array<int>, target: int) -> bool {
+    return contains(values, target);
+}
+
+tool fn prefix(values: array<int>, count: int) -> array<int> {
+    return slice(values, 0, count);
+}
+
+tool fn now() -> int needs { time } {
+    return time.now();
+}

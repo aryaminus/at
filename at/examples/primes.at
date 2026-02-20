@@ -1,0 +1,18 @@
+fn count_primes(limit: int) -> int {
+    let n: int = 2;
+    let count: int = 0;
+    while n < limit {
+        let d: int = 2;
+        let is_prime: int = 1;
+        while d * d <= n {
+            let divisible = if n / d * d == n { 1 } else { 0 };
+            set is_prime = if divisible { 0 } else { is_prime };
+            set d = if divisible { n } else { d + 1 };
+        }
+        set count = if is_prime { count + 1 } else { count };
+        set n = n + 1;
+    }
+    return count;
+}
+
+count_primes(1000);

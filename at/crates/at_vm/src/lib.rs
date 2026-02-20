@@ -1,0 +1,2429 @@
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use at_syntax::{Expr, Function, Module, Span, Stmt};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Int(i64),
+    Float(f64),
+    String(Rc<String>),
+    Bool(bool),
+    Array(Rc<Vec<Value>>),
+    Option(Option<Rc<Value>>),
+    Result(Result<Rc<Value>, Rc<Value>>),
+    Unit,
+}
+
+pub fn format_value(value: &Value) -> String {
+    match value {
+        Value::Int(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::String(value) => format!("\"{}\"", value),
+        Value::Bool(value) => value.to_string(),
+        Value::Unit => "unit".to_string(),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(format_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Option(Some(inner)) => format!("some({})", format_value(inner)),
+        Value::Option(None) => "none".to_string(),
+        Value::Result(Ok(inner)) => format!("ok({})", format_value(inner)),
+        Value::Result(Err(inner)) => format!("err({})", format_value(inner)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    Const(usize),
+    LoadLocal(usize),
+    StoreLocal(usize),
+    GrantCapability(String),
+    Call(usize, usize),
+    Builtin(Builtin),
+    Assert,
+    Try,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Array(usize),
+    Index,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Neg,
+    Not,
+    MatchResultOk(usize),
+    MatchResultErr(usize),
+    MatchOptionSome(usize),
+    MatchOptionNone(usize),
+    MatchFail,
+    JumpIfFalse(usize),
+    Jump(usize),
+    Return,
+    Pop,
+    Halt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    TimeNow,
+    TimeFixed,
+    RngDeterministic,
+    RngUuid,
+    AssertEq,
+    OptionSome,
+    OptionNone,
+    ResultOk,
+    ResultErr,
+    IsSome,
+    IsNone,
+    IsOk,
+    IsErr,
+    Print,
+    Len,
+    Append,
+    Contains,
+    Slice,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Chunk {
+    pub code: Vec<Op>,
+    pub constants: Vec<Value>,
+    pub spans: Vec<Option<Span>>,
+}
+
+impl Chunk {
+    fn push(&mut self, op: Op, span: Option<Span>) {
+        self.code.push(op);
+        self.spans.push(span);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionChunk {
+    pub name: String,
+    pub params: usize,
+    pub locals: usize,
+    pub needs: Vec<String>,
+    pub chunk: Chunk,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Program {
+    pub functions: Vec<FunctionChunk>,
+    pub main: Chunk,
+    pub main_locals: usize,
+}
+
+#[derive(Debug, Default)]
+struct LoopContext {
+    breaks: Vec<usize>,
+    continues: Vec<usize>,
+}
+
+impl LoopContext {
+    fn new() -> Self {
+        Self {
+            breaks: Vec::new(),
+            continues: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum VmError {
+    StackUnderflow,
+    Compile { message: String, span: Option<Span> },
+    Runtime { message: String, span: Option<Span> },
+    ExecutionLimit { message: String },
+}
+
+pub struct Compiler {
+    scopes: Vec<HashMap<String, usize>>,
+    next_local: usize,
+    functions: HashMap<String, usize>,
+    function_arity: HashMap<String, usize>,
+    function_needs: HashMap<String, Vec<String>>,
+    current_function: Option<String>,
+    loop_stack: Vec<LoopContext>,
+    synthetic_id: usize,
+}
+
+impl Compiler {
+    pub fn new() -> Self {
+        Self {
+            scopes: Vec::new(),
+            next_local: 0,
+            functions: HashMap::new(),
+            function_arity: HashMap::new(),
+            function_needs: HashMap::new(),
+            current_function: None,
+            loop_stack: Vec::new(),
+            synthetic_id: 0,
+        }
+    }
+
+    pub fn compile_module(&mut self, module: &Module) -> Result<Program, VmError> {
+        let mut program = Program::default();
+
+        self.functions.clear();
+        self.function_arity.clear();
+        self.function_needs.clear();
+        self.current_function = None;
+
+        for func in &module.functions {
+            let id = program.functions.len();
+            if self.functions.contains_key(&func.name.name) {
+                return Err(compile_error(
+                    format!("duplicate function: {}", func.name.name),
+                    Some(func.name.span),
+                ));
+            }
+            self.functions.insert(func.name.name.clone(), id);
+            self.function_arity
+                .insert(func.name.name.clone(), func.params.len());
+            let needs: Vec<String> = func.needs.iter().map(|ident| ident.name.clone()).collect();
+            self.function_needs
+                .insert(func.name.name.clone(), needs.clone());
+            program.functions.push(FunctionChunk {
+                name: func.name.name.clone(),
+                params: func.params.len(),
+                locals: 0,
+                needs,
+                chunk: Chunk::default(),
+            });
+        }
+
+        for (id, func) in module.functions.iter().enumerate() {
+            self.current_function = Some(func.name.name.clone());
+            let (chunk, locals) = self.compile_function(func)?;
+            self.current_function = None;
+            program.functions[id].chunk = chunk;
+            program.functions[id].locals = locals;
+        }
+
+        self.propagate_transitive_needs(&mut program);
+
+        self.scopes.clear();
+        self.next_local = 0;
+        self.push_scope();
+        for stmt in &module.stmts {
+            self.compile_stmt(stmt, &mut program.main)?;
+        }
+        program.main.push(Op::Halt, None);
+        program.main_locals = self.next_local;
+
+        Ok(program)
+    }
+
+    fn propagate_transitive_needs(&mut self, program: &mut Program) {
+        loop {
+            let mut changed = false;
+            let functions_needs: Vec<(usize, Vec<String>)> = program
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(id, func)| {
+                    let mut needs = func.needs.clone();
+                    for op in &func.chunk.code {
+                        if let Op::Call(func_id, _) = op {
+                            if *func_id < program.functions.len() {
+                                let callee_needs = &program.functions[*func_id].needs;
+                                for need in callee_needs {
+                                    if !needs.contains(need) {
+                                        needs.push(need.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (id, needs)
+                })
+                .collect();
+            for (id, needs) in functions_needs {
+                if needs != program.functions[id].needs {
+                    program.functions[id].needs = needs;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    pub fn compile_test_body(&mut self, stmts: &[Stmt]) -> Result<Chunk, VmError> {
+        self.scopes.clear();
+        self.next_local = 0;
+        self.push_scope();
+        let mut chunk = Chunk::default();
+        for stmt in stmts {
+            self.compile_stmt(stmt, &mut chunk)?;
+        }
+        chunk.push(Op::Halt, None);
+        Ok(chunk)
+    }
+
+    fn compile_function(&mut self, func: &Function) -> Result<(Chunk, usize), VmError> {
+        self.scopes.clear();
+        self.next_local = 0;
+        self.push_scope();
+        for param in &func.params {
+            self.bind_local_checked(&param.name.name, param.name.span)?;
+        }
+
+        let mut chunk = Chunk::default();
+        for stmt in &func.body {
+            self.compile_stmt(stmt, &mut chunk)?;
+        }
+        let unit_index = chunk.constants.len();
+        chunk.constants.push(Value::Unit);
+        chunk.push(Op::Const(unit_index), None);
+        chunk.push(Op::Return, None);
+        Ok((chunk, self.next_local))
+    }
+
+    fn add_transitive_needs(&mut self, callee_name: &str) {
+        if let Some(current) = &self.current_function {
+            if let Some(callee_needs) = self.function_needs.get(callee_name).cloned() {
+                let current_needs = self
+                    .function_needs
+                    .entry(current.clone())
+                    .or_insert_with(Vec::new);
+                for need in callee_needs {
+                    if !current_needs.contains(&need) {
+                        current_needs.push(need);
+                    }
+                }
+            }
+        }
+    }
+
+    fn compile_stmt(&mut self, stmt: &Stmt, chunk: &mut Chunk) -> Result<(), VmError> {
+        match stmt {
+            Stmt::Import { .. } => {}
+            Stmt::Let { name, value, .. } => {
+                self.compile_expr(value, chunk)?;
+                let slot = self.bind_local_checked(&name.name, name.span)?;
+                chunk.push(Op::StoreLocal(slot), Some(name.span));
+            }
+            Stmt::Using { name, value, .. } => {
+                self.compile_expr(value, chunk)?;
+                let slot = self.bind_local_checked(&name.name, name.span)?;
+                chunk.push(Op::StoreLocal(slot), Some(name.span));
+                chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
+            }
+            Stmt::Set { name, value } => {
+                self.compile_expr(value, chunk)?;
+                let slot = self.resolve_local(&name.name).ok_or_else(|| {
+                    compile_error(
+                        format!("unknown identifier: {}", name.name),
+                        Some(name.span),
+                    )
+                })?;
+                chunk.push(Op::StoreLocal(slot), Some(name.span));
+            }
+            Stmt::While {
+                while_span,
+                condition,
+                body,
+            } => {
+                let loop_start = chunk.code.len();
+                self.loop_stack.push(LoopContext::new());
+                self.compile_expr(condition, chunk)?;
+                let jump_if_false = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), Some(*while_span));
+                self.push_scope();
+                for stmt in body {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                self.pop_scope();
+                chunk.push(Op::Jump(loop_start), Some(*while_span));
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_if_false, end);
+                if let Some(loop_ctx) = self.loop_stack.pop() {
+                    for jump in loop_ctx.breaks {
+                        patch_jump(&mut chunk.code, jump, end);
+                    }
+                    for jump in loop_ctx.continues {
+                        patch_jump(&mut chunk.code, jump, loop_start);
+                    }
+                }
+            }
+            Stmt::For {
+                for_span,
+                item,
+                iter,
+                body,
+            } => {
+                self.compile_expr(iter, chunk)?;
+                let arr_name = self.next_synthetic_name("for_arr");
+                let arr_slot = self.bind_local_checked(&arr_name, item.span)?;
+                chunk.push(Op::StoreLocal(arr_slot), Some(item.span));
+
+                let idx_name = self.next_synthetic_name("for_idx");
+                let idx_slot = self.bind_local_checked(&idx_name, item.span)?;
+                let zero_index = chunk.constants.len();
+                chunk.constants.push(Value::Int(0));
+                chunk.push(Op::Const(zero_index), Some(*for_span));
+                chunk.push(Op::StoreLocal(idx_slot), Some(*for_span));
+
+                let loop_start = chunk.code.len();
+                self.loop_stack.push(LoopContext::new());
+                chunk.push(Op::LoadLocal(idx_slot), Some(*for_span));
+                chunk.push(Op::LoadLocal(arr_slot), Some(*for_span));
+                chunk.push(Op::Builtin(Builtin::Len), Some(*for_span));
+                chunk.push(Op::Lt, Some(*for_span));
+                let jump_if_false = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), Some(*for_span));
+
+                self.push_scope();
+                let item_slot = self.bind_local_checked(&item.name, item.span)?;
+                chunk.push(Op::LoadLocal(arr_slot), Some(item.span));
+                chunk.push(Op::LoadLocal(idx_slot), Some(item.span));
+                chunk.push(Op::Index, Some(item.span));
+                chunk.push(Op::StoreLocal(item_slot), Some(item.span));
+                for stmt in body {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                self.pop_scope();
+
+                let continue_target = chunk.code.len();
+                let one_index = chunk.constants.len();
+                chunk.constants.push(Value::Int(1));
+                chunk.push(Op::LoadLocal(idx_slot), Some(*for_span));
+                chunk.push(Op::Const(one_index), Some(*for_span));
+                chunk.push(Op::Add, Some(*for_span));
+                chunk.push(Op::StoreLocal(idx_slot), Some(*for_span));
+                chunk.push(Op::Jump(loop_start), Some(*for_span));
+
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_if_false, end);
+                if let Some(loop_ctx) = self.loop_stack.pop() {
+                    for jump in loop_ctx.breaks {
+                        patch_jump(&mut chunk.code, jump, end);
+                    }
+                    for jump in loop_ctx.continues {
+                        patch_jump(&mut chunk.code, jump, continue_target);
+                    }
+                }
+            }
+            Stmt::Break { break_span } => {
+                let jump = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), Some(*break_span));
+                if let Some(loop_ctx) = self.loop_stack.last_mut() {
+                    loop_ctx.breaks.push(jump);
+                } else {
+                    return Err(compile_error(
+                        "break used outside of loop".to_string(),
+                        Some(*break_span),
+                    ));
+                }
+            }
+            Stmt::Continue { continue_span } => {
+                let jump = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), Some(*continue_span));
+                if let Some(loop_ctx) = self.loop_stack.last_mut() {
+                    loop_ctx.continues.push(jump);
+                } else {
+                    return Err(compile_error(
+                        "continue used outside of loop".to_string(),
+                        Some(*continue_span),
+                    ));
+                }
+            }
+            Stmt::Expr(expr) => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::Pop, expr_span(expr));
+            }
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.compile_expr(expr, chunk)?;
+                } else {
+                    let unit_index = chunk.constants.len();
+                    chunk.constants.push(Value::Unit);
+                    chunk.push(Op::Const(unit_index), None);
+                }
+                chunk.push(Op::Return, expr.as_ref().and_then(expr_span));
+            }
+            Stmt::Block(stmts) => {
+                self.push_scope();
+                for stmt in stmts {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                self.pop_scope();
+            }
+            Stmt::Test { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn compile_to_bool(&mut self, expr: &Expr, chunk: &mut Chunk) -> Result<(), VmError> {
+        self.compile_expr(expr, chunk)?;
+        chunk.push(Op::Not, expr_span(expr));
+        chunk.push(Op::Not, expr_span(expr));
+        Ok(())
+    }
+
+    fn compile_expr(&mut self, expr: &Expr, chunk: &mut Chunk) -> Result<(), VmError> {
+        match expr {
+            Expr::Int(value, _) => {
+                let index = chunk.constants.len();
+                chunk.constants.push(Value::Int(*value));
+                chunk.push(Op::Const(index), expr_span(expr));
+            }
+            Expr::Float(value, _) => {
+                let index = chunk.constants.len();
+                chunk.constants.push(Value::Float(*value));
+                chunk.push(Op::Const(index), expr_span(expr));
+            }
+            Expr::String(value, _) => {
+                let index = chunk.constants.len();
+                chunk.constants.push(Value::String(Rc::new(value.clone())));
+                chunk.push(Op::Const(index), expr_span(expr));
+            }
+            Expr::Bool(value, _) => {
+                let index = chunk.constants.len();
+                chunk.constants.push(Value::Bool(*value));
+                chunk.push(Op::Const(index), expr_span(expr));
+            }
+            Expr::Ident(ident) => {
+                let slot = self.resolve_local(&ident.name).ok_or_else(|| {
+                    compile_error(
+                        format!("unknown identifier: {}", ident.name),
+                        Some(ident.span),
+                    )
+                })?;
+                chunk.push(Op::LoadLocal(slot), Some(ident.span));
+            }
+            Expr::Binary {
+                left,
+                op,
+                op_span,
+                right,
+            } => match op {
+                at_syntax::BinaryOp::And => {
+                    self.compile_to_bool(left, chunk)?;
+                    let jump_if_false = chunk.code.len();
+                    chunk.push(Op::JumpIfFalse(usize::MAX), Some(*op_span));
+                    self.compile_to_bool(right, chunk)?;
+                    let jump_to_end = chunk.code.len();
+                    chunk.push(Op::Jump(usize::MAX), Some(*op_span));
+                    let false_index = chunk.constants.len();
+                    chunk.constants.push(Value::Bool(false));
+                    let false_pos = chunk.code.len();
+                    chunk.push(Op::Const(false_index), Some(*op_span));
+                    patch_jump(&mut chunk.code, jump_if_false, false_pos);
+                    let end = chunk.code.len();
+                    patch_jump(&mut chunk.code, jump_to_end, end);
+                }
+                at_syntax::BinaryOp::Or => {
+                    self.compile_to_bool(left, chunk)?;
+                    let jump_if_false = chunk.code.len();
+                    chunk.push(Op::JumpIfFalse(usize::MAX), Some(*op_span));
+                    let true_index = chunk.constants.len();
+                    chunk.constants.push(Value::Bool(true));
+                    chunk.push(Op::Const(true_index), Some(*op_span));
+                    let jump_to_end = chunk.code.len();
+                    chunk.push(Op::Jump(usize::MAX), Some(*op_span));
+                    let right_start = chunk.code.len();
+                    patch_jump(&mut chunk.code, jump_if_false, right_start);
+                    self.compile_to_bool(right, chunk)?;
+                    let end = chunk.code.len();
+                    patch_jump(&mut chunk.code, jump_to_end, end);
+                }
+                _ => {
+                    self.compile_expr(left, chunk)?;
+                    self.compile_expr(right, chunk)?;
+                    let op = match op {
+                        at_syntax::BinaryOp::Add => Op::Add,
+                        at_syntax::BinaryOp::Sub => Op::Sub,
+                        at_syntax::BinaryOp::Mul => Op::Mul,
+                        at_syntax::BinaryOp::Div => Op::Div,
+                        at_syntax::BinaryOp::Mod => Op::Mod,
+                        at_syntax::BinaryOp::Eq => Op::Eq,
+                        at_syntax::BinaryOp::Neq => Op::Neq,
+                        at_syntax::BinaryOp::Lt => Op::Lt,
+                        at_syntax::BinaryOp::Lte => Op::Lte,
+                        at_syntax::BinaryOp::Gt => Op::Gt,
+                        at_syntax::BinaryOp::Gte => Op::Gte,
+                        at_syntax::BinaryOp::And | at_syntax::BinaryOp::Or => {
+                            return Err(compile_error(
+                                "unexpected logical op".to_string(),
+                                Some(*op_span),
+                            ));
+                        }
+                    };
+                    chunk.push(op, Some(*op_span));
+                }
+            },
+            Expr::Unary { op, op_span, expr } => {
+                self.compile_expr(expr, chunk)?;
+                let op = match op {
+                    at_syntax::UnaryOp::Neg => Op::Neg,
+                    at_syntax::UnaryOp::Not => Op::Not,
+                };
+                chunk.push(op, Some(*op_span));
+            }
+            Expr::If {
+                if_span,
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.compile_expr(condition, chunk)?;
+                let jump_if_false = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), Some(*if_span));
+                self.compile_expr(then_branch, chunk)?;
+                let jump_to_end = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), Some(*if_span));
+                let else_start = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_if_false, else_start);
+                self.compile_expr(else_branch, chunk)?;
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_to_end, end);
+            }
+            Expr::Block { stmts, tail, .. } => {
+                self.push_scope();
+                for stmt in stmts {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                if let Some(expr) = tail {
+                    self.compile_expr(expr, chunk)?;
+                } else {
+                    let unit_index = chunk.constants.len();
+                    chunk.constants.push(Value::Unit);
+                    chunk.push(Op::Const(unit_index), None);
+                }
+                self.pop_scope();
+            }
+            Expr::Array { items, .. } => {
+                for item in items {
+                    self.compile_expr(item, chunk)?;
+                }
+                chunk.push(Op::Array(items.len()), expr_span(expr));
+            }
+            Expr::Index { base, index, .. } => {
+                self.compile_expr(base, chunk)?;
+                self.compile_expr(index, chunk)?;
+                chunk.push(Op::Index, expr_span(expr));
+            }
+            Expr::Call { callee, args } => {
+                if let Expr::Member { base, name } = callee.as_ref() {
+                    if let Expr::Ident(base_ident) = base.as_ref() {
+                        if let Some(builtin) = map_builtin(&base_ident.name, &name.name, args.len())
+                        {
+                            for arg in args {
+                                self.compile_expr(arg, chunk)?;
+                            }
+                            chunk.push(Op::Builtin(builtin), Some(name.span));
+                            return Ok(());
+                        }
+
+                        let func_name = format!("{}.{}", base_ident.name, name.name);
+                        if let Some(expected) = self.function_arity.get(&func_name) {
+                            if *expected != args.len() {
+                                return Err(compile_error(
+                                    format!(
+                                        "wrong arity for {}: expected {}, got {}",
+                                        func_name,
+                                        expected,
+                                        args.len()
+                                    ),
+                                    Some(name.span),
+                                ));
+                            }
+                        }
+                        let func_id = *self.functions.get(&func_name).ok_or_else(|| {
+                            compile_error(format!("unknown function: {func_name}"), Some(name.span))
+                        })?;
+                        for arg in args {
+                            self.compile_expr(arg, chunk)?;
+                        }
+                        chunk.push(Op::Call(func_id, args.len()), Some(name.span));
+                        self.add_transitive_needs(&func_name);
+                        return Ok(());
+                    }
+                    return Err(compile_error(
+                        "invalid call target".to_string(),
+                        expr_span(callee),
+                    ));
+                }
+                if let Expr::Ident(ident) = callee.as_ref() {
+                    if ident.name == "assert" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for assert".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Assert, Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "assert_eq" {
+                        if args.len() != 2 {
+                            return Err(compile_error(
+                                "wrong arity for assert_eq".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        self.compile_expr(&args[1], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::AssertEq), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "print" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for print".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Print), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "len" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for len".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Len), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "append" {
+                        if args.len() != 2 {
+                            return Err(compile_error(
+                                "wrong arity for append".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        self.compile_expr(&args[1], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Append), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "contains" {
+                        if args.len() != 2 {
+                            return Err(compile_error(
+                                "wrong arity for contains".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        self.compile_expr(&args[1], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Contains), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "slice" {
+                        if args.len() != 3 {
+                            return Err(compile_error(
+                                "wrong arity for slice".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        self.compile_expr(&args[1], chunk)?;
+                        self.compile_expr(&args[2], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Slice), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "some" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for some".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::OptionSome), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "none" {
+                        if !args.is_empty() {
+                            return Err(compile_error(
+                                "wrong arity for none".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        chunk.push(Op::Builtin(Builtin::OptionNone), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "ok" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for ok".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::ResultOk), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "err" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for err".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::ResultErr), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "is_some" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for is_some".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::IsSome), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "is_none" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for is_none".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::IsNone), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "is_ok" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for is_ok".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::IsOk), Some(ident.span));
+                        return Ok(());
+                    }
+                    if ident.name == "is_err" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for is_err".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::IsErr), Some(ident.span));
+                        return Ok(());
+                    }
+                    let func_id = *self.functions.get(&ident.name).ok_or_else(|| {
+                        compile_error(
+                            format!("unknown function: {}", ident.name),
+                            Some(ident.span),
+                        )
+                    })?;
+                    if let Some(expected) = self.function_arity.get(&ident.name) {
+                        if *expected != args.len() {
+                            return Err(compile_error(
+                                format!(
+                                    "wrong arity for {}: expected {}, got {}",
+                                    ident.name,
+                                    expected,
+                                    args.len()
+                                ),
+                                Some(ident.span),
+                            ));
+                        }
+                    }
+                    for arg in args {
+                        self.compile_expr(arg, chunk)?;
+                    }
+                    chunk.push(Op::Call(func_id, args.len()), Some(ident.span));
+                    self.add_transitive_needs(&ident.name);
+                    return Ok(());
+                }
+                return Err(compile_error(
+                    "invalid call target".to_string(),
+                    expr_span(callee),
+                ));
+            }
+            Expr::Try(expr) => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::Try, expr_span(expr));
+            }
+            Expr::Match {
+                match_span,
+                value,
+                arms,
+            } => {
+                self.compile_match_expr(*match_span, value, arms, chunk)?;
+            }
+            Expr::Member { .. } => {
+                return Err(compile_error(
+                    "invalid call target".to_string(),
+                    expr_span(expr),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_match_expr(
+        &mut self,
+        match_span: Span,
+        value: &Expr,
+        arms: &[at_syntax::MatchArm],
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        if arms.is_empty() {
+            let unit_index = chunk.constants.len();
+            chunk.constants.push(Value::Unit);
+            chunk.push(Op::Const(unit_index), Some(match_span));
+            return Ok(());
+        }
+
+        self.compile_expr(value, chunk)?;
+        let mut end_jumps = Vec::new();
+
+        let mut match_op_indices = Vec::new();
+        let mut wildcard_body_index: Option<usize> = None;
+        for arm in arms {
+            match &arm.pattern {
+                at_syntax::MatchPattern::Wildcard => {
+                    wildcard_body_index = Some(chunk.code.len());
+                    chunk.push(Op::Pop, Some(match_span));
+                }
+                _ => {
+                    let match_op_index = chunk.code.len();
+                    chunk.push(
+                        match arm.pattern {
+                            at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
+                            at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
+                            at_syntax::MatchPattern::OptionSome(_) => {
+                                Op::MatchOptionSome(usize::MAX)
+                            }
+                            at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
+                            at_syntax::MatchPattern::Wildcard => unreachable!(),
+                        },
+                        Some(match_span),
+                    );
+                    match_op_indices.push(match_op_index);
+                }
+            }
+
+            self.push_scope();
+            match &arm.pattern {
+                at_syntax::MatchPattern::ResultOk(ident)
+                | at_syntax::MatchPattern::ResultErr(ident)
+                | at_syntax::MatchPattern::OptionSome(ident) => {
+                    let slot = self.bind_local_checked(&ident.name, ident.span)?;
+                    chunk.push(Op::StoreLocal(slot), Some(ident.span));
+                }
+                at_syntax::MatchPattern::OptionNone => {}
+                at_syntax::MatchPattern::Wildcard => {}
+            }
+
+            self.compile_expr(&arm.body, chunk)?;
+            let jump_index = chunk.code.len();
+            chunk.push(Op::Jump(usize::MAX), None);
+            end_jumps.push(jump_index);
+            self.pop_scope();
+        }
+
+        let fail_index = if let Some(wildcard_idx) = wildcard_body_index {
+            wildcard_idx
+        } else {
+            let idx = chunk.code.len();
+            chunk.push(Op::MatchFail, Some(match_span));
+            idx
+        };
+
+        for (idx, match_index) in match_op_indices.iter().enumerate() {
+            let target = if idx + 1 < match_op_indices.len() {
+                match_op_indices[idx + 1]
+            } else {
+                fail_index
+            };
+            patch_jump(&mut chunk.code, *match_index, target);
+        }
+
+        let end = chunk.code.len();
+        for jump_index in end_jumps {
+            patch_jump(&mut chunk.code, jump_index, end);
+        }
+        Ok(())
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn bind_local_checked(&mut self, name: &str, span: Span) -> Result<usize, VmError> {
+        if let Some(scope) = self.scopes.last_mut() {
+            if scope.contains_key(name) {
+                return Err(compile_error(
+                    format!("duplicate local: {name}"),
+                    Some(span),
+                ));
+            }
+            let slot = self.next_local;
+            self.next_local += 1;
+            scope.insert(name.to_string(), slot);
+            return Ok(slot);
+        }
+        let slot = self.next_local;
+        self.next_local += 1;
+        Ok(slot)
+    }
+
+    fn next_synthetic_name(&mut self, prefix: &str) -> String {
+        loop {
+            let name = format!("__at_{}_{}", prefix, self.synthetic_id);
+            self.synthetic_id += 1;
+            if self.resolve_local(&name).is_none() {
+                return name;
+            }
+        }
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(slot) = scope.get(name) {
+                return Some(*slot);
+            }
+        }
+        None
+    }
+}
+
+struct Frame {
+    chunk_id: usize,
+    ip: usize,
+    locals: Vec<Value>,
+    capabilities: HashSet<String>,
+}
+
+pub struct Vm {
+    stack: Vec<Value>,
+    frames: Vec<Frame>,
+    locals_pool: Vec<Vec<Value>>,
+    initial_capabilities: HashSet<String>,
+    instruction_count: usize,
+    max_instructions: Option<usize>,
+    max_frames: Option<usize>,
+    output_buffer: Option<Rc<RefCell<Vec<String>>>>,
+}
+
+impl Vm {
+    pub fn new() -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: HashSet::new(),
+            instruction_count: 0,
+            max_instructions: None,
+            max_frames: None,
+            output_buffer: None,
+        }
+    }
+
+    pub fn with_capabilities(capabilities: HashSet<String>) -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: capabilities,
+            instruction_count: 0,
+            max_instructions: None,
+            max_frames: None,
+            output_buffer: None,
+        }
+    }
+
+    pub fn with_execution_limit(max_instructions: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: HashSet::new(),
+            instruction_count: 0,
+            max_instructions: Some(max_instructions),
+            max_frames: None,
+            output_buffer: None,
+        }
+    }
+
+    pub fn with_output_capture() -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: HashSet::new(),
+            instruction_count: 0,
+            max_instructions: None,
+            max_frames: None,
+            output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+        }
+    }
+
+    pub fn get_output(&self) -> Option<Vec<String>> {
+        self.output_buffer.as_ref().map(|buf| buf.borrow().clone())
+    }
+
+    pub fn with_execution_limit_and_output(max_instructions: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: HashSet::new(),
+            instruction_count: 0,
+            max_instructions: Some(max_instructions),
+            max_frames: None,
+            output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+        }
+    }
+
+    pub fn with_limits(max_instructions: usize, max_frames: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            locals_pool: Vec::new(),
+            initial_capabilities: HashSet::new(),
+            instruction_count: 0,
+            max_instructions: Some(max_instructions),
+            max_frames: Some(max_frames),
+            output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+        }
+    }
+
+    pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
+        self.stack.clear();
+        self.frames.clear();
+        self.instruction_count = 0;
+        let locals = self.take_locals(program.main_locals);
+        let capabilities = self.initial_capabilities.clone();
+        self.frames.push(Frame {
+            chunk_id: usize::MAX,
+            ip: 0,
+            locals,
+            capabilities,
+        });
+
+        loop {
+            // Check execution limit
+            if let Some(max) = self.max_instructions {
+                if self.instruction_count >= max {
+                    return Err(VmError::ExecutionLimit {
+                        message: format!("execution limit exceeded: {} instructions", max),
+                    });
+                }
+            }
+            self.instruction_count += 1;
+
+            let frame_index = match self.frames.len() {
+                0 => return Ok(self.stack.pop()),
+                len => len - 1,
+            };
+            let frame_chunk_id = self.frames[frame_index].chunk_id;
+            let frame_ip = self.frames[frame_index].ip;
+
+            let chunk = if frame_chunk_id == usize::MAX {
+                &program.main
+            } else {
+                match program
+                    .functions
+                    .get(frame_chunk_id)
+                    .map(|func| &func.chunk)
+                {
+                    Some(chunk) => chunk,
+                    None => {
+                        return Err(runtime_error_at(
+                            format!("invalid function id: {}", frame_chunk_id),
+                            None,
+                        ))
+                    }
+                }
+            };
+
+            if frame_ip >= chunk.code.len() {
+                return Ok(self.stack.pop());
+            }
+
+            let mut advance = true;
+            match &chunk.code[frame_ip] {
+                Op::Const(index) => {
+                    let value = chunk
+                        .constants
+                        .get(*index)
+                        .cloned()
+                        .ok_or(VmError::StackUnderflow)?;
+                    self.stack.push(value);
+                }
+                Op::LoadLocal(slot) => {
+                    let value = self.frames[frame_index]
+                        .locals
+                        .get(*slot)
+                        .cloned()
+                        .ok_or_else(|| {
+                            runtime_error_at(
+                                format!("invalid local: {}", slot),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                    self.stack.push(value);
+                }
+                Op::StoreLocal(slot) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    if *slot >= self.frames[frame_index].locals.len() {
+                        return Err(runtime_error_at(
+                            format!("invalid local: {}", slot),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    self.frames[frame_index].locals[*slot] = value;
+                }
+                Op::GrantCapability(name) => {
+                    self.frames[frame_index].capabilities.insert(name.clone());
+                }
+                Op::Call(func_id, arg_count) => {
+                    let func = match program.functions.get(*func_id) {
+                        Some(func) => func,
+                        None => {
+                            return Err(runtime_error_at(
+                                format!("invalid function id: {}", func_id),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if *arg_count != func.params {
+                        return Err(runtime_error_at(
+                            format!(
+                                "wrong arity: expected {} args, got {}",
+                                func.params, arg_count
+                            ),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    for need in &func.needs {
+                        if !self.frames[frame_index].capabilities.contains(need) {
+                            return Err(runtime_error_at(
+                                format!("missing capability: {}", need),
+                                span_at(chunk, frame_ip),
+                            ));
+                        }
+                    }
+                    if let Some(max) = self.max_frames {
+                        if self.frames.len() >= max {
+                            return Err(runtime_error_at(
+                                format!("stack overflow: maximum call depth {} exceeded", max),
+                                span_at(chunk, frame_ip),
+                            ));
+                        }
+                    }
+                    let mut locals = self.take_locals(func.locals.max(*arg_count));
+                    let mut index = *arg_count;
+                    while index > 0 {
+                        index -= 1;
+                        locals[index] = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                    }
+                    let capabilities = self.frames[frame_index].capabilities.clone();
+                    self.frames[frame_index].ip = frame_ip + 1;
+                    advance = false;
+                    self.frames.push(Frame {
+                        chunk_id: *func_id,
+                        ip: 0,
+                        locals,
+                        capabilities,
+                    });
+                }
+                Op::Builtin(builtin) => {
+                    let result = match builtin {
+                        Builtin::TimeNow => {
+                            if !self.frames[frame_index].capabilities.contains("time") {
+                                return Err(runtime_error_at(
+                                    "missing capability: time".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as i64;
+                            Value::Int(now)
+                        }
+                        Builtin::TimeFixed => {
+                            let _ = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::String(Rc::new("time.fixed".to_string()))
+                        }
+                        Builtin::RngDeterministic => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Int(seed) => Value::Int(seed),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid builtin usage".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::RngUuid => {
+                            if !self.frames[frame_index].capabilities.contains("rng") {
+                                return Err(runtime_error_at(
+                                    "missing capability: rng".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            Value::String(Rc::new(Uuid::new_v4().to_string()))
+                        }
+                        Builtin::AssertEq => {
+                            let right = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let left = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            if left == right {
+                                Value::Unit
+                            } else {
+                                return Err(runtime_error_at(
+                                    "assert_eq failed".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                        }
+                        Builtin::OptionSome => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::Option(Some(Rc::new(value)))
+                        }
+                        Builtin::OptionNone => Value::Option(None),
+                        Builtin::ResultOk => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::Result(Ok(Rc::new(value)))
+                        }
+                        Builtin::ResultErr => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::Result(Err(Rc::new(value)))
+                        }
+                        Builtin::IsSome => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Option(Some(_)) => Value::Bool(true),
+                                Value::Option(None) => Value::Bool(false),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid builtin usage".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsNone => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Option(Some(_)) => Value::Bool(false),
+                                Value::Option(None) => Value::Bool(true),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid builtin usage".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsOk => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Result(Ok(_)) => Value::Bool(true),
+                                Value::Result(Err(_)) => Value::Bool(false),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid builtin usage".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsErr => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Result(Ok(_)) => Value::Bool(false),
+                                Value::Result(Err(_)) => Value::Bool(true),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid builtin usage".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Print => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let output = match &value {
+                                Value::String(text) => text.to_string(),
+                                _ => format_value(&value),
+                            };
+                            // Write to output buffer if configured, otherwise print to stdout
+                            if let Some(ref buf) = self.output_buffer {
+                                buf.borrow_mut().push(output);
+                            } else {
+                                println!("{}", output);
+                            }
+                            Value::Unit
+                        }
+                        Builtin::Len => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Array(items) => Value::Int(items.len() as i64),
+                                Value::String(value) => Value::Int(value.len() as i64),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "len expects array or string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Append => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let array = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match array {
+                                Value::Array(items) => {
+                                    // Clone the array and push the new element
+                                    // Note: when the array is uniquely owned (refcount=1),
+                                    // Rc::make_mut would be more efficient but requires
+                                    // &mut self which we don't have here
+                                    let mut new_items = (*items).clone();
+                                    new_items.push(value);
+                                    self.stack.push(Value::Array(Rc::new(new_items)));
+                                    Value::Unit
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "append expects array".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Contains => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let array = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match array {
+                                Value::Array(items) => {
+                                    Value::Bool(items.iter().any(|item| item == &value))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "contains expects array".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Slice => {
+                            let end = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let start = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let array = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let (start, end) = match (start, end) {
+                                (Value::Int(start), Value::Int(end)) => (start, end),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "slice expects int bounds".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if start < 0 || end < start {
+                                return Err(runtime_error_at(
+                                    "slice out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            match array {
+                                Value::Array(items) => {
+                                    let start = start as usize;
+                                    let end = end as usize;
+                                    if end > items.len() {
+                                        return Err(runtime_error_at(
+                                            "slice out of bounds".to_string(),
+                                            span_at(chunk, frame_ip),
+                                        ));
+                                    }
+                                    Value::Array(Rc::new(items[start..end].to_vec()))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "slice expects array".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                    };
+                    self.stack.push(result);
+                }
+                Op::Assert => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Int(0) => {
+                            return Err(VmError::Runtime {
+                                message: "assert failed".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                        Value::Int(_) => {}
+                        Value::Bool(false) => {
+                            return Err(VmError::Runtime {
+                                message: "assert failed".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                        Value::Bool(true) => {}
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "assert expects bool or int".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                    self.stack.push(Value::Unit);
+                }
+                Op::Try => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Result(Ok(inner)) => {
+                            self.stack.push((*inner).clone());
+                        }
+                        Value::Result(Err(inner)) => {
+                            let value = Value::Result(Err(inner));
+                            self.pop_frame();
+                            if self.frames.is_empty() {
+                                return Ok(Some(value));
+                            }
+                            self.stack.push(value);
+                        }
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "? expects result".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                }
+                Op::Add => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Int(left + right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left + right));
+                        }
+                        (Value::String(left), Value::String(right)) => {
+                            let mut combined = String::with_capacity(left.len() + right.len());
+                            combined.push_str(&left);
+                            combined.push_str(&right);
+                            self.stack.push(Value::String(Rc::new(combined)));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid binary operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                }
+                Op::Sub => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Int(left - right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left - right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid binary operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                }
+                Op::Mul => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Int(left * right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left * right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid binary operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                }
+                Op::Div => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            if right == 0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Int(left / right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            if right == 0.0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left / right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid binary operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                }
+                Op::Mod => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            if right == 0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Int(left % right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            if right == 0.0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left % right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid binary operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                }
+                Op::Array(count) => {
+                    if self.stack.len() < *count {
+                        return Err(runtime_error_at(
+                            "stack underflow".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut items = Vec::with_capacity(*count);
+                    for _ in 0..*count {
+                        items.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    items.reverse();
+                    self.stack.push(Value::Array(Rc::new(items)));
+                }
+                Op::Index => {
+                    let index_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let base_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let index = match index_value {
+                        Value::Int(value) => value,
+                        _ => {
+                            return Err(runtime_error_at(
+                                "index expects int".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if index < 0 {
+                        return Err(runtime_error_at(
+                            "index out of bounds".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let (items, idx) = match base_value {
+                        Value::Array(items) => (items, index as usize),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "index expects array".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    let value = items.get(idx).cloned().ok_or_else(|| {
+                        runtime_error_at(
+                            "index out of bounds".to_string(),
+                            span_at(chunk, frame_ip),
+                        )
+                    })?;
+                    self.stack.push(value);
+                }
+                Op::Eq => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    self.stack.push(Value::Bool(left == right));
+                }
+                Op::Neq => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    self.stack.push(Value::Bool(left != right));
+                }
+                Op::Neg => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Int(value) => self.stack.push(Value::Int(-value)),
+                        Value::Float(value) => self.stack.push(Value::Float(-value)),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid unary operand".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                Op::Not => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let value = match value {
+                        Value::Bool(value) => Value::Bool(!value),
+                        Value::Int(value) => Value::Bool(value == 0),
+                        Value::Float(value) => Value::Bool(value == 0.0),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid unary operand".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    self.stack.push(value);
+                }
+                Op::Lt => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left < right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool(left < right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid comparison operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                Op::Lte => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left <= right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool(left <= right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid comparison operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                Op::Gt => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left > right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool(left > right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid comparison operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                Op::Gte => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left >= right));
+                        }
+                        (Value::Float(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool(left >= right));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid comparison operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                Op::MatchResultOk(target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Result(Ok(inner)) => {
+                            self.stack.push((*inner).clone());
+                        }
+                        Value::Result(Err(inner)) => {
+                            self.stack.push(Value::Result(Err(inner)));
+                            self.frames[frame_index].ip = *target;
+                            advance = false;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "match expects result".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                }
+                Op::MatchResultErr(target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Result(Err(inner)) => {
+                            self.stack.push((*inner).clone());
+                        }
+                        Value::Result(Ok(inner)) => {
+                            self.stack.push(Value::Result(Ok(inner)));
+                            self.frames[frame_index].ip = *target;
+                            advance = false;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "match expects result".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                }
+                Op::MatchOptionSome(target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Option(Some(inner)) => {
+                            self.stack.push((*inner).clone());
+                        }
+                        Value::Option(None) => {
+                            self.stack.push(Value::Option(None));
+                            self.frames[frame_index].ip = *target;
+                            advance = false;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "match expects option".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                }
+                Op::MatchOptionNone(target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Option(None) => {}
+                        Value::Option(Some(inner)) => {
+                            self.stack.push(Value::Option(Some(inner)));
+                            self.frames[frame_index].ip = *target;
+                            advance = false;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime {
+                                message: "match expects option".to_string(),
+                                span: self.current_span(program),
+                            })
+                        }
+                    }
+                }
+                Op::MatchFail => {
+                    return Err(VmError::Runtime {
+                        message: "non-exhaustive match".to_string(),
+                        span: self.current_span(program),
+                    });
+                }
+                Op::JumpIfFalse(target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let is_false = match value {
+                        Value::Bool(false) => true,
+                        Value::Bool(true) => false,
+                        Value::Int(0) => true,
+                        Value::Int(_) => false,
+                        _ => {
+                            return Err(runtime_error_at(
+                                "if expects bool or int".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if is_false {
+                        self.frames[frame_index].ip = *target;
+                        advance = false;
+                    }
+                }
+                Op::Jump(target) => {
+                    self.frames[frame_index].ip = *target;
+                    advance = false;
+                }
+                Op::Return => {
+                    let value = self.stack.pop().unwrap_or(Value::Unit);
+                    self.pop_frame();
+                    if self.frames.is_empty() {
+                        return Ok(Some(value));
+                    }
+                    self.stack.push(value);
+                    advance = false;
+                }
+                Op::Pop => {
+                    self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                }
+                Op::Halt => {
+                    return Ok(self.stack.pop());
+                }
+            }
+
+            if advance {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.ip += 1;
+                }
+            }
+        }
+    }
+}
+
+impl Vm {
+    fn take_locals(&mut self, size: usize) -> Vec<Value> {
+        let mut locals = self.locals_pool.pop().unwrap_or_default();
+        locals.clear();
+        if locals.capacity() < size {
+            locals.reserve(size - locals.capacity());
+        }
+        locals.resize(size, Value::Unit);
+        locals
+    }
+
+    fn pop_frame(&mut self) {
+        if let Some(frame) = self.frames.pop() {
+            self.recycle_locals(frame.locals);
+        }
+    }
+
+    fn recycle_locals(&mut self, mut locals: Vec<Value>) {
+        locals.clear();
+        self.locals_pool.push(locals);
+    }
+}
+
+impl Vm {
+    fn current_span(&self, program: &Program) -> Option<Span> {
+        let frame = self.frames.last()?;
+        let chunk = if frame.chunk_id == usize::MAX {
+            &program.main
+        } else {
+            &program.functions.get(frame.chunk_id)?.chunk
+        };
+        let ip = frame.ip;
+        if ip >= chunk.spans.len() {
+            return None;
+        }
+        chunk.spans.get(ip).cloned().flatten()
+    }
+}
+
+fn span_at(chunk: &Chunk, ip: usize) -> Option<Span> {
+    chunk.spans.get(ip).cloned().flatten()
+}
+
+fn runtime_error_at(message: String, span: Option<Span>) -> VmError {
+    VmError::Runtime { message, span }
+}
+
+fn expr_span(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::Int(_, span) => Some(*span),
+        Expr::Float(_, span) => Some(*span),
+        Expr::String(_, span) => Some(*span),
+        Expr::Bool(_, span) => Some(*span),
+        Expr::Ident(ident) => Some(ident.span),
+        Expr::Unary { op_span, .. } => Some(*op_span),
+        Expr::Binary { op_span, .. } => Some(*op_span),
+        Expr::If { if_span, .. } => Some(*if_span),
+        Expr::Member { name, .. } => Some(name.span),
+        Expr::Call { callee, .. } => expr_span(callee),
+        Expr::Try(expr) => expr_span(expr),
+        Expr::Match { match_span, .. } => Some(*match_span),
+        Expr::Block { block_span, .. } => Some(*block_span),
+        Expr::Array { array_span, .. } => Some(*array_span),
+        Expr::Index { index_span, .. } => Some(*index_span),
+    }
+}
+
+fn compile_error(message: String, span: Option<Span>) -> VmError {
+    VmError::Compile { message, span }
+}
+
+fn patch_jump(code: &mut [Op], index: usize, target: usize) {
+    match &mut code[index] {
+        Op::MatchResultOk(ref mut slot)
+        | Op::MatchResultErr(ref mut slot)
+        | Op::MatchOptionSome(ref mut slot)
+        | Op::MatchOptionNone(ref mut slot)
+        | Op::JumpIfFalse(ref mut slot)
+        | Op::Jump(ref mut slot) => {
+            *slot = target;
+        }
+        _ => {}
+    }
+}
+
+fn map_builtin(base: &str, name: &str, args: usize) -> Option<Builtin> {
+    match (base, name, args) {
+        ("time", "now", 0) => Some(Builtin::TimeNow),
+        ("time", "fixed", 1) => Some(Builtin::TimeFixed),
+        ("rng", "deterministic", 1) => Some(Builtin::RngDeterministic),
+        ("rng", "uuid", 0) => Some(Builtin::RngUuid),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Compiler, Vm, VmError};
+    use at_parser::parse_module;
+
+    #[test]
+    fn match_fail_has_span() {
+        let source = r#"
+fn f() {
+    let x = none();
+    return match x {
+        some(v) => v,
+    };
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected runtime error");
+        match err {
+            VmError::Runtime { message, span } => {
+                assert!(span.is_some(), "missing span for runtime error: {message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_error_on_break_outside_loop() {
+        let source = r#"
+fn f() {
+    break;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let err = Compiler::new()
+            .compile_module(&module)
+            .expect_err("expected compile error");
+        match err {
+            VmError::Compile { message, .. } => {
+                assert!(message.contains("break used outside of loop"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_error_on_continue_outside_loop() {
+        let source = r#"
+fn f() {
+    continue;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let err = Compiler::new()
+            .compile_module(&module)
+            .expect_err("expected compile error");
+        match err {
+            VmError::Compile { message, .. } => {
+                assert!(message.contains("continue used outside of loop"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compiles_let_as_const_then_store() {
+        let source = r#"
+fn f() -> int {
+    let i: int = 0;
+    return i;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let chunk = &program.functions[0].chunk;
+        assert!(matches!(chunk.code.get(0), Some(super::Op::Const(_))));
+        assert!(matches!(chunk.code.get(1), Some(super::Op::StoreLocal(_))));
+    }
+
+    #[test]
+    fn runs_let_and_return() {
+        let source = r#"
+fn f() -> int {
+    let i: int = 0;
+    return i;
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn runtime_errors_on_missing_capability() {
+        let source = r#"
+fn f() -> int {
+    return time.now();
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected runtime error");
+        match err {
+            VmError::Runtime { message, .. } => {
+                assert!(message.contains("missing capability: time"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_allows_using_capability() {
+        let source = r#"
+fn f() -> int {
+    return time.now();
+}
+
+using time = time.fixed("2026-01-01T00:00:00Z");
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn runtime_errors_on_missing_capability_for_needs() {
+        let source = r#"
+fn f() -> int needs { time } {
+    return time.now();
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected runtime error");
+        match err {
+            VmError::Runtime { message, .. } => {
+                assert!(message.contains("missing capability: time"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runs_for_loop_sum() {
+        let source = r#"
+fn sum(values: array<int>) -> int {
+    let total = 0;
+    for value in values {
+        set total = total + value;
+    }
+    return total;
+}
+
+sum([1, 2, 3, 4]);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn for_loop_respects_break() {
+        let source = r#"
+fn sum(values: array<int>) -> int {
+    let total = 0;
+    for value in values {
+        if value == 3 {
+            break;
+        } else { }
+        set total = total + value;
+    }
+    return total;
+}
+
+sum([1, 2, 3, 4]);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+}

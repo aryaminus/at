@@ -1,0 +1,19 @@
+fn main() {
+    let values = [1, 2, 3];
+    print(len(values));
+
+    let next = append(values, 4);
+    print(len(next));
+
+    let mid = slice(next, 1, 3);
+    print(mid[0]);
+
+    let has_two = contains(values, 2);
+    print(has_two);
+
+    for value in values {
+        print(value);
+    }
+}
+
+main();

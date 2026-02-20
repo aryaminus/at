@@ -1,0 +1,1189 @@
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::time::SystemTime;
+
+use at_lint;
+use at_parser::{parse_module, ParseError};
+use at_syntax::{Module, Span, TypeRef};
+use at_vm::Compiler;
+use lsp_server::{Connection, Message, Notification, Response};
+use lsp_types::{
+    CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
+    InlayHintKind, InlayHintParams, Location, MarkupContent, MarkupKind, Position, Range,
+    ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
+};
+use sha2::{Digest, Sha256};
+
+pub fn run_stdio() -> Result<(), String> {
+    let (connection, io_threads) = Connection::stdio();
+
+    let server_capabilities = ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        completion_provider: Some(CompletionOptions::default()),
+        hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        definition_provider: Some(lsp_types::OneOf::Left(true)),
+        inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        ..ServerCapabilities::default()
+    };
+
+    let initialize_result = InitializeResult {
+        capabilities: server_capabilities,
+        server_info: None,
+    };
+
+    connection
+        .initialize(serde_json::to_value(initialize_result).map_err(|err| err.to_string())?)
+        .map_err(|err| err.to_string())?;
+
+    let mut docs: HashMap<Uri, String> = HashMap::new();
+    let mut module_cache: HashMap<String, CachedModule> = HashMap::new();
+    let mut doc_cache: HashMap<Uri, DocCacheEntry> = HashMap::new();
+
+    for message in &connection.receiver {
+        match message {
+            Message::Request(request) => {
+                if connection
+                    .handle_shutdown(&request)
+                    .map_err(|err| err.to_string())?
+                {
+                    break;
+                }
+                if let Some(response) =
+                    handle_request(&docs, &mut doc_cache, &mut module_cache, &request)?
+                {
+                    connection
+                        .sender
+                        .send(Message::Response(response))
+                        .map_err(|err| err.to_string())?;
+                } else {
+                    let response = Response::new_err(
+                        request.id.clone(),
+                        lsp_server::ErrorCode::MethodNotFound as i32,
+                        "unknown request".to_string(),
+                    );
+                    connection
+                        .sender
+                        .send(Message::Response(response))
+                        .map_err(|err| err.to_string())?;
+                }
+            }
+            Message::Notification(notification) => {
+                if let Some((url, text)) =
+                    handle_notification(&mut docs, &mut doc_cache, &notification)?
+                {
+                    let module = get_cached_module(&text, &url, &mut doc_cache);
+                    publish_diagnostics(&connection, &url, &text, module.as_ref())?;
+                }
+            }
+            Message::Response(_) => {}
+        }
+    }
+
+    io_threads.join().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn handle_notification(
+    docs: &mut HashMap<Uri, String>,
+    doc_cache: &mut HashMap<Uri, DocCacheEntry>,
+    notification: &Notification,
+) -> Result<Option<(Uri, String)>, String> {
+    match notification.method.as_str() {
+        "textDocument/didOpen" => {
+            let params: lsp_types::DidOpenTextDocumentParams =
+                serde_json::from_value(notification.params.clone())
+                    .map_err(|err| err.to_string())?;
+            let url = params.text_document.uri;
+            let text = params.text_document.text;
+            docs.insert(url.clone(), text.clone());
+            Ok(Some((url, text)))
+        }
+        "textDocument/didChange" => {
+            let params: lsp_types::DidChangeTextDocumentParams =
+                serde_json::from_value(notification.params.clone())
+                    .map_err(|err| err.to_string())?;
+            let url = params.text_document.uri;
+            let text = merge_changes(docs.get(&url), params.content_changes);
+            docs.insert(url.clone(), text.clone());
+            Ok(Some((url, text)))
+        }
+        "textDocument/didSave" => {
+            let params: lsp_types::DidSaveTextDocumentParams =
+                serde_json::from_value(notification.params.clone())
+                    .map_err(|err| err.to_string())?;
+            let url = params.text_document.uri;
+            let text = if let Some(text) = params.text {
+                docs.insert(url.clone(), text.clone());
+                text
+            } else {
+                docs.get(&url).cloned().unwrap_or_default()
+            };
+            Ok(Some((url, text)))
+        }
+        "textDocument/didClose" => {
+            let params: lsp_types::DidCloseTextDocumentParams =
+                serde_json::from_value(notification.params.clone())
+                    .map_err(|err| err.to_string())?;
+            let url = params.text_document.uri;
+            docs.remove(&url);
+            doc_cache.remove(&url);
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn handle_request(
+    docs: &HashMap<Uri, String>,
+    doc_cache: &mut HashMap<Uri, DocCacheEntry>,
+    module_cache: &mut HashMap<String, CachedModule>,
+    request: &lsp_server::Request,
+) -> Result<Option<Response>, String> {
+    match request.method.as_str() {
+        "textDocument/hover" => {
+            let params: HoverParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params
+                .text_document_position_params
+                .text_document
+                .uri
+                .clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let hover = provide_hover(text, module.as_ref(), module_cache, &params);
+                Response::new_ok(request.id.clone(), serde_json::to_value(hover).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/definition" => {
+            let params: GotoDefinitionParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params
+                .text_document_position_params
+                .text_document
+                .uri
+                .clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let definition =
+                    provide_definition(text, module.as_ref(), module_cache, &url, &params);
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(definition).unwrap(),
+                )
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/completion" => {
+            let params: CompletionParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document_position.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let completion = provide_completion(text, module.as_ref(), &url, module_cache);
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(completion).unwrap(),
+                )
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/inlayHint" => {
+            let params: InlayHintParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let hints = provide_inlay_hints(text, module.as_ref());
+                Response::new_ok(request.id.clone(), serde_json::to_value(hints).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/codeAction" => {
+            let params: lsp_types::CodeActionParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let actions = provide_code_actions(text, &url, &params);
+                Response::new_ok(request.id.clone(), serde_json::to_value(actions).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn provide_hover(
+    text: &str,
+    module: Option<&Module>,
+    module_cache: &mut HashMap<String, CachedModule>,
+    params: &HoverParams,
+) -> Option<Hover> {
+    let position = params.text_document_position_params.position;
+    let offset = position_to_offset(text, position);
+    let (name, qualifier) = ident_at_offset_with_qualifier(text, offset)?;
+    let functions = module
+        .map(collect_functions_with_inferred)
+        .or_else(|| collect_functions(text))?;
+    if qualifier.is_none() {
+        if let Some(info) = functions.get(&name) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: info.signature.clone(),
+                }),
+                range: Some(span_to_range(text, info.span)),
+            });
+        }
+    }
+
+    let imports = module
+        .map(collect_imports_from_module)
+        .or_else(|| collect_imports(text));
+    let had_qualifier = qualifier.is_some();
+    if let Some(qualifier) = qualifier {
+        if let Some(imports) = imports.as_ref() {
+            if let Some(info) = resolve_imported_function(
+                imports,
+                module_cache,
+                &params.text_document_position_params.text_document.uri,
+                &qualifier,
+                &name,
+            ) {
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::PlainText,
+                        value: info.signature,
+                    }),
+                    range: None,
+                });
+            }
+        }
+    }
+
+    // Only try local function lookup if we had a qualifier (import resolution failed)
+    // When no qualifier, we already checked at line 217 above
+    if had_qualifier {
+        if let Some(info) = functions.get(&name) {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::PlainText,
+                    value: info.signature.clone(),
+                }),
+                range: Some(span_to_range(text, info.span)),
+            });
+        }
+    }
+
+    let imports = imports?;
+    let info = imports.get(&name)?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::PlainText,
+            value: format!("import \"{}\" as {}", info.path, name),
+        }),
+        range: Some(span_to_range(text, info.span)),
+    })
+}
+
+fn provide_definition(
+    text: &str,
+    module: Option<&Module>,
+    module_cache: &mut HashMap<String, CachedModule>,
+    url: &Uri,
+    params: &GotoDefinitionParams,
+) -> Option<GotoDefinitionResponse> {
+    let position = params.text_document_position_params.position;
+    let offset = position_to_offset(text, position);
+    let (name, qualifier) = ident_at_offset_with_qualifier(text, offset)?;
+    let functions = module
+        .map(collect_functions_with_inferred)
+        .or_else(|| collect_functions(text));
+    if let Some(functions) = functions {
+        if let Some(info) = functions.get(&name) {
+            let location = Location {
+                uri: url.clone(),
+                range: span_to_range(text, info.span),
+            };
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
+    }
+
+    let imports = module
+        .map(collect_imports_from_module)
+        .or_else(|| collect_imports(text));
+    if let Some(qualifier) = qualifier {
+        if let Some(imports) = imports.as_ref() {
+            if let Some(info) =
+                resolve_imported_function(imports, module_cache, url, &qualifier, &name)
+            {
+                let location = Location {
+                    uri: info.uri,
+                    range: info.range,
+                };
+                return Some(GotoDefinitionResponse::Scalar(location));
+            }
+        }
+    }
+
+    if let Some(imports) = imports {
+        if let Some(info) = imports.get(&name) {
+            let location = Location {
+                uri: url.clone(),
+                range: span_to_range(text, info.span),
+            };
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
+    }
+
+    None
+}
+
+fn provide_completion(
+    text: &str,
+    module: Option<&Module>,
+    url: &Uri,
+    module_cache: &mut HashMap<String, CachedModule>,
+) -> CompletionResponse {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let functions = module
+        .map(collect_functions_with_inferred)
+        .or_else(|| collect_functions(text));
+    if let Some(functions) = functions {
+        for (name, info) in functions {
+            if seen.insert(name.clone()) {
+                items.push(CompletionItem {
+                    label: name,
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(info.signature),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+    }
+    let imports = module
+        .map(collect_imports_from_module)
+        .or_else(|| collect_imports(text));
+    if let Some(imports) = imports {
+        for (alias, info) in imports {
+            if seen.insert(alias.clone()) {
+                items.push(CompletionItem {
+                    label: alias.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some(format!("import \"{}\"", info.path)),
+                    ..CompletionItem::default()
+                });
+            }
+            if let Some(module) = load_module_cached(&info.path, url, module_cache) {
+                for (name, signature) in module.functions {
+                    let label = format!("{alias}.{name}");
+                    if seen.insert(label.clone()) {
+                        items.push(CompletionItem {
+                            label,
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(signature),
+                            ..CompletionItem::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for builtin in builtin_completions() {
+        if seen.insert(builtin.label.clone()) {
+            items.push(builtin);
+        }
+    }
+    CompletionResponse::Array(items)
+}
+
+fn provide_inlay_hints(text: &str, module: Option<&Module>) -> Vec<InlayHint> {
+    let module = match module {
+        Some(module) => module.clone(),
+        None => match parse_module(text) {
+            Ok(module) => module,
+            Err(_) => return Vec::new(),
+        },
+    };
+    let inferred_returns = at_check::infer_function_returns(&module);
+    let mut hints = Vec::new();
+    for func in module.functions {
+        if func.return_ty.is_none() {
+            if let Some(inferred) = inferred_returns.get(&func.name.name) {
+                let label = format!("-> {}", inferred);
+                let position = offset_to_position(text, func.name.span.end);
+                hints.push(InlayHint {
+                    position,
+                    label: lsp_types::InlayHintLabel::String(label),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(true),
+                    padding_right: Some(false),
+                    data: None,
+                });
+            }
+        }
+    }
+    hints
+}
+
+fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec<CodeAction> {
+    let module = match parse_module(text) {
+        Ok(module) => module,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut actions = Vec::new();
+
+    if let Err(lint_errors) = at_lint::lint_module(&module) {
+        let start = params.range.start;
+        let end = params.range.end;
+
+        for error in lint_errors {
+            if let Some(fix) = error.fix {
+                let fix_start = offset_to_position(text, fix.span.start);
+                let fix_end = offset_to_position(text, fix.span.end);
+
+                if fix_start.line >= start.line
+                    && fix_start.line <= end.line
+                    && fix_end.line >= start.line
+                    && fix_end.line <= end.line
+                {
+                    actions.push(CodeAction {
+                        title: fix.description.clone(),
+                        kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                        diagnostics: None,
+                        edit: Some(lsp_types::WorkspaceEdit {
+                            changes: Some({
+                                let mut map = HashMap::new();
+                                map.insert(
+                                    url.clone(),
+                                    vec![lsp_types::TextEdit {
+                                        range: Range {
+                                            start: fix_start,
+                                            end: fix_end,
+                                        },
+                                        new_text: fix.replacement,
+                                    }],
+                                );
+                                map
+                            }),
+                            document_changes: None,
+                            change_annotations: None,
+                        }),
+                        command: None,
+                        is_preferred: None,
+                        disabled: None,
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    actions
+}
+
+struct ImportInfo {
+    path: String,
+    span: Span,
+}
+
+struct ImportedFunctionInfo {
+    signature: String,
+    uri: Uri,
+    range: Range,
+}
+
+#[derive(Clone)]
+struct CachedModule {
+    mtime: Option<SystemTime>,
+    source: String,
+    functions: HashMap<String, String>,
+    spans: HashMap<String, Span>,
+}
+
+#[derive(Clone)]
+struct DocCacheEntry {
+    hash: u64,
+    module: Module,
+}
+
+fn collect_imports(text: &str) -> Option<HashMap<String, ImportInfo>> {
+    let module = parse_module(text).ok()?;
+    Some(collect_imports_from_module(&module))
+}
+
+fn collect_imports_from_module(module: &Module) -> HashMap<String, ImportInfo> {
+    let mut imports = HashMap::new();
+    for stmt in &module.stmts {
+        if let at_syntax::Stmt::Import { path, alias } = stmt {
+            imports.insert(
+                alias.name.clone(),
+                ImportInfo {
+                    path: path.clone(),
+                    span: alias.span,
+                },
+            );
+        }
+    }
+    imports
+}
+
+fn resolve_imported_function(
+    imports: &HashMap<String, ImportInfo>,
+    module_cache: &mut HashMap<String, CachedModule>,
+    base_uri: &Uri,
+    alias: &str,
+    name: &str,
+) -> Option<ImportedFunctionInfo> {
+    let info = imports.get(alias)?;
+    let module = load_module_cached(&info.path, base_uri, module_cache)?;
+    let signature = module.functions.get(name)?.clone();
+    let span = module.spans.get(name).cloned()?;
+    let resolved = resolve_import_path(base_uri, &info.path)?;
+    Some(ImportedFunctionInfo {
+        signature,
+        uri: path_to_uri(&resolved)?,
+        range: span_to_range(&module.source, span),
+    })
+}
+
+fn load_module_cached(
+    path: &str,
+    base_uri: &Uri,
+    cache: &mut HashMap<String, CachedModule>,
+) -> Option<CachedModule> {
+    let resolved = resolve_import_path(base_uri, path)?;
+    let canonical = std::path::Path::new(&resolved).canonicalize().ok()?;
+    let key = canonical.to_string_lossy().to_string();
+    let metadata = std::fs::metadata(&canonical).ok();
+    let mtime = metadata.and_then(|data| data.modified().ok());
+
+    if let Some(entry) = cache.get(&key) {
+        if entry.mtime == mtime {
+            return Some(entry.clone());
+        }
+    }
+
+    let source = std::fs::read_to_string(&canonical).ok()?;
+    let module = parse_module(&source).ok()?;
+    let info = build_cached_module(&module, source.clone(), mtime);
+    cache.insert(key, info.clone());
+    Some(info)
+}
+
+fn build_cached_module(module: &Module, source: String, mtime: Option<SystemTime>) -> CachedModule {
+    let mut functions = HashMap::new();
+    let mut spans = HashMap::new();
+    let inferred = at_check::infer_function_returns(module);
+    for func in &module.functions {
+        let signature =
+            format_function_signature_with_inferred(func, inferred.get(&func.name.name));
+        functions.insert(func.name.name.clone(), signature);
+        spans.insert(func.name.name.clone(), func.name.span);
+    }
+    CachedModule {
+        mtime,
+        source,
+        functions,
+        spans,
+    }
+}
+
+fn get_cached_module(
+    text: &str,
+    uri: &Uri,
+    cache: &mut HashMap<Uri, DocCacheEntry>,
+) -> Option<Module> {
+    let hash = hash_text(text);
+    if let Some(entry) = cache.get(uri) {
+        if entry.hash == hash {
+            return Some(entry.module.clone());
+        }
+    }
+    let module = parse_module(text).ok()?;
+    cache.insert(
+        uri.clone(),
+        DocCacheEntry {
+            hash,
+            module: module.clone(),
+        },
+    );
+    Some(module)
+}
+
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return resolve_remote_import(path);
+    }
+
+    if path == "std" || path == "std.at" {
+        let root = std::env::current_dir().ok()?;
+        return Some(
+            root.join("stdlib")
+                .join("std.at")
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+
+    let base_path = uri_to_path(base_uri)?;
+    let base_dir = std::path::Path::new(&base_path).parent()?.to_path_buf();
+    let candidate = std::path::Path::new(path);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base_dir.join(candidate)
+    };
+    Some(resolved.to_string_lossy().to_string())
+}
+
+fn uri_to_path(uri: &Uri) -> Option<String> {
+    let value = uri.to_string();
+    if let Some(stripped) = value.strip_prefix("file://") {
+        // Percent-decode the path
+        let mut result = String::new();
+        let mut chars = stripped.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                let hex1 = chars.next()?;
+                let hex2 = chars.next()?;
+                let hex_str = format!("{}{}", hex1, hex2);
+                if let Ok(byte) = u8::from_str_radix(&hex_str, 16) {
+                    result.push(byte as char);
+                } else {
+                    return None;
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        return Some(result);
+    }
+    None
+}
+
+fn resolve_remote_import(url: &str) -> Option<String> {
+    let root = std::env::current_dir().ok()?;
+    let lock_path = root.join(".at").join("lock");
+    if !lock_path.exists() {
+        if let Some(cached) = resolve_legacy_cached_path(&root, url) {
+            return Some(cached);
+        }
+        return fetch_and_cache_remote(&root, url);
+    }
+
+    let contents = std::fs::read_to_string(lock_path).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let entry_url = parts.next()?;
+        if entry_url == "version" {
+            continue;
+        }
+        let hash = parts.next()?;
+        if entry_url == url {
+            let path = root.join(".at").join("cache").join(format!("{hash}.at"));
+            if path.exists() {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    if let Some(cached) = resolve_legacy_cached_path(&root, url) {
+        return Some(cached);
+    }
+    fetch_and_cache_remote(&root, url)
+}
+
+fn resolve_legacy_cached_path(root: &std::path::Path, url: &str) -> Option<String> {
+    let legacy = url
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace('/', "_")
+        .replace(':', "_");
+    let path = root.join(".at").join("cache").join(legacy);
+    if path.exists() {
+        return Some(path.to_string_lossy().to_string());
+    }
+    None
+}
+
+fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Option<String> {
+    let response = ureq::get(url).call().ok()?;
+    let contents = response.into_string().ok()?;
+    let hash = hash_contents(&contents);
+    let cache_dir = root.join(".at").join("cache");
+    std::fs::create_dir_all(&cache_dir).ok()?;
+    let path = cache_dir.join(format!("{hash}.at"));
+    std::fs::write(&path, contents).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
+fn hash_contents(contents: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(contents.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn path_to_uri(path: &str) -> Option<Uri> {
+    let path = std::path::Path::new(path).canonicalize().ok()?;
+    let path_str = path.to_string_lossy();
+
+    // Percent-encode special characters
+    let mut encoded = String::new();
+    for ch in path_str.chars() {
+        match ch {
+            ' ' => encoded.push_str("%20"),
+            '%' => encoded.push_str("%25"),
+            '?' => encoded.push_str("%3F"),
+            '#' => encoded.push_str("%23"),
+            '[' => encoded.push_str("%5B"),
+            ']' => encoded.push_str("%5D"),
+            '@' => encoded.push_str("%40"),
+            '!' => encoded.push_str("%21"),
+            '$' => encoded.push_str("%24"),
+            '&' => encoded.push_str("%26"),
+            '\'' => encoded.push_str("%27"),
+            '(' => encoded.push_str("%28"),
+            ')' => encoded.push_str("%29"),
+            '*' => encoded.push_str("%2A"),
+            '+' => encoded.push_str("%2B"),
+            ',' => encoded.push_str("%2C"),
+            ';' => encoded.push_str("%3B"),
+            '=' => encoded.push_str("%3D"),
+            ch => encoded.push(ch),
+        }
+    }
+
+    let url = format!("file://{}", encoded);
+    url.parse().ok()
+}
+
+fn builtin_completions() -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    for name in [
+        "assert",
+        "assert_eq",
+        "some",
+        "none",
+        "ok",
+        "err",
+        "is_some",
+        "is_none",
+        "is_ok",
+        "is_err",
+    ] {
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("builtin".to_string()),
+            ..CompletionItem::default()
+        });
+    }
+    for name in ["time", "rng"] {
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some("effect".to_string()),
+            ..CompletionItem::default()
+        });
+    }
+    items
+}
+
+fn merge_changes(
+    existing: Option<&String>,
+    changes: Vec<TextDocumentContentChangeEvent>,
+) -> String {
+    if let Some(change) = changes.into_iter().last() {
+        return change.text;
+    }
+    existing.cloned().unwrap_or_default()
+}
+
+fn publish_diagnostics(
+    connection: &Connection,
+    url: &Uri,
+    text: &str,
+    module: Option<&Module>,
+) -> Result<(), String> {
+    let mut diagnostics = Vec::new();
+    match module.cloned().or_else(|| parse_module(text).ok()) {
+        Some(module) => {
+            if let Err(errors) = at_check::typecheck_module(&module) {
+                for error in errors {
+                    diagnostics.push(type_error_to_diagnostic(text, error));
+                }
+            }
+            if let Err(errors) = at_lint::lint_module(&module) {
+                for error in errors {
+                    diagnostics.push(lint_error_to_diagnostic(text, error));
+                }
+            }
+            let mut compiler = Compiler::new();
+            if let Err(err) = compiler.compile_module(&module) {
+                diagnostics.extend(compile_error_to_diagnostic(text, err));
+            }
+        }
+        None => {
+            if let Err(err) = parse_module(text) {
+                diagnostics.push(parse_error_to_diagnostic(text, err));
+            }
+        }
+    };
+
+    let params = lsp_types::PublishDiagnosticsParams {
+        uri: url.clone(),
+        diagnostics,
+        version: None,
+    };
+
+    let notification = Notification::new("textDocument/publishDiagnostics".to_string(), params);
+    connection
+        .sender
+        .send(Message::Notification(notification))
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn parse_error_to_diagnostic(text: &str, err: ParseError) -> Diagnostic {
+    let (message, span, code) = match err {
+        ParseError::UnexpectedToken {
+            expected,
+            found,
+            span,
+        } => (
+            format!("expected {expected}, found {found:?}"),
+            span,
+            "E001",
+        ),
+        ParseError::UnterminatedString { span } => {
+            ("unterminated string".to_string(), span, "E002")
+        }
+        ParseError::UnterminatedBlockComment { span } => {
+            ("unterminated block comment".to_string(), span, "E003")
+        }
+        ParseError::InvalidNumber { span } => ("invalid number".to_string(), span, "E004"),
+    };
+
+    let range = span_to_range(text, span);
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(lsp_types::NumberOrString::String(code.to_string())),
+        code_description: None,
+        source: Some("at".to_string()),
+        message,
+        related_information: None,
+        tags: None,
+        data: None,
+    }
+}
+
+fn type_error_to_diagnostic(text: &str, error: at_check::TypeError) -> Diagnostic {
+    let range = error
+        .span
+        .map(|span| span_to_range(text, span))
+        .unwrap_or(Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        });
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(lsp_types::NumberOrString::String("T001".to_string())),
+        code_description: None,
+        source: Some("at".to_string()),
+        message: error.message,
+        related_information: None,
+        tags: None,
+        data: None,
+    }
+}
+
+fn lint_error_to_diagnostic(text: &str, error: at_lint::LintError) -> Diagnostic {
+    let range = error
+        .span
+        .map(|span| span_to_range(text, span))
+        .unwrap_or(Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        });
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(lsp_types::NumberOrString::String("L001".to_string())),
+        code_description: None,
+        source: Some("at".to_string()),
+        message: error.message,
+        related_information: None,
+        tags: None,
+        data: None,
+    }
+}
+
+fn compile_error_to_diagnostic(text: &str, err: at_vm::VmError) -> Vec<Diagnostic> {
+    match err {
+        at_vm::VmError::Compile { message, span } => {
+            let range = span.map(|span| span_to_range(text, span)).unwrap_or(Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            });
+            vec![Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("at".to_string()),
+                message,
+                related_information: None,
+                tags: None,
+                data: None,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn span_to_range(text: &str, span: Span) -> Range {
+    let start = offset_to_position(text, span.start);
+    let end = offset_to_position(text, span.end);
+    Range { start, end }
+}
+
+fn offset_to_position(text: &str, offset: usize) -> Position {
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut count = 0usize;
+    for ch in text.chars() {
+        if count >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            // Count UTF-16 code units (surrogate pairs count as 2)
+            character += ch.len_utf16() as u32;
+        }
+        count += ch.len_utf8();
+    }
+    Position { line, character }
+}
+
+fn position_to_offset(text: &str, position: Position) -> usize {
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut count = 0usize;
+    for ch in text.chars() {
+        if line == position.line && character == position.character {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf16() as u32;
+        }
+        count += ch.len_utf8();
+    }
+    count
+}
+
+fn ident_at_offset(text: &str, offset: usize) -> Option<String> {
+    if offset > text.len() {
+        return None;
+    }
+    let mut start = offset;
+    let mut end = offset;
+
+    while start > 0 {
+        let prev = text[..start].chars().next_back()?;
+        if !is_ident_continue(prev) {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+
+    while end < text.len() {
+        let next = text[end..].chars().next()?;
+        if !is_ident_continue(next) {
+            break;
+        }
+        end += next.len_utf8();
+    }
+
+    if start == end {
+        return None;
+    }
+    Some(text[start..end].to_string())
+}
+
+fn ident_at_offset_with_qualifier(text: &str, offset: usize) -> Option<(String, Option<String>)> {
+    if offset > text.len() {
+        return None;
+    }
+    let name = ident_at_offset(text, offset)?;
+    if let Some((qualifier, _)) = split_qualified_ident(text, offset) {
+        return Some((name, Some(qualifier)));
+    }
+    Some((name, None))
+}
+
+fn split_qualified_ident(text: &str, offset: usize) -> Option<(String, String)> {
+    if offset == 0 {
+        return None;
+    }
+    let mut cursor = offset;
+    while cursor > 0 {
+        let prev = text[..cursor].chars().next_back()?;
+        if prev == '.' {
+            break;
+        }
+        if !is_ident_continue(prev) {
+            return None;
+        }
+        cursor -= prev.len_utf8();
+    }
+    if cursor == 0 {
+        return None;
+    }
+    let before_dot = cursor - 1;
+    let mut start = before_dot;
+    while start > 0 {
+        let prev = text[..start].chars().next_back()?;
+        if !is_ident_continue(prev) {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+    let qualifier = text[start..before_dot].to_string();
+    let name = ident_at_offset(text, offset)?;
+    Some((qualifier, name))
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+struct FunctionInfo {
+    span: Span,
+    signature: String,
+}
+
+fn collect_functions(text: &str) -> Option<HashMap<String, FunctionInfo>> {
+    let module = parse_module(text).ok()?;
+    Some(collect_functions_with_inferred(&module))
+}
+
+fn collect_functions_with_inferred(module: &Module) -> HashMap<String, FunctionInfo> {
+    let inferred = at_check::infer_function_returns(module);
+    let mut info = HashMap::new();
+    for func in &module.functions {
+        let signature =
+            format_function_signature_with_inferred(func, inferred.get(&func.name.name));
+        info.insert(
+            func.name.name.clone(),
+            FunctionInfo {
+                span: func.name.span,
+                signature,
+            },
+        );
+    }
+    info
+}
+
+fn format_function_signature_with_inferred(
+    func: &at_syntax::Function,
+    inferred_return: Option<&String>,
+) -> String {
+    let mut out = String::new();
+    if func.is_tool {
+        out.push_str("tool ");
+    }
+    out.push_str("fn ");
+    out.push_str(&func.name.name);
+    out.push('(');
+    for (idx, param) in func.params.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&param.name.name);
+        if let Some(ty) = &param.ty {
+            out.push_str(": ");
+            format_type_ref(ty, &mut out);
+        }
+    }
+    out.push(')');
+    if let Some(ty) = &func.return_ty {
+        out.push_str(" -> ");
+        format_type_ref(ty, &mut out);
+    } else if let Some(inferred) = inferred_return {
+        out.push_str(" -> ");
+        out.push_str(inferred);
+        out.push_str(" (inferred)");
+    }
+    out
+}
+
+fn format_type_ref(ty: &TypeRef, out: &mut String) {
+    out.push_str(&ty.name.name);
+    if !ty.args.is_empty() {
+        out.push('<');
+        for (idx, arg) in ty.args.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            format_type_ref(arg, out);
+        }
+        out.push('>');
+    }
+}
