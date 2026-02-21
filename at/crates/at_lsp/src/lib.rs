@@ -890,9 +890,11 @@ fn provide_completion(
             }
             if seen.insert(name.clone()) {
                 items.push(CompletionItem {
-                    label: name,
+                    label: name.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some(info.signature),
+                    insert_text: Some(format!("{}()", name)),
+                    insert_text_format: Some(lsp_types::InsertTextFormat::PLAIN_TEXT),
                     ..CompletionItem::default()
                 });
             }
@@ -919,9 +921,11 @@ fn provide_completion(
                     }
                     if seen.insert(label.clone()) {
                         items.push(CompletionItem {
-                            label,
+                            label: label.clone(),
                             kind: Some(CompletionItemKind::FUNCTION),
                             detail: Some(signature),
+                            insert_text: Some(format!("{label}()")),
+                            insert_text_format: Some(lsp_types::InsertTextFormat::PLAIN_TEXT),
                             ..CompletionItem::default()
                         });
                     }
@@ -1334,6 +1338,8 @@ fn builtin_completions() -> Vec<CompletionItem> {
             label: name.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
             detail: Some("builtin".to_string()),
+            insert_text: Some(format!("{}()", name)),
+            insert_text_format: Some(lsp_types::InsertTextFormat::PLAIN_TEXT),
             ..CompletionItem::default()
         });
     }
