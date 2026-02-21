@@ -166,6 +166,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::Closure { span, .. } => Some(span.start),
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
+        Expr::Group { span, .. } => Some(span.start),
     }
 }
 
@@ -207,6 +208,7 @@ fn expr_end(expr: &Expr) -> Option<usize> {
         Expr::Closure { span, .. } => Some(span.end),
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
+        Expr::Group { span, .. } => Some(span.end),
     }
 }
 
@@ -763,6 +765,14 @@ fn format_expr_prec_indent(
             format_expr_prec_indent(body, out, 0, indent, comment_state);
             if let Some(body_span) = expr_span(body) {
                 comment_state.emit_inline_between(out, body_span, body_span + 1);
+            }
+        }
+        Expr::Group { expr, .. } => {
+            out.push('(');
+            format_expr_prec_indent(expr, out, 0, indent, comment_state);
+            out.push(')');
+            if let Some(group_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, group_end, group_end + 1);
             }
         }
     }

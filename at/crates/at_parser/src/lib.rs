@@ -1154,8 +1154,15 @@ impl<'a> Parser<'a> {
                     });
                 }
 
+                let end_span = self.current.span;
                 self.expect(TokenKind::RParen)?;
-                Ok(first_expr)
+                Ok(Expr::Group {
+                    span: Span {
+                        start: paren_span.start,
+                        end: end_span.end,
+                    },
+                    expr: Box::new(first_expr),
+                })
             }
             TokenKind::Pipe => self.parse_closure_expr(),
             TokenKind::LBracket => self.parse_array_literal(),

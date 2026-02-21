@@ -105,6 +105,10 @@ pub enum Expr {
         variant: Ident,
         payload: Option<Box<Expr>>,
     },
+    Group {
+        span: Span,
+        expr: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

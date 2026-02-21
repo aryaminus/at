@@ -904,6 +904,9 @@ impl Compiler {
                     Some(name.span),
                 );
             }
+            Expr::Group { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+            }
             Expr::Closure { span, params, body } => {
                 self.compile_closure_expr(*span, params, body, chunk)?;
             }
@@ -1739,7 +1742,7 @@ impl Compiler {
                     captures.push(ident.name.clone());
                 }
             }
-            Expr::Unary { expr, .. } => {
+            Expr::Unary { expr, .. } | Expr::Group { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::Binary { left, right, .. } => {
@@ -3713,6 +3716,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr) => expr_span(expr),
+        Expr::Group { span, .. } => Some(*span),
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),

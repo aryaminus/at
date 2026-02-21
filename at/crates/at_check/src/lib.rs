@@ -777,6 +777,7 @@ impl TypeChecker {
                 }
                 SimpleType::Custom(name.name.clone(), Vec::new())
             }
+            Expr::Group { expr, .. } => self.check_expr(expr),
             Expr::StructLiteral { name, fields, .. } => {
                 let struct_fields = self.structs.get(&name.name).cloned();
                 if struct_fields.is_none() {
@@ -2867,6 +2868,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Closure { span, .. } => Some(*span),
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
+        Expr::Group { span, .. } => Some(*span),
         Expr::Float(_, span) => Some(*span),
     }
 }

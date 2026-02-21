@@ -1611,6 +1611,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
         at_syntax::Expr::Closure { span, .. } => Some(*span),
         at_syntax::Expr::StructLiteral { span, .. } => Some(*span),
         at_syntax::Expr::EnumLiteral { span, .. } => Some(*span),
+        at_syntax::Expr::Group { span, .. } => Some(*span),
     }
 }
 

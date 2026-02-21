@@ -391,6 +391,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(expr, used);
             }
         }
+        Expr::Group { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
+        }
         Expr::Closure { body, .. } => {
             collect_used_capabilities_expr(body, used);
         }
@@ -544,6 +547,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
             if let Some(expr) = payload {
                 lint_unused_match_bindings_expr(expr, errors);
             }
+        }
+        Expr::Group { expr, .. } => {
+            lint_unused_match_bindings_expr(expr, errors);
         }
         Expr::Closure { body, .. } => {
             lint_unused_match_bindings_expr(body, errors);
@@ -813,6 +819,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(expr, used);
             }
         }
+        Expr::Group { expr, .. } => {
+            collect_local_uses_expr(expr, used);
+        }
         Expr::Closure { body, .. } => {
             collect_local_uses_expr(body, used);
         }
@@ -969,6 +978,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(expr, used);
             }
         }
+        Expr::Group { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
+        }
         Expr::Closure { body, .. } => {
             collect_alias_usage_expr(body, used);
         }
@@ -1120,6 +1132,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
             if let Some(expr) = payload {
                 collect_called_functions_expr(expr, used);
             }
+        }
+        Expr::Group { expr, .. } => {
+            collect_called_functions_expr(expr, used);
         }
         Expr::Closure { body, .. } => {
             collect_called_functions_expr(body, used);
