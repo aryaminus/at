@@ -1048,7 +1048,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
-            let pattern = self.parse_match_pattern()?;
+            let mut patterns = vec![self.parse_match_pattern()?];
+            while self.current.kind == TokenKind::Pipe {
+                self.advance();
+                patterns.push(self.parse_match_pattern()?);
+            }
             let guard = if self.current.kind == TokenKind::If {
                 self.advance();
                 Some(self.parse_expr()?)
@@ -1057,11 +1061,13 @@ impl<'a> Parser<'a> {
             };
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
-            arms.push(MatchArm {
-                pattern,
-                guard,
-                body,
-            });
+            for pattern in patterns {
+                arms.push(MatchArm {
+                    pattern,
+                    guard: guard.clone(),
+                    body: body.clone(),
+                });
+            }
             if self.current.kind == TokenKind::Comma {
                 self.advance();
                 // After comma, we must have another arm or closing brace
