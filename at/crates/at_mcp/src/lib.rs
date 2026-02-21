@@ -326,6 +326,25 @@ impl McpServer {
                                                 "id": id,
                                                 "result": payload
                                             })
+                                        } else if let Some(image) = result.get("image") {
+                                            let data = image
+                                                .get("data")
+                                                .cloned()
+                                                .unwrap_or(JsonValue::Null);
+                                            let mime_type = image
+                                                .get("mimeType")
+                                                .cloned()
+                                                .unwrap_or_else(|| json!("image/png"));
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": {
+                                                    "content": [
+                                                        {"type": "image", "data": data, "mimeType": mime_type}
+                                                    ],
+                                                    "isError": false
+                                                }
+                                            })
                                         } else {
                                             json!({
                                                 "jsonrpc": "2.0",
