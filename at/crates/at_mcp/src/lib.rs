@@ -143,6 +143,7 @@ impl McpServer {
                             },
                             "capabilities": {
                                 "tools": {},
+                                "roots": {},
                             }
                         }
                     });
@@ -283,6 +284,13 @@ impl McpServer {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {}
+                }),
+                "roots/list" => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "roots": []
+                    }
                 }),
                 _ => json!({
                     "jsonrpc": "2.0",
