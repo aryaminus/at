@@ -289,7 +289,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push_str(";\n");
         }
         Stmt::While {
-            condition, body, ..
+            condition,
+            body,
+            while_span,
         } => {
             indent_to(out, indent);
             out.push_str("while ");
@@ -303,10 +305,17 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}\n");
+            out.push_str("}");
+            comment_state.emit_inline_between(out, while_span.start, while_span.end);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
         }
         Stmt::For {
-            item, iter, body, ..
+            item,
+            iter,
+            body,
+            for_span,
         } => {
             indent_to(out, indent);
             out.push_str("for ");
@@ -322,7 +331,11 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}\n");
+            out.push_str("}");
+            comment_state.emit_inline_between(out, for_span.start, for_span.end);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
         }
         Stmt::Break { .. } => {
             indent_to(out, indent);
@@ -572,6 +585,9 @@ fn format_expr_prec_indent(
                     out.push_str(", ");
                 }
                 format_expr_prec_indent(item, out, 0, indent, comment_state);
+                if let Some(item_span) = expr_span(item) {
+                    comment_state.emit_inline_between(out, item_span, item_span + 1);
+                }
             }
             out.push(']');
         }
@@ -588,6 +604,9 @@ fn format_expr_prec_indent(
                     out.push_str(", ");
                 }
                 format_expr_prec_indent(item, out, 0, indent, comment_state);
+                if let Some(item_span) = expr_span(item) {
+                    comment_state.emit_inline_between(out, item_span, item_span + 1);
+                }
             }
             out.push(')');
         }
@@ -629,6 +648,9 @@ fn format_expr_prec_indent(
                 out.push_str(&field.name.name);
                 out.push_str(": ");
                 format_expr_prec_indent(&field.value, out, 0, indent, comment_state);
+                if let Some(value_span) = expr_span(&field.value) {
+                    comment_state.emit_inline_between(out, value_span, value_span + 1);
+                }
             }
             out.push_str(" }");
         }
@@ -644,6 +666,9 @@ fn format_expr_prec_indent(
             if let Some(expr) = payload {
                 out.push('(');
                 format_expr_prec_indent(expr, out, 0, indent, comment_state);
+                if let Some(expr_span) = expr_span(expr) {
+                    comment_state.emit_inline_between(out, expr_span, expr_span + 1);
+                }
                 out.push(')');
             }
         }
@@ -657,6 +682,9 @@ fn format_expr_prec_indent(
             }
             out.push_str("| ");
             format_expr_prec_indent(body, out, 0, indent, comment_state);
+            if let Some(body_span) = expr_span(body) {
+                comment_state.emit_inline_between(out, body_span, body_span + 1);
+            }
         }
     }
 }
