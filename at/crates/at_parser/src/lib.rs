@@ -1278,6 +1278,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_ref(&mut self) -> Result<TypeRef, ParseError> {
+        if self.current.kind == TokenKind::Fn {
+            let fn_span = self.current.span;
+            self.advance();
+            self.expect(TokenKind::LParen)?;
+            let mut params = Vec::new();
+            if self.current.kind != TokenKind::RParen {
+                loop {
+                    params.push(self.parse_type_ref()?);
+                    if self.current.kind != TokenKind::Comma {
+                        break;
+                    }
+                    self.advance();
+                    if self.current.kind == TokenKind::RParen {
+                        break;
+                    }
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+            self.expect(TokenKind::Arrow)?;
+            let return_ty = self.parse_type_ref()?;
+            return Ok(TypeRef::Function {
+                fn_span,
+                params,
+                return_ty: Box::new(return_ty),
+            });
+        }
+
         let name = self.expect_ident()?;
         let args = if self.current.kind == TokenKind::Less {
             self.advance();
@@ -1299,7 +1326,7 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        Ok(TypeRef { name, args })
+        Ok(TypeRef::Named { name, args })
     }
 
     fn expect_ident(&mut self) -> Result<Ident, ParseError> {

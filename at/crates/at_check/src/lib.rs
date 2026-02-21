@@ -1766,26 +1766,41 @@ impl TypeChecker {
 
     fn expected_option_inner(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
-        if ty.name.name != "option" || ty.args.len() != 1 {
-            return None;
+        match ty {
+            TypeRef::Named { name, args } => {
+                if name.name != "option" || args.len() != 1 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[0]))
+            }
+            _ => None,
         }
-        Some(self.type_from_ref(&ty.args[0]))
     }
 
     fn expected_result_ok(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
-        if ty.name.name != "result" || ty.args.len() != 2 {
-            return None;
+        match ty {
+            TypeRef::Named { name, args } => {
+                if name.name != "result" || args.len() != 2 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[0]))
+            }
+            _ => None,
         }
-        Some(self.type_from_ref(&ty.args[0]))
     }
 
     fn expected_result_err(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
-        if ty.name.name != "result" || ty.args.len() != 2 {
-            return None;
+        match ty {
+            TypeRef::Named { name, args } => {
+                if name.name != "result" || args.len() != 2 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[1]))
+            }
+            _ => None,
         }
-        Some(self.type_from_ref(&ty.args[1]))
     }
 
     fn infer_inner_from_expr(&mut self, expr: &Expr, ty: &SimpleType) {
@@ -1824,50 +1839,59 @@ impl TypeChecker {
 
     fn type_from_ref(&mut self, ty: &TypeRef) -> SimpleType {
         self.validate_type_ref(ty);
-        match ty.name.name.as_str() {
-            "int" => SimpleType::Int,
-            "float" => SimpleType::Float,
-            "bool" => SimpleType::Bool,
-            "string" => SimpleType::String,
-            "array" => SimpleType::Array,
-            "option" => SimpleType::Option,
-            "result" => SimpleType::Result,
-            "unit" => SimpleType::Unit,
-            other => SimpleType::Custom(other.to_string()),
+        match ty {
+            TypeRef::Named { name, .. } => match name.name.as_str() {
+                "int" => SimpleType::Int,
+                "float" => SimpleType::Float,
+                "bool" => SimpleType::Bool,
+                "string" => SimpleType::String,
+                "array" => SimpleType::Array,
+                "option" => SimpleType::Option,
+                "result" => SimpleType::Result,
+                "unit" => SimpleType::Unit,
+                other => SimpleType::Custom(other.to_string()),
+            },
+            TypeRef::Function { .. } => SimpleType::Unknown,
         }
     }
 
     fn validate_type_ref(&mut self, ty: &TypeRef) {
-        match ty.name.name.as_str() {
-            "array" => {
-                if ty.args.len() != 1 {
-                    self.push_error(
-                        format!("type array expects 1 argument, got {}", ty.args.len()),
-                        Some(ty.name.span),
-                    );
+        match ty {
+            TypeRef::Named { name, args } => match name.name.as_str() {
+                "array" => {
+                    if args.len() != 1 {
+                        self.push_error(
+                            format!("type array expects 1 argument, got {}", args.len()),
+                            Some(name.span),
+                        );
+                    }
                 }
-            }
-            "option" => {
-                if ty.args.len() != 1 {
-                    self.push_error(
-                        format!("type option expects 1 argument, got {}", ty.args.len()),
-                        Some(ty.name.span),
-                    );
+                "option" => {
+                    if args.len() != 1 {
+                        self.push_error(
+                            format!("type option expects 1 argument, got {}", args.len()),
+                            Some(name.span),
+                        );
+                    }
                 }
-            }
-            "result" => {
-                if ty.args.len() != 2 {
-                    self.push_error(
-                        format!("type result expects 2 arguments, got {}", ty.args.len()),
-                        Some(ty.name.span),
-                    );
+                "result" => {
+                    if args.len() != 2 {
+                        self.push_error(
+                            format!("type result expects 2 arguments, got {}", args.len()),
+                            Some(name.span),
+                        );
+                    }
                 }
+                _ => {}
+            },
+            TypeRef::Function {
+                params, return_ty, ..
+            } => {
+                for param in params {
+                    self.validate_type_ref(param);
+                }
+                self.validate_type_ref(return_ty);
             }
-            _ => {}
-        }
-
-        for arg in &ty.args {
-            self.validate_type_ref(arg);
         }
     }
 

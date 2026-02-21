@@ -2061,60 +2061,72 @@ struct PruneReport {
 }
 
 fn type_ref_to_schema(ty: &TypeRef) -> serde_json::Value {
-    let mut schema = match ty.name.name.as_str() {
-        "array" => {
-            let mut base = type_name_to_schema("array");
-            if let Some(value_schema) = ty.args.get(0).map(type_ref_to_schema) {
-                if let Some(obj) = base.as_object_mut() {
-                    obj.insert("items".to_string(), value_schema);
-                }
-            }
-            base
-        }
-        "option" => {
-            let mut base = type_name_to_schema("option");
-            if let Some(value_schema) = ty.args.get(0).map(type_ref_to_schema) {
-                if let Some(obj) = base.as_object_mut() {
-                    if let Some(props) = obj.get_mut("properties") {
-                        if let Some(props) = props.as_object_mut() {
-                            props.insert("value".to_string(), value_schema);
+    match ty {
+        TypeRef::Named { name, args } => {
+            let mut schema = match name.name.as_str() {
+                "array" => {
+                    let mut base = type_name_to_schema("array");
+                    if let Some(value_schema) = args.get(0).map(type_ref_to_schema) {
+                        if let Some(obj) = base.as_object_mut() {
+                            obj.insert("items".to_string(), value_schema);
                         }
                     }
+                    base
                 }
-            }
-            base
-        }
-        "result" => {
-            let mut base = type_name_to_schema("result");
-            if ty.args.len() == 2 {
-                let ok_schema = type_ref_to_schema(&ty.args[0]);
-                let err_schema = type_ref_to_schema(&ty.args[1]);
-                if let Some(obj) = base.as_object_mut() {
-                    if let Some(props) = obj.get_mut("properties") {
-                        if let Some(props) = props.as_object_mut() {
-                            props.insert(
-                                "value".to_string(),
-                                json!({ "oneOf": [ok_schema, err_schema] }),
-                            );
+                "option" => {
+                    let mut base = type_name_to_schema("option");
+                    if let Some(value_schema) = args.get(0).map(type_ref_to_schema) {
+                        if let Some(obj) = base.as_object_mut() {
+                            if let Some(props) = obj.get_mut("properties") {
+                                if let Some(props) = props.as_object_mut() {
+                                    props.insert("value".to_string(), value_schema);
+                                }
+                            }
                         }
                     }
+                    base
                 }
-            }
-            base
-        }
-        other => type_name_to_schema(other),
-    };
+                "result" => {
+                    let mut base = type_name_to_schema("result");
+                    if args.len() == 2 {
+                        let ok_schema = type_ref_to_schema(&args[0]);
+                        let err_schema = type_ref_to_schema(&args[1]);
+                        if let Some(obj) = base.as_object_mut() {
+                            if let Some(props) = obj.get_mut("properties") {
+                                if let Some(props) = props.as_object_mut() {
+                                    props.insert(
+                                        "value".to_string(),
+                                        json!({ "oneOf": [ok_schema, err_schema] }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    base
+                }
+                other => type_name_to_schema(other),
+            };
 
-    if let Some(obj) = schema.as_object_mut() {
-        if !ty.args.is_empty() {
-            obj.insert(
-                "x-at-type-args".to_string(),
-                json!(ty.args.iter().map(format_type_ref).collect::<Vec<_>>()),
-            );
+            if let Some(obj) = schema.as_object_mut() {
+                if !args.is_empty() {
+                    obj.insert(
+                        "x-at-type-args".to_string(),
+                        json!(args.iter().map(format_type_ref).collect::<Vec<_>>()),
+                    );
+                }
+            }
+
+            schema
         }
+        TypeRef::Function {
+            params, return_ty, ..
+        } => json!({
+            "type": "string",
+            "x-at-type": format_type_ref(ty),
+            "x-at-type-params": params.iter().map(format_type_ref).collect::<Vec<_>>(),
+            "x-at-type-return": format_type_ref(return_ty),
+        }),
     }
-
-    schema
 }
 
 fn type_name_to_schema(name: &str) -> serde_json::Value {
@@ -2146,16 +2158,29 @@ fn type_name_to_schema(name: &str) -> serde_json::Value {
 }
 
 fn format_type_ref(ty: &TypeRef) -> String {
-    if ty.args.is_empty() {
-        return ty.name.name.clone();
+    match ty {
+        TypeRef::Named { name, args } => {
+            if args.is_empty() {
+                return name.name.clone();
+            }
+            let args = args
+                .iter()
+                .map(format_type_ref)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}<{}>", name.name, args)
+        }
+        TypeRef::Function {
+            params, return_ty, ..
+        } => {
+            let params = params
+                .iter()
+                .map(format_type_ref)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({params}) -> {}", format_type_ref(return_ty))
+        }
     }
-    let args = ty
-        .args
-        .iter()
-        .map(format_type_ref)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}<{}>", ty.name.name, args)
 }
 
 fn json_to_value(value: &JsonValue, ty: Option<&str>) -> Result<Value, String> {

@@ -502,16 +502,33 @@ fn format_params(params: &[at_syntax::Param], out: &mut String) {
 }
 
 fn format_type_ref(ty: &at_syntax::TypeRef, out: &mut String) {
-    out.push_str(&ty.name.name);
-    if !ty.args.is_empty() {
-        out.push('<');
-        for (idx, arg) in ty.args.iter().enumerate() {
-            if idx > 0 {
-                out.push_str(", ");
+    match ty {
+        at_syntax::TypeRef::Named { name, args } => {
+            out.push_str(&name.name);
+            if !args.is_empty() {
+                out.push('<');
+                for (idx, arg) in args.iter().enumerate() {
+                    if idx > 0 {
+                        out.push_str(", ");
+                    }
+                    format_type_ref(arg, out);
+                }
+                out.push('>');
             }
-            format_type_ref(arg, out);
         }
-        out.push('>');
+        at_syntax::TypeRef::Function {
+            params, return_ty, ..
+        } => {
+            out.push_str("fn(");
+            for (idx, param) in params.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                format_type_ref(param, out);
+            }
+            out.push_str(") -> ");
+            format_type_ref(return_ty, out);
+        }
     }
 }
 

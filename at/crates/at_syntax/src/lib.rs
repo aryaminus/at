@@ -11,9 +11,16 @@ pub struct Ident {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeRef {
-    pub name: Ident,
-    pub args: Vec<TypeRef>,
+pub enum TypeRef {
+    Named {
+        name: Ident,
+        args: Vec<TypeRef>,
+    },
+    Function {
+        fn_span: Span,
+        params: Vec<TypeRef>,
+        return_ty: Box<TypeRef>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
