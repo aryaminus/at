@@ -132,28 +132,94 @@ impl McpServer {
 
             let response = match method {
                 "initialize" => {
-                    let mut result = json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "protocolVersion": "2024-11-05",
-                            "serverInfo": {
-                                "name": self.name,
-                                "version": self.version,
-                            },
-                            "capabilities": {
-                                "tools": {},
-                                "roots": {},
+                    if let Some(params) = message.get("params") {
+                        if let Some(client_version) =
+                            params.get("protocolVersion").and_then(|v| v.as_str())
+                        {
+                            if client_version != "2024-11-05" {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {
+                                        "code": -32602,
+                                        "message": format!(
+                                            "Unsupported protocol version: {}",
+                                            client_version
+                                        )
+                                    }
+                                })
+                            } else {
+                                let mut result = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "protocolVersion": "2024-11-05",
+                                        "serverInfo": {
+                                            "name": self.name,
+                                            "version": self.version,
+                                        },
+                                        "capabilities": {
+                                            "tools": {},
+                                            "roots": {},
+                                        }
+                                    }
+                                });
+
+                                // Only include instructions if context is present
+                                if let Some(context) = &self.context {
+                                    result["result"]["instructions"] = json!(context);
+                                }
+
+                                result
                             }
+                        } else {
+                            let mut result = json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "protocolVersion": "2024-11-05",
+                                    "serverInfo": {
+                                        "name": self.name,
+                                        "version": self.version,
+                                    },
+                                    "capabilities": {
+                                        "tools": {},
+                                        "roots": {},
+                                    }
+                                }
+                            });
+
+                            // Only include instructions if context is present
+                            if let Some(context) = &self.context {
+                                result["result"]["instructions"] = json!(context);
+                            }
+
+                            result
                         }
-                    });
+                    } else {
+                        let mut result = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "protocolVersion": "2024-11-05",
+                                "serverInfo": {
+                                    "name": self.name,
+                                    "version": self.version,
+                                },
+                                "capabilities": {
+                                    "tools": {},
+                                    "roots": {},
+                                }
+                            }
+                        });
 
-                    // Only include instructions if context is present
-                    if let Some(context) = &self.context {
-                        result["result"]["instructions"] = json!(context);
+                        // Only include instructions if context is present
+                        if let Some(context) = &self.context {
+                            result["result"]["instructions"] = json!(context);
+                        }
+
+                        result
                     }
-
-                    result
                 }
                 "tools/list" => json!({
                     "jsonrpc": "2.0",
@@ -245,16 +311,34 @@ impl McpServer {
 
                             match (name, &self.tool_handler) {
                                 (Some(name), Some(handler)) => match handler(name, &arguments) {
-                                    Ok(result) => json!({
-                                        "jsonrpc": "2.0",
-                                        "id": id,
-                                        "result": {
-                                            "content": [
-                                                {"type": "text", "text": result.to_string()}
-                                            ],
-                                            "isError": false
+                                    Ok(result) => {
+                                        if result
+                                            .get("content")
+                                            .and_then(|v| v.as_array())
+                                            .is_some()
+                                        {
+                                            let mut payload = result.clone();
+                                            if payload.get("isError").is_none() {
+                                                payload["isError"] = json!(false);
+                                            }
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": payload
+                                            })
+                                        } else {
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": {
+                                                    "content": [
+                                                        {"type": "text", "text": result.to_string()}
+                                                    ],
+                                                    "isError": false
+                                                }
+                                            })
                                         }
-                                    }),
+                                    }
                                     Err(message) => json!({
                                         "jsonrpc": "2.0",
                                         "id": id,
