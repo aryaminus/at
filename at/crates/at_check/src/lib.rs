@@ -1265,6 +1265,48 @@ impl TypeChecker {
                 }
                 Some(SimpleType::Array)
             }
+            "map" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                        self.push_error("map expects array".to_string(), expr_span(arg));
+                    }
+                }
+                if args.len() == 2 {
+                    self.check_expr(&args[1]);
+                }
+                Some(SimpleType::Array)
+            }
+            "filter" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                        self.push_error("filter expects array".to_string(), expr_span(arg));
+                    }
+                }
+                if args.len() == 2 {
+                    self.check_expr(&args[1]);
+                }
+                Some(SimpleType::Array)
+            }
+            "reduce" => {
+                self.check_arity(name, args, 3, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                        self.push_error("reduce expects array".to_string(), expr_span(arg));
+                    }
+                }
+                if args.len() >= 2 {
+                    self.check_expr(&args[1]);
+                }
+                if args.len() >= 3 {
+                    self.check_expr(&args[2]);
+                }
+                Some(SimpleType::Unknown)
+            }
             "print" => {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {

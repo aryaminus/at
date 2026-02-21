@@ -798,6 +798,36 @@ impl Compiler {
                     ));
                 }
                 if let Expr::Ident(ident) = callee.as_ref() {
+                    if ident.name == "map" {
+                        if args.len() != 2 {
+                            return Err(compile_error(
+                                "wrong arity for map".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_map_expr(&args[0], &args[1], ident.span, chunk)?;
+                        return Ok(());
+                    }
+                    if ident.name == "filter" {
+                        if args.len() != 2 {
+                            return Err(compile_error(
+                                "wrong arity for filter".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_filter_expr(&args[0], &args[1], ident.span, chunk)?;
+                        return Ok(());
+                    }
+                    if ident.name == "reduce" {
+                        if args.len() != 3 {
+                            return Err(compile_error(
+                                "wrong arity for reduce".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_reduce_expr(&args[0], &args[1], &args[2], ident.span, chunk)?;
+                        return Ok(());
+                    }
                     if ident.name == "assert" {
                         if args.len() != 1 {
                             return Err(compile_error(
@@ -1179,6 +1209,219 @@ impl Compiler {
         for jump_index in end_jumps {
             patch_jump(&mut chunk.code, jump_index, end);
         }
+        Ok(())
+    }
+
+    fn compile_map_expr(
+        &mut self,
+        array: &Expr,
+        func: &Expr,
+        span: Span,
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        self.push_scope();
+
+        self.compile_expr(array, chunk)?;
+        let arr_name = self.next_synthetic_name("map_arr");
+        let arr_slot = self.bind_local_checked(&arr_name, span)?;
+        chunk.push(Op::StoreLocal(arr_slot), Some(span));
+
+        self.compile_expr(func, chunk)?;
+        let func_name = self.next_synthetic_name("map_fn");
+        let func_slot = self.bind_local_checked(&func_name, span)?;
+        chunk.push(Op::StoreLocal(func_slot), Some(span));
+
+        let result_name = self.next_synthetic_name("map_res");
+        let result_slot = self.bind_local_checked(&result_name, span)?;
+        chunk.push(Op::Array(0), Some(span));
+        chunk.push(Op::StoreLocal(result_slot), Some(span));
+
+        let idx_name = self.next_synthetic_name("map_idx");
+        let idx_slot = self.bind_local_checked(&idx_name, span)?;
+        let zero_index = chunk.add_const(Value::Int(0));
+        chunk.push(Op::Const(zero_index), Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+
+        let loop_start = chunk.code.len();
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::Builtin(Builtin::Len), Some(span));
+        chunk.push(Op::Lt, Some(span));
+        let jump_if_false = chunk.code.len();
+        chunk.push(Op::JumpIfFalse(usize::MAX), Some(span));
+
+        let item_name = self.next_synthetic_name("map_item");
+        let item_slot = self.bind_local_checked(&item_name, span)?;
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Index, Some(span));
+        chunk.push(Op::StoreLocal(item_slot), Some(span));
+
+        let value_name = self.next_synthetic_name("map_val");
+        let value_slot = self.bind_local_checked(&value_name, span)?;
+        chunk.push(Op::LoadLocal(func_slot), Some(span));
+        chunk.push(Op::LoadLocal(item_slot), Some(span));
+        chunk.push(Op::CallValue(1), Some(span));
+        chunk.push(Op::StoreLocal(value_slot), Some(span));
+
+        chunk.push(Op::LoadLocal(result_slot), Some(span));
+        chunk.push(Op::LoadLocal(value_slot), Some(span));
+        chunk.push(Op::Builtin(Builtin::Append), Some(span));
+        chunk.push(Op::StoreLocal(result_slot), Some(span));
+
+        let one_index = chunk.add_const(Value::Int(1));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Const(one_index), Some(span));
+        chunk.push(Op::Add, Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+        chunk.push(Op::Jump(loop_start), Some(span));
+
+        let end = chunk.code.len();
+        patch_jump(&mut chunk.code, jump_if_false, end);
+
+        chunk.push(Op::LoadLocal(result_slot), Some(span));
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn compile_filter_expr(
+        &mut self,
+        array: &Expr,
+        func: &Expr,
+        span: Span,
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        self.push_scope();
+
+        self.compile_expr(array, chunk)?;
+        let arr_name = self.next_synthetic_name("filter_arr");
+        let arr_slot = self.bind_local_checked(&arr_name, span)?;
+        chunk.push(Op::StoreLocal(arr_slot), Some(span));
+
+        self.compile_expr(func, chunk)?;
+        let func_name = self.next_synthetic_name("filter_fn");
+        let func_slot = self.bind_local_checked(&func_name, span)?;
+        chunk.push(Op::StoreLocal(func_slot), Some(span));
+
+        let result_name = self.next_synthetic_name("filter_res");
+        let result_slot = self.bind_local_checked(&result_name, span)?;
+        chunk.push(Op::Array(0), Some(span));
+        chunk.push(Op::StoreLocal(result_slot), Some(span));
+
+        let idx_name = self.next_synthetic_name("filter_idx");
+        let idx_slot = self.bind_local_checked(&idx_name, span)?;
+        let zero_index = chunk.add_const(Value::Int(0));
+        chunk.push(Op::Const(zero_index), Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+
+        let loop_start = chunk.code.len();
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::Builtin(Builtin::Len), Some(span));
+        chunk.push(Op::Lt, Some(span));
+        let jump_if_false = chunk.code.len();
+        chunk.push(Op::JumpIfFalse(usize::MAX), Some(span));
+
+        let item_name = self.next_synthetic_name("filter_item");
+        let item_slot = self.bind_local_checked(&item_name, span)?;
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Index, Some(span));
+        chunk.push(Op::StoreLocal(item_slot), Some(span));
+
+        chunk.push(Op::LoadLocal(func_slot), Some(span));
+        chunk.push(Op::LoadLocal(item_slot), Some(span));
+        chunk.push(Op::CallValue(1), Some(span));
+        let skip_append = chunk.code.len();
+        chunk.push(Op::JumpIfFalse(usize::MAX), Some(span));
+
+        chunk.push(Op::LoadLocal(result_slot), Some(span));
+        chunk.push(Op::LoadLocal(item_slot), Some(span));
+        chunk.push(Op::Builtin(Builtin::Append), Some(span));
+        chunk.push(Op::StoreLocal(result_slot), Some(span));
+
+        let after_append = chunk.code.len();
+        patch_jump(&mut chunk.code, skip_append, after_append);
+
+        let one_index = chunk.add_const(Value::Int(1));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Const(one_index), Some(span));
+        chunk.push(Op::Add, Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+        chunk.push(Op::Jump(loop_start), Some(span));
+
+        let end = chunk.code.len();
+        patch_jump(&mut chunk.code, jump_if_false, end);
+
+        chunk.push(Op::LoadLocal(result_slot), Some(span));
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn compile_reduce_expr(
+        &mut self,
+        array: &Expr,
+        initial: &Expr,
+        func: &Expr,
+        span: Span,
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        self.push_scope();
+
+        self.compile_expr(array, chunk)?;
+        let arr_name = self.next_synthetic_name("reduce_arr");
+        let arr_slot = self.bind_local_checked(&arr_name, span)?;
+        chunk.push(Op::StoreLocal(arr_slot), Some(span));
+
+        self.compile_expr(initial, chunk)?;
+        let acc_name = self.next_synthetic_name("reduce_acc");
+        let acc_slot = self.bind_local_checked(&acc_name, span)?;
+        chunk.push(Op::StoreLocal(acc_slot), Some(span));
+
+        self.compile_expr(func, chunk)?;
+        let func_name = self.next_synthetic_name("reduce_fn");
+        let func_slot = self.bind_local_checked(&func_name, span)?;
+        chunk.push(Op::StoreLocal(func_slot), Some(span));
+
+        let idx_name = self.next_synthetic_name("reduce_idx");
+        let idx_slot = self.bind_local_checked(&idx_name, span)?;
+        let zero_index = chunk.add_const(Value::Int(0));
+        chunk.push(Op::Const(zero_index), Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+
+        let loop_start = chunk.code.len();
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::Builtin(Builtin::Len), Some(span));
+        chunk.push(Op::Lt, Some(span));
+        let jump_if_false = chunk.code.len();
+        chunk.push(Op::JumpIfFalse(usize::MAX), Some(span));
+
+        let item_name = self.next_synthetic_name("reduce_item");
+        let item_slot = self.bind_local_checked(&item_name, span)?;
+        chunk.push(Op::LoadLocal(arr_slot), Some(span));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Index, Some(span));
+        chunk.push(Op::StoreLocal(item_slot), Some(span));
+
+        chunk.push(Op::LoadLocal(func_slot), Some(span));
+        chunk.push(Op::LoadLocal(acc_slot), Some(span));
+        chunk.push(Op::LoadLocal(item_slot), Some(span));
+        chunk.push(Op::CallValue(2), Some(span));
+        chunk.push(Op::StoreLocal(acc_slot), Some(span));
+
+        let one_index = chunk.add_const(Value::Int(1));
+        chunk.push(Op::LoadLocal(idx_slot), Some(span));
+        chunk.push(Op::Const(one_index), Some(span));
+        chunk.push(Op::Add, Some(span));
+        chunk.push(Op::StoreLocal(idx_slot), Some(span));
+        chunk.push(Op::Jump(loop_start), Some(span));
+
+        let end = chunk.code.len();
+        patch_jump(&mut chunk.code, jump_if_false, end);
+
+        chunk.push(Op::LoadLocal(acc_slot), Some(span));
+        self.pop_scope();
         Ok(())
     }
 
