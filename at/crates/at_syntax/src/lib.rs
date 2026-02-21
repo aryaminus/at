@@ -94,6 +94,23 @@ pub enum Expr {
         params: Vec<Ident>,
         body: Box<Expr>,
     },
+    StructLiteral {
+        span: Span,
+        name: Ident,
+        fields: Vec<StructLiteralField>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField {
+    pub name: Ident,
+    pub ty: TypeRef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructLiteralField {
+    pub name: Ident,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +164,10 @@ pub enum Stmt {
     Import {
         path: String,
         alias: Ident,
+    },
+    Struct {
+        name: Ident,
+        fields: Vec<StructField>,
     },
     Let {
         name: Ident,

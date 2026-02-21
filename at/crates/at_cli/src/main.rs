@@ -2271,6 +2271,13 @@ fn value_to_json(value: Value) -> JsonValue {
         Value::Array(items) => {
             JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
         }
+        Value::Struct(fields) => {
+            let mut obj = serde_json::Map::new();
+            for (key, value) in fields.iter() {
+                obj.insert(key.clone(), value_to_json(value.clone()));
+            }
+            JsonValue::Object(obj)
+        }
         Value::Tuple(items) => {
             JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
         }

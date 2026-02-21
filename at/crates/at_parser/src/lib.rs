@@ -1,5 +1,6 @@
 use at_syntax::{
-    Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span, Stmt, TypeRef,
+    Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span, Stmt,
+    StructField, StructLiteralField, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,7 @@ pub enum TokenKind {
     If,
     Else,
     Set,
+    Struct,
     Break,
     Continue,
     Return,
@@ -210,6 +212,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Break
                 | TokenKind::Continue
                 | TokenKind::If
+                | TokenKind::Struct
                 | TokenKind::Eof => {
                     break;
                 }
@@ -237,6 +240,7 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match &self.current.kind {
             TokenKind::Import => self.parse_import_stmt(),
+            TokenKind::Struct => self.parse_struct_stmt(),
             TokenKind::Let => self.parse_let_stmt(),
             TokenKind::Using => self.parse_using_stmt(),
             TokenKind::Set => self.parse_set_stmt(),
@@ -346,6 +350,33 @@ impl<'a> Parser<'a> {
         let alias = self.expect_ident()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Import { path, alias })
+    }
+
+    fn parse_struct_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        if self.current.kind != TokenKind::RBrace {
+            loop {
+                let field_name = self.expect_ident()?;
+                self.expect(TokenKind::Colon)?;
+                let ty = self.parse_type_ref()?;
+                fields.push(StructField {
+                    name: field_name,
+                    ty,
+                });
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.current.kind == TokenKind::RBrace {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::Struct { name, fields })
     }
 
     fn parse_using_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -875,6 +906,15 @@ impl<'a> Parser<'a> {
                     span: self.current.span,
                 };
                 self.advance();
+                let is_type_name = ident
+                    .name
+                    .chars()
+                    .next()
+                    .map(|ch| ch.is_uppercase())
+                    .unwrap_or(false);
+                if is_type_name && self.current.kind == TokenKind::LBrace {
+                    return self.parse_struct_literal(ident);
+                }
                 Ok(Expr::Ident(ident))
             }
             TokenKind::LParen => {
@@ -1047,6 +1087,32 @@ impl<'a> Parser<'a> {
         Ok(Expr::Array { array_span, items })
     }
 
+    fn parse_struct_literal(&mut self, name: Ident) -> Result<Expr, ParseError> {
+        let span = name.span;
+        self.expect(TokenKind::LBrace)?;
+        let mut fields = Vec::new();
+        if self.current.kind != TokenKind::RBrace {
+            loop {
+                let field_name = self.expect_ident()?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expr()?;
+                fields.push(StructLiteralField {
+                    name: field_name,
+                    value,
+                });
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.current.kind == TokenKind::RBrace {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::StructLiteral { span, name, fields })
+    }
+
     fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         let if_span = self.current.span;
         self.advance();
@@ -1082,6 +1148,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Let
                 | TokenKind::Using
                 | TokenKind::Set
+                | TokenKind::Struct
                 | TokenKind::Return
                 | TokenKind::Test
                 | TokenKind::While
@@ -1956,6 +2023,7 @@ impl<'a> Lexer<'a> {
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "set" => TokenKind::Set,
+            "struct" => TokenKind::Struct,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,

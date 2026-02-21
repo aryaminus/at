@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ pub enum Value {
     Bool(bool),
     Array(Rc<Vec<Value>>),
     Tuple(Rc<Vec<Value>>),
+    Struct(Rc<BTreeMap<String, Value>>),
     Option(Option<Rc<Value>>),
     Result(Result<Rc<Value>, Rc<Value>>),
     Closure(Rc<ClosureValue>),
@@ -42,6 +43,13 @@ pub fn format_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Value::Struct(fields) => {
+            let mut items = Vec::new();
+            for (key, value) in fields.iter() {
+                items.push(format!("{key}: {}", format_value(value)));
+            }
+            format!("{{{}}}", items.join(", "))
+        }
         Value::Tuple(items) => format!(
             "({})",
             items
@@ -77,6 +85,8 @@ pub enum Op {
     Index,
     StoreIndex,
     StoreMember(String),
+    Struct(Vec<String>),
+    GetMember(String),
     Closure(usize, usize),
     CallValue(usize),
     Range(bool),
@@ -379,6 +389,7 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt, chunk: &mut Chunk) -> Result<(), VmError> {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } => {
                 self.compile_expr(value, chunk)?;
                 let slot = self.bind_local_checked(&name.name, name.span)?;
@@ -753,6 +764,22 @@ impl Compiler {
                     chunk.push(Op::Add, expr_span(expr));
                 }
             }
+            Expr::StructLiteral { name, fields, .. } => {
+                for field in fields {
+                    self.compile_expr(&field.value, chunk)?;
+                }
+                let field_names = fields
+                    .iter()
+                    .map(|field| field.name.name.clone())
+                    .collect::<Vec<_>>();
+                if field_names.is_empty() {
+                    let empty = BTreeMap::new();
+                    let index = chunk.add_const(Value::Struct(Rc::new(empty)));
+                    chunk.push(Op::Const(index), Some(name.span));
+                } else {
+                    chunk.push(Op::Struct(field_names), Some(name.span));
+                }
+            }
             Expr::Closure { span, params, body } => {
                 self.compile_closure_expr(*span, params, body, chunk)?;
             }
@@ -1041,11 +1068,9 @@ impl Compiler {
             } => {
                 self.compile_match_expr(*match_span, value, arms, chunk)?;
             }
-            Expr::Member { .. } => {
-                return Err(compile_error(
-                    "invalid call target".to_string(),
-                    expr_span(expr),
-                ));
+            Expr::Member { base, name } => {
+                self.compile_expr(base, chunk)?;
+                chunk.push(Op::GetMember(name.name.clone()), Some(name.span));
             }
         }
         Ok(())
@@ -1597,6 +1622,11 @@ impl Compiler {
                     }
                 }
             }
+            Expr::StructLiteral { fields, .. } => {
+                for field in fields {
+                    self.collect_free_vars_expr(&field.value, bound, captures, seen);
+                }
+            }
             Expr::Closure { .. } => {}
         }
     }
@@ -1610,6 +1640,7 @@ impl Compiler {
     ) {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } | Stmt::Using { name, value, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
                 if let Some(scope) = bound.last_mut() {
@@ -2841,6 +2872,42 @@ impl Vm {
                         }
                     }
                 }
+                Op::Struct(fields) => {
+                    let mut map = BTreeMap::new();
+                    for name in fields.iter().rev() {
+                        let value = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                        map.insert(name.clone(), value);
+                    }
+                    self.stack.push(Value::Struct(Rc::new(map)));
+                }
+                Op::GetMember(field) => {
+                    let base_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match base_value {
+                        Value::Struct(fields) => {
+                            if let Some(value) = fields.get(field) {
+                                self.stack.push(value.clone());
+                            } else {
+                                return Err(runtime_error_at(
+                                    format!("unknown field: {}", field),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "member access expects struct".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
                 Op::StoreMember(field) => {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -2901,9 +2968,15 @@ impl Vm {
                             }
                             self.stack.push(Value::Array(Rc::new(new_items)));
                         }
+                        Value::Struct(fields) => {
+                            let mut new_fields = (*fields).clone();
+                            new_fields.insert(field.clone(), value);
+                            self.stack.push(Value::Struct(Rc::new(new_fields)));
+                        }
                         _ => {
                             return Err(runtime_error_at(
-                                "set member expects array of (string, value) tuples".to_string(),
+                                "set member expects struct or array of (string, value) tuples"
+                                    .to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
@@ -3298,6 +3371,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Range { range_span, .. } => Some(*range_span),
         Expr::InterpolatedString { span, .. } => Some(*span),
         Expr::Closure { span, .. } => Some(*span),
+        Expr::StructLiteral { span, .. } => Some(*span),
     }
 }
 

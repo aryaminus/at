@@ -68,6 +68,21 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str(&alias.name);
             out.push_str(";\n");
         }
+        Stmt::Struct { name, fields } => {
+            indent_to(out, indent);
+            out.push_str("struct ");
+            out.push_str(&name.name);
+            out.push_str(" {\n");
+            for field in fields {
+                indent_to(out, indent + 4);
+                out.push_str(&field.name.name);
+                out.push_str(": ");
+                format_type_ref(&field.ty, out);
+                out.push_str(",\n");
+            }
+            indent_to(out, indent);
+            out.push_str("}\n");
+        }
         Stmt::Let { name, ty, value } => {
             indent_to(out, indent);
             out.push_str("let ");
@@ -415,6 +430,19 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             }
             out.push('"');
         }
+        Expr::StructLiteral { name, fields, .. } => {
+            out.push_str(&name.name);
+            out.push_str(" { ");
+            for (idx, field) in fields.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&field.name.name);
+                out.push_str(": ");
+                format_expr_prec_indent(&field.value, out, 0, indent);
+            }
+            out.push_str(" }");
+        }
         Expr::Closure { params, body, .. } => {
             out.push('|');
             for (idx, param) in params.iter().enumerate() {
@@ -553,7 +581,7 @@ fn infer_needs(func: &Function, import_aliases: &HashSet<String>) -> Vec<String>
 
 fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_needs_expr(value, needs, import_aliases);
         }
@@ -637,6 +665,11 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
                 if let at_syntax::InterpPart::Expr(expr) = part {
                     collect_needs_expr(expr, needs, import_aliases);
                 }
+            }
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                collect_needs_expr(&field.value, needs, import_aliases);
             }
         }
         Expr::Closure { body, .. } => {

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use at_syntax::{BinaryOp, Expr, Function, Ident, Module, Span, Stmt, TypeRef, UnaryOp};
+use at_syntax::{
+    BinaryOp, Expr, Function, Ident, Module, Span, Stmt, StructField, TypeRef, UnaryOp,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SimpleType {
@@ -59,6 +61,7 @@ pub fn infer_function_returns(module: &Module) -> HashMap<String, String> {
 struct TypeChecker {
     functions: HashMap<String, FuncSig>,
     function_needs: HashMap<String, Vec<String>>,
+    structs: HashMap<String, Vec<StructField>>,
     locals: Vec<HashMap<String, SimpleType>>,
     option_inner: Vec<HashMap<String, SimpleType>>,
     result_ok: Vec<HashMap<String, SimpleType>>,
@@ -82,6 +85,7 @@ impl TypeChecker {
         Self {
             functions: HashMap::new(),
             function_needs: HashMap::new(),
+            structs: HashMap::new(),
             locals: Vec::new(),
             option_inner: Vec::new(),
             result_ok: Vec::new(),
@@ -137,6 +141,7 @@ impl TypeChecker {
 
     fn check_module(&mut self, module: &Module) {
         self.check_duplicate_import_aliases(module);
+        self.load_structs(module);
         for func in &module.functions {
             self.check_function(func);
         }
@@ -217,9 +222,32 @@ impl TypeChecker {
         }
     }
 
+    fn load_structs(&mut self, module: &Module) {
+        self.structs.clear();
+        for stmt in &module.stmts {
+            if let Stmt::Struct { name, fields } = stmt {
+                if self.structs.contains_key(&name.name) {
+                    self.push_error(format!("duplicate struct: {}", name.name), Some(name.span));
+                    continue;
+                }
+                let mut seen = HashSet::new();
+                for field in fields {
+                    if !seen.insert(field.name.name.clone()) {
+                        self.push_error(
+                            format!("duplicate struct field: {}", field.name.name),
+                            Some(field.name.span),
+                        );
+                    }
+                }
+                self.structs.insert(name.name.clone(), fields.clone());
+            }
+        }
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::Struct { .. } => {}
             Stmt::Let { name, ty, value } => {
                 self.last_option_inner = None;
                 self.last_result_ok = None;
@@ -465,8 +493,24 @@ impl TypeChecker {
                 then_branch,
                 else_branch,
             } => self.check_if(*if_span, condition, then_branch, else_branch.as_deref()),
-            Expr::Member { base, .. } => {
-                let _ = self.check_expr(base);
+            Expr::Member { base, name } => {
+                let base_ty = self.check_expr(base);
+                if let SimpleType::Custom(struct_name) = base_ty {
+                    if let Some(fields) = self.structs.get(&struct_name) {
+                        let field_ty = fields
+                            .iter()
+                            .find(|field| field.name.name == name.name)
+                            .map(|field| field.ty.clone());
+                        if let Some(field_ty) = field_ty {
+                            return self.type_from_ref(&field_ty);
+                        }
+                        self.push_error(
+                            format!("unknown field {} on struct {}", name.name, struct_name),
+                            Some(name.span),
+                        );
+                        return SimpleType::Unknown;
+                    }
+                }
                 SimpleType::Unknown
             }
             Expr::Call { callee, args } => {
@@ -566,6 +610,58 @@ impl TypeChecker {
                 self.check_expr(body);
                 self.pop_scope();
                 SimpleType::Function(params.len())
+            }
+            Expr::StructLiteral { name, fields, .. } => {
+                let struct_fields = self.structs.get(&name.name).cloned();
+                if struct_fields.is_none() {
+                    self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
+                }
+                let mut provided = HashSet::new();
+                for field in fields {
+                    if !provided.insert(field.name.name.clone()) {
+                        self.push_error(
+                            format!("duplicate field: {}", field.name.name),
+                            Some(field.name.span),
+                        );
+                    }
+                    let value_ty = self.check_expr(&field.value);
+                    if let Some(struct_fields) = struct_fields.as_ref() {
+                        if let Some(expected) = struct_fields
+                            .iter()
+                            .find(|entry| entry.name.name == field.name.name)
+                        {
+                            let expected_ty = self.type_from_ref(&expected.ty);
+                            self.check_compatible(
+                                &expected_ty,
+                                &value_ty,
+                                &format!("type mismatch for field {}", field.name.name),
+                                Some(field.name.span),
+                            );
+                        } else {
+                            self.push_error(
+                                format!(
+                                    "unknown field {} on struct {}",
+                                    field.name.name, name.name
+                                ),
+                                Some(field.name.span),
+                            );
+                        }
+                    }
+                }
+                if let Some(struct_fields) = struct_fields.as_ref() {
+                    for field in struct_fields {
+                        if !provided.contains(&field.name.name) {
+                            self.push_error(
+                                format!(
+                                    "missing field {} for struct {}",
+                                    field.name.name, name.name
+                                ),
+                                Some(name.span),
+                            );
+                        }
+                    }
+                }
+                SimpleType::Custom(name.name.clone())
             }
         }
     }
@@ -1904,7 +2000,12 @@ impl TypeChecker {
                         );
                     }
                 }
-                _ => {}
+                "int" | "float" | "bool" | "string" | "unit" => {}
+                other => {
+                    if !self.structs.contains_key(other) {
+                        self.push_error(format!("unknown type: {}", other), Some(name.span));
+                    }
+                }
             },
             TypeRef::Function {
                 params, return_ty, ..
@@ -1942,6 +2043,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Range { range_span, .. } => Some(*range_span),
         Expr::InterpolatedString { span, .. } => Some(*span),
         Expr::Closure { span, .. } => Some(*span),
+        Expr::StructLiteral { span, .. } => Some(*span),
         Expr::Float(_, span) => Some(*span),
     }
 }
