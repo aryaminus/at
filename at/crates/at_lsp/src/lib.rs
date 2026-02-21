@@ -10,10 +10,11 @@ use at_vm::Compiler;
 use lsp_server::{Connection, Message, Notification, Response};
 use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
-    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentSymbol,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams,
-    Location, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
+    DocumentHighlightKind, DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location,
+    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
     SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
     SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
@@ -37,6 +38,7 @@ pub fn run_stdio() -> Result<(), String> {
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
         }),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+        document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
         semantic_tokens_provider: Some(
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 SemanticTokensOptions {
@@ -280,6 +282,25 @@ fn handle_request(
             let response = if let Some(text) = docs.get(&url) {
                 let tokens = provide_semantic_tokens(text);
                 Response::new_ok(request.id.clone(), serde_json::to_value(tokens).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/documentHighlight" => {
+            let params: DocumentHighlightParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params
+                .text_document_position_params
+                .text_document
+                .uri
+                .clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let highlights = provide_document_highlights(text, &params);
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(highlights).unwrap(),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -624,6 +645,50 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
         result_id: None,
         data,
     }
+}
+
+fn provide_document_highlights(
+    text: &str,
+    params: &DocumentHighlightParams,
+) -> Option<Vec<DocumentHighlight>> {
+    let position = params.text_document_position_params.position;
+    let offset = position_to_offset(text, position);
+    let name = ident_at_offset(text, offset)?;
+    let mut highlights = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        let remaining = &text[cursor..];
+        if let Some(found) = remaining.find(&name) {
+            let start = cursor + found;
+            let end = start + name.len();
+            let before = if start == 0 {
+                None
+            } else {
+                text[..start].chars().next_back()
+            };
+            let after = if end >= text.len() {
+                None
+            } else {
+                text[end..].chars().next()
+            };
+            let before_ok = before.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            let after_ok = after.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            if before_ok && after_ok {
+                let range = Range {
+                    start: offset_to_position(text, start),
+                    end: offset_to_position(text, end),
+                };
+                highlights.push(DocumentHighlight {
+                    range,
+                    kind: Some(DocumentHighlightKind::TEXT),
+                });
+            }
+            cursor = end;
+        } else {
+            break;
+        }
+    }
+    Some(highlights)
 }
 
 fn provide_definition(
