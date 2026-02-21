@@ -2,15 +2,20 @@ use std::collections::HashSet;
 
 use at_syntax::{Comment, Expr, Function, MatchPattern, Module, Stmt};
 
-pub fn format_module(module: &Module) -> String {
-    let mut out = String::new();
-    let import_aliases = collect_import_aliases(module);
-    let mut comments: Vec<Comment> = module.comments.clone();
-    comments.sort_by_key(|comment| comment.span.start);
-    let mut comment_index = 0usize;
-    let mut emit_comments = |out: &mut String, limit: usize| {
-        while comment_index < comments.len() {
-            let comment = &comments[comment_index];
+struct CommentState {
+    comments: Vec<Comment>,
+    index: usize,
+}
+
+impl CommentState {
+    fn new(mut comments: Vec<Comment>) -> Self {
+        comments.sort_by_key(|comment| comment.span.start);
+        Self { comments, index: 0 }
+    }
+
+    fn emit_until(&mut self, out: &mut String, limit: usize) {
+        while self.index < self.comments.len() {
+            let comment = &self.comments[self.index];
             if comment.span.start >= limit {
                 break;
             }
@@ -18,19 +23,25 @@ pub fn format_module(module: &Module) -> String {
             if !comment.text.ends_with('\n') {
                 out.push('\n');
             }
-            comment_index += 1;
+            self.index += 1;
         }
-    };
+    }
+}
+
+pub fn format_module(module: &Module) -> String {
+    let mut out = String::new();
+    let import_aliases = collect_import_aliases(module);
+    let mut comment_state = CommentState::new(module.comments.clone());
     for func in &module.functions {
-        emit_comments(&mut out, func.name.span.start);
-        format_function(func, &mut out, 0, &import_aliases);
+        comment_state.emit_until(&mut out, func.name.span.start);
+        format_function(func, &mut out, 0, &import_aliases, &mut comment_state);
         out.push('\n');
     }
     for stmt in &module.stmts {
-        emit_comments(&mut out, stmt_span(stmt));
-        format_stmt(stmt, &mut out, 0);
+        comment_state.emit_until(&mut out, stmt_span(stmt));
+        format_stmt(stmt, &mut out, 0, &mut comment_state);
     }
-    emit_comments(&mut out, usize::MAX);
+    comment_state.emit_until(&mut out, usize::MAX);
     out
 }
 
@@ -39,6 +50,7 @@ fn format_function(
     out: &mut String,
     indent: usize,
     import_aliases: &HashSet<String>,
+    comment_state: &mut CommentState,
 ) {
     indent_to(out, indent);
     if func.is_tool {
@@ -71,7 +83,8 @@ fn format_function(
     out.push_str("{");
     out.push('\n');
     for stmt in &func.body {
-        format_stmt(stmt, out, indent + 4);
+        comment_state.emit_until(out, stmt_span(stmt));
+        format_stmt(stmt, out, indent + 4, comment_state);
     }
     indent_to(out, indent);
     out.push_str("}\n");
@@ -127,7 +140,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
     }
 }
 
-fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
+fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut CommentState) {
     match stmt {
         Stmt::Import { path, alias } => {
             indent_to(out, indent);
@@ -187,7 +200,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
                 format_type_ref(ty, out);
             }
             out.push_str(" = ");
-            format_expr_with_indent(value, out, indent);
+            format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::Using { name, ty, value } => {
@@ -199,7 +212,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
                 format_type_ref(ty, out);
             }
             out.push_str(" = ");
-            format_expr_with_indent(value, out, indent);
+            format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::Set { name, value } => {
@@ -207,28 +220,28 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str("set ");
             out.push_str(&name.name);
             out.push_str(" = ");
-            format_expr_with_indent(value, out, indent);
+            format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::SetMember { base, field, value } => {
             indent_to(out, indent);
             out.push_str("set ");
-            format_expr_with_indent(base, out, indent);
+            format_expr_with_indent(base, out, indent, comment_state);
             out.push('.');
             out.push_str(&field.name);
             out.push_str(" = ");
-            format_expr_with_indent(value, out, indent);
+            format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::SetIndex { base, index, value } => {
             indent_to(out, indent);
             out.push_str("set ");
-            format_expr_with_indent(base, out, indent);
+            format_expr_with_indent(base, out, indent, comment_state);
             out.push('[');
-            format_expr_with_indent(index, out, indent);
+            format_expr_with_indent(index, out, indent, comment_state);
             out.push(']');
             out.push_str(" = ");
-            format_expr_with_indent(value, out, indent);
+            format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::While {
@@ -236,10 +249,11 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
         } => {
             indent_to(out, indent);
             out.push_str("while ");
-            format_expr_with_indent(condition, out, indent);
+            format_expr_with_indent(condition, out, indent, comment_state);
             out.push_str(" {\n");
             for stmt in body {
-                format_stmt(stmt, out, indent + 4);
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
             out.push_str("}\n");
@@ -251,10 +265,11 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str("for ");
             out.push_str(&item.name);
             out.push_str(" in ");
-            format_expr_with_indent(iter, out, indent);
+            format_expr_with_indent(iter, out, indent, comment_state);
             out.push_str(" {\n");
             for stmt in body {
-                format_stmt(stmt, out, indent + 4);
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
             out.push_str("}\n");
@@ -269,7 +284,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
         }
         Stmt::Expr(expr) => {
             indent_to(out, indent);
-            format_expr_with_indent(expr, out, indent);
+            format_expr_with_indent(expr, out, indent, comment_state);
             out.push_str(";\n");
         }
         Stmt::Return(expr) => {
@@ -277,7 +292,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str("return");
             if let Some(expr) = expr {
                 out.push(' ');
-                format_expr_with_indent(expr, out, indent);
+                format_expr_with_indent(expr, out, indent, comment_state);
             }
             out.push_str(";\n");
         }
@@ -285,7 +300,8 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             indent_to(out, indent);
             out.push_str("{\n");
             for stmt in stmts {
-                format_stmt(stmt, out, indent + 4);
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
             out.push_str("}\n");
@@ -296,7 +312,8 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str(name);
             out.push_str("\" {\n");
             for stmt in body {
-                format_stmt(stmt, out, indent + 4);
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
             out.push_str("}\n");
@@ -304,11 +321,22 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
     }
 }
 
-fn format_expr_with_indent(expr: &Expr, out: &mut String, indent: usize) {
-    format_expr_prec_indent(expr, out, 0, indent);
+fn format_expr_with_indent(
+    expr: &Expr,
+    out: &mut String,
+    indent: usize,
+    comment_state: &mut CommentState,
+) {
+    format_expr_prec_indent(expr, out, 0, indent, comment_state);
 }
 
-fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, indent: usize) {
+fn format_expr_prec_indent(
+    expr: &Expr,
+    out: &mut String,
+    parent_prec: u8,
+    indent: usize,
+    comment_state: &mut CommentState,
+) {
     match expr {
         Expr::Int(value, _) => {
             out.push_str(&value.to_string());
@@ -352,7 +380,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             if needs {
                 out.push('(');
             }
-            format_expr_prec_indent(expr, out, prec, indent);
+            format_expr_prec_indent(expr, out, prec, indent, comment_state);
             if needs {
                 out.push(')');
             }
@@ -372,7 +400,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             if left_needs_paren {
                 out.push('(');
             }
-            format_expr_prec_indent(left, out, prec, indent);
+            format_expr_prec_indent(left, out, prec, indent, comment_state);
             if left_needs_paren {
                 out.push(')');
             }
@@ -383,7 +411,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             if right_needs_paren {
                 out.push('(');
             }
-            format_expr_prec_indent(right, out, prec, indent);
+            format_expr_prec_indent(right, out, prec, indent, comment_state);
             if right_needs_paren {
                 out.push(')');
             }
@@ -402,35 +430,35 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 out.push('(');
             }
             out.push_str("if ");
-            format_expr_prec_indent(condition, out, 0, indent);
+            format_expr_prec_indent(condition, out, 0, indent, comment_state);
             out.push(' ');
-            format_expr_prec_indent(then_branch, out, 0, indent);
+            format_expr_prec_indent(then_branch, out, 0, indent, comment_state);
             if let Some(else_expr) = else_branch {
                 out.push_str(" else ");
-                format_expr_prec_indent(else_expr, out, 0, indent);
+                format_expr_prec_indent(else_expr, out, 0, indent, comment_state);
             }
             if wrap {
                 out.push(')');
             }
         }
         Expr::Member { base, name } => {
-            format_expr_prec_indent(base, out, 0, indent);
+            format_expr_prec_indent(base, out, 0, indent, comment_state);
             out.push('.');
             out.push_str(&name.name);
         }
         Expr::Call { callee, args } => {
-            format_expr_prec_indent(callee, out, 0, indent);
+            format_expr_prec_indent(callee, out, 0, indent, comment_state);
             out.push('(');
             for (idx, arg) in args.iter().enumerate() {
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                format_expr_prec_indent(arg, out, 0, indent);
+                format_expr_prec_indent(arg, out, 0, indent, comment_state);
             }
             out.push(')');
         }
         Expr::Try(expr) => {
-            format_expr_prec_indent(expr, out, 0, indent);
+            format_expr_prec_indent(expr, out, 0, indent, comment_state);
             out.push('?');
         }
         Expr::Match { value, arms, .. } => {
@@ -439,17 +467,17 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 out.push('(');
             }
             out.push_str("match ");
-            format_expr_prec_indent(value, out, 0, indent);
+            format_expr_prec_indent(value, out, 0, indent, comment_state);
             out.push_str(" {\n");
             for arm in arms {
                 indent_to(out, indent + 4);
                 format_match_pattern(&arm.pattern, out);
                 if let Some(guard) = &arm.guard {
                     out.push_str(" if ");
-                    format_expr_prec_indent(guard, out, 0, indent + 4);
+                    format_expr_prec_indent(guard, out, 0, indent + 4, comment_state);
                 }
                 out.push_str(" => ");
-                format_expr_prec_indent(&arm.body, out, 0, indent + 4);
+                format_expr_prec_indent(&arm.body, out, 0, indent + 4, comment_state);
                 out.push_str(",\n");
             }
             indent_to(out, indent);
@@ -461,11 +489,12 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
         Expr::Block { stmts, tail, .. } => {
             out.push_str("{\n");
             for stmt in stmts {
-                format_stmt(stmt, out, indent + 4);
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
             }
             if let Some(expr) = tail {
                 indent_to(out, indent + 4);
-                format_expr_prec_indent(expr, out, 0, indent + 4);
+                format_expr_prec_indent(expr, out, 0, indent + 4, comment_state);
                 out.push('\n');
             }
             indent_to(out, indent);
@@ -477,14 +506,14 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                format_expr_prec_indent(item, out, 0, indent);
+                format_expr_prec_indent(item, out, 0, indent, comment_state);
             }
             out.push(']');
         }
         Expr::Index { base, index, .. } => {
-            format_expr_prec_indent(base, out, 0, indent);
+            format_expr_prec_indent(base, out, 0, indent, comment_state);
             out.push('[');
-            format_expr_prec_indent(index, out, 0, indent);
+            format_expr_prec_indent(index, out, 0, indent, comment_state);
             out.push(']');
         }
         Expr::Tuple { items, .. } => {
@@ -493,7 +522,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                format_expr_prec_indent(item, out, 0, indent);
+                format_expr_prec_indent(item, out, 0, indent, comment_state);
             }
             out.push(')');
         }
@@ -503,13 +532,13 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             inclusive,
             ..
         } => {
-            format_expr_prec_indent(start, out, 0, indent);
+            format_expr_prec_indent(start, out, 0, indent, comment_state);
             if *inclusive {
                 out.push_str("..=");
             } else {
                 out.push_str("..");
             }
-            format_expr_prec_indent(end, out, 0, indent);
+            format_expr_prec_indent(end, out, 0, indent, comment_state);
         }
         Expr::InterpolatedString { parts, .. } => {
             out.push('"');
@@ -518,7 +547,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                     at_syntax::InterpPart::String(s) => out.push_str(s),
                     at_syntax::InterpPart::Expr(expr) => {
                         out.push('{');
-                        format_expr_prec_indent(expr, out, 0, indent);
+                        format_expr_prec_indent(expr, out, 0, indent, comment_state);
                         out.push('}');
                     }
                 }
@@ -534,7 +563,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 }
                 out.push_str(&field.name.name);
                 out.push_str(": ");
-                format_expr_prec_indent(&field.value, out, 0, indent);
+                format_expr_prec_indent(&field.value, out, 0, indent, comment_state);
             }
             out.push_str(" }");
         }
@@ -549,7 +578,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             out.push_str(&variant.name);
             if let Some(expr) = payload {
                 out.push('(');
-                format_expr_prec_indent(expr, out, 0, indent);
+                format_expr_prec_indent(expr, out, 0, indent, comment_state);
                 out.push(')');
             }
         }
@@ -562,7 +591,7 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
                 out.push_str(&param.name);
             }
             out.push_str("| ");
-            format_expr_prec_indent(body, out, 0, indent);
+            format_expr_prec_indent(body, out, 0, indent, comment_state);
         }
     }
 }
