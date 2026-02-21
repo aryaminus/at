@@ -1222,12 +1222,28 @@ impl TypeChecker {
     }
 
     fn extract_option_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<OptionNarrow> {
-        let (target_name, then_branch) = match (for_then, condition) {
-            (true, Expr::Call { .. }) => ("is_some", true),
-            (false, Expr::Call { .. }) => ("is_none", false),
+        let (target_name, then_branch, call_expr) = match (for_then, condition) {
+            (true, Expr::Call { .. }) => ("is_some", true, condition),
+            (
+                true,
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                },
+            ) => ("is_some", false, expr.as_ref()),
+            (false, Expr::Call { .. }) => ("is_none", false, condition),
+            (
+                false,
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                },
+            ) => ("is_none", true, expr.as_ref()),
             _ => return None,
         };
-        let Expr::Call { callee, args } = condition else {
+        let Expr::Call { callee, args } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
@@ -1258,12 +1274,28 @@ impl TypeChecker {
     }
 
     fn extract_result_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<ResultNarrow> {
-        let (target_name, then_branch) = match (for_then, condition) {
-            (true, Expr::Call { .. }) => ("is_ok", true),
-            (false, Expr::Call { .. }) => ("is_err", false),
+        let (target_name, then_branch, call_expr) = match (for_then, condition) {
+            (true, Expr::Call { .. }) => ("is_ok", true, condition),
+            (
+                true,
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                },
+            ) => ("is_ok", false, expr.as_ref()),
+            (false, Expr::Call { .. }) => ("is_err", false, condition),
+            (
+                false,
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr,
+                    ..
+                },
+            ) => ("is_err", true, expr.as_ref()),
             _ => return None,
         };
-        let Expr::Call { callee, args } = condition else {
+        let Expr::Call { callee, args } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
