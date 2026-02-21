@@ -860,6 +860,27 @@ impl TypeChecker {
                     SimpleType::Unknown
                 }
             }
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
+                if left_ty == SimpleType::Int && right_ty == SimpleType::Int {
+                    SimpleType::Int
+                } else if left_ty == SimpleType::Unknown || right_ty == SimpleType::Unknown {
+                    SimpleType::Unknown
+                } else {
+                    self.push_error(
+                        format!(
+                            "operator expects int, got {} and {}",
+                            format_type(&left_ty),
+                            format_type(&right_ty)
+                        ),
+                        Some(op_span),
+                    );
+                    SimpleType::Unknown
+                }
+            }
             BinaryOp::And | BinaryOp::Or => {
                 let left_ok = left_ty == SimpleType::Bool
                     || left_ty == SimpleType::Int
@@ -1003,6 +1024,8 @@ impl TypeChecker {
         then_branch: &Expr,
         else_branch: Option<&Expr>,
     ) -> SimpleType {
+        let option_narrow = self.extract_option_narrow(condition);
+        let result_narrow = self.extract_result_narrow(condition);
         let cond_ty = self.check_expr(condition);
         if cond_ty != SimpleType::Bool
             && cond_ty != SimpleType::Int
@@ -1016,7 +1039,22 @@ impl TypeChecker {
         self.last_option_inner = None;
         self.last_result_ok = None;
         self.last_result_err = None;
+        self.push_scope();
+        if let Some((ident, inner)) = option_narrow.clone() {
+            if let Some(scope) = self.option_inner.last_mut() {
+                scope.insert(ident.name.clone(), inner);
+            }
+        }
+        if let Some((ident, ok, err)) = result_narrow.clone() {
+            if let Some(scope) = self.result_ok.last_mut() {
+                scope.insert(ident.name.clone(), ok);
+            }
+            if let Some(scope) = self.result_err.last_mut() {
+                scope.insert(ident.name.clone(), err);
+            }
+        }
         let then_ty = self.check_expr(then_branch);
+        self.pop_scope();
         let then_option = self.last_option_inner.clone();
         let then_ok = self.last_result_ok.clone();
         let then_err = self.last_result_err.clone();
@@ -1024,11 +1062,29 @@ impl TypeChecker {
         self.last_option_inner = None;
         self.last_result_ok = None;
         self.last_result_err = None;
+        self.push_scope();
+        if let Some((ident, inner)) = option_narrow.clone() {
+            let inner_value = self.lookup_option_inner(&ident.name).unwrap_or(inner);
+            if let Some(scope) = self.option_inner.last_mut() {
+                scope.insert(ident.name.clone(), inner_value);
+            }
+        }
+        if let Some((ident, ok, err)) = result_narrow.clone() {
+            let ok_value = self.lookup_result_ok(&ident.name).unwrap_or(ok);
+            let err_value = self.lookup_result_err(&ident.name).unwrap_or(err);
+            if let Some(scope) = self.result_ok.last_mut() {
+                scope.insert(ident.name.clone(), ok_value);
+            }
+            if let Some(scope) = self.result_err.last_mut() {
+                scope.insert(ident.name.clone(), err_value);
+            }
+        }
         let else_ty = if let Some(else_expr) = else_branch {
             self.check_expr(else_expr)
         } else {
             SimpleType::Unit
         };
+        self.pop_scope();
         let else_option = self.last_option_inner.clone();
         let else_ok = self.last_result_ok.clone();
         let else_err = self.last_result_err.clone();
@@ -1118,6 +1174,65 @@ impl TypeChecker {
                 );
             }
             _ => {}
+        }
+    }
+
+    fn extract_option_narrow(&mut self, condition: &Expr) -> Option<(Ident, SimpleType)> {
+        match condition {
+            Expr::Call { callee, args } => {
+                if let Expr::Ident(ident) = callee.as_ref() {
+                    if ident.name == "is_some" {
+                        if let Some(arg) = args.first() {
+                            if let Expr::Ident(arg_ident) = arg {
+                                if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
+                                    return Some((arg_ident.clone(), inner));
+                                }
+                                if let Some(ty) = self.resolve_local(arg_ident) {
+                                    if let SimpleType::Option(inner) = ty {
+                                        return Some((arg_ident.clone(), (*inner).clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_result_narrow(
+        &mut self,
+        condition: &Expr,
+    ) -> Option<(Ident, SimpleType, SimpleType)> {
+        match condition {
+            Expr::Call { callee, args } => {
+                if let Expr::Ident(ident) = callee.as_ref() {
+                    if ident.name == "is_ok" {
+                        if let Some(arg) = args.first() {
+                            if let Expr::Ident(arg_ident) = arg {
+                                let ok = self.lookup_result_ok(&arg_ident.name);
+                                let err = self.lookup_result_err(&arg_ident.name);
+                                if let (Some(ok), Some(err)) = (ok, err) {
+                                    return Some((arg_ident.clone(), ok, err));
+                                }
+                                if let Some(ty) = self.resolve_local(arg_ident) {
+                                    if let SimpleType::Result(ok, err) = ty {
+                                        return Some((
+                                            arg_ident.clone(),
+                                            (*ok).clone(),
+                                            (*err).clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -1568,7 +1683,7 @@ impl TypeChecker {
             self.check_expr(arg);
         }
         match callee_ty {
-            SimpleType::Function(params, _) => {
+            SimpleType::Function(params, return_ty) => {
                 if params.len() != args.len() {
                     self.push_error(
                         format!(
@@ -1579,7 +1694,22 @@ impl TypeChecker {
                         expr_span(callee),
                     );
                 }
-                SimpleType::Unknown
+                for (index, arg) in args.iter().enumerate() {
+                    if let Some(expected) = params.get(index) {
+                        let found = self.check_expr(arg);
+                        if !matches!(found, SimpleType::Unknown)
+                            && !matches!(expected, SimpleType::Unknown)
+                        {
+                            self.check_compatible(
+                                expected,
+                                &found,
+                                &format!("closure argument {} type mismatch", index + 1),
+                                expr_span(arg),
+                            );
+                        }
+                    }
+                }
+                (*return_ty).clone()
             }
             SimpleType::Unknown => SimpleType::Unknown,
             _ => {

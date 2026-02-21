@@ -502,24 +502,33 @@ fn binary_prec(op: at_syntax::BinaryOp) -> u8 {
     match op {
         at_syntax::BinaryOp::Or => 1,
         at_syntax::BinaryOp::And => 2,
-        at_syntax::BinaryOp::Eq | at_syntax::BinaryOp::Neq => 3,
+        at_syntax::BinaryOp::BitOr => 3,
+        at_syntax::BinaryOp::BitXor => 4,
+        at_syntax::BinaryOp::BitAnd => 5,
+        at_syntax::BinaryOp::Shl | at_syntax::BinaryOp::Shr => 6,
+        at_syntax::BinaryOp::Eq | at_syntax::BinaryOp::Neq => 7,
         at_syntax::BinaryOp::Lt
         | at_syntax::BinaryOp::Lte
         | at_syntax::BinaryOp::Gt
-        | at_syntax::BinaryOp::Gte => 4,
-        at_syntax::BinaryOp::Add | at_syntax::BinaryOp::Sub => 5,
-        at_syntax::BinaryOp::Mul | at_syntax::BinaryOp::Div | at_syntax::BinaryOp::Mod => 6,
+        | at_syntax::BinaryOp::Gte => 8,
+        at_syntax::BinaryOp::Add | at_syntax::BinaryOp::Sub => 9,
+        at_syntax::BinaryOp::Mul | at_syntax::BinaryOp::Div | at_syntax::BinaryOp::Mod => 10,
     }
 }
 
 fn unary_prec() -> u8 {
-    7
+    11
 }
 
 fn binary_op_str(op: at_syntax::BinaryOp) -> &'static str {
     match op {
         at_syntax::BinaryOp::Or => "||",
         at_syntax::BinaryOp::And => "&&",
+        at_syntax::BinaryOp::BitOr => "|",
+        at_syntax::BinaryOp::BitXor => "^",
+        at_syntax::BinaryOp::BitAnd => "&",
+        at_syntax::BinaryOp::Shl => "<<",
+        at_syntax::BinaryOp::Shr => ">>",
         at_syntax::BinaryOp::Add => "+",
         at_syntax::BinaryOp::Sub => "-",
         at_syntax::BinaryOp::Mul => "*",

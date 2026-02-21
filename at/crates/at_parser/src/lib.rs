@@ -39,7 +39,16 @@ pub enum TokenKind {
     Percent,
     AndAnd,
     OrOr,
+    Ampersand,
     Pipe,
+    Caret,
+    Shl,
+    Shr,
+    AmpersandEquals,
+    PipeEquals,
+    CaretEquals,
+    ShlEquals,
+    ShrEquals,
     EqualEqual,
     Bang,
     BangEqual,
@@ -512,17 +521,43 @@ impl<'a> Parser<'a> {
             | TokenKind::Minus
             | TokenKind::Star
             | TokenKind::Slash
-            | TokenKind::Percent => {
+            | TokenKind::Percent
+            | TokenKind::Ampersand
+            | TokenKind::Pipe
+            | TokenKind::Caret
+            | TokenKind::Shl
+            | TokenKind::Shr => {
                 let (op, span) = match self.current.kind {
                     TokenKind::Plus => (at_syntax::BinaryOp::Add, self.current.span),
                     TokenKind::Minus => (at_syntax::BinaryOp::Sub, self.current.span),
                     TokenKind::Star => (at_syntax::BinaryOp::Mul, self.current.span),
                     TokenKind::Slash => (at_syntax::BinaryOp::Div, self.current.span),
                     TokenKind::Percent => (at_syntax::BinaryOp::Mod, self.current.span),
+                    TokenKind::Ampersand => (at_syntax::BinaryOp::BitAnd, self.current.span),
+                    TokenKind::Pipe => (at_syntax::BinaryOp::BitOr, self.current.span),
+                    TokenKind::Caret => (at_syntax::BinaryOp::BitXor, self.current.span),
+                    TokenKind::Shl => (at_syntax::BinaryOp::Shl, self.current.span),
+                    TokenKind::Shr => (at_syntax::BinaryOp::Shr, self.current.span),
                     _ => unreachable!(),
                 };
                 self.advance();
                 self.expect(TokenKind::Equals)?;
+                Some((op, span))
+            }
+            TokenKind::AmpersandEquals
+            | TokenKind::PipeEquals
+            | TokenKind::CaretEquals
+            | TokenKind::ShlEquals
+            | TokenKind::ShrEquals => {
+                let (op, span) = match self.current.kind {
+                    TokenKind::AmpersandEquals => (at_syntax::BinaryOp::BitAnd, self.current.span),
+                    TokenKind::PipeEquals => (at_syntax::BinaryOp::BitOr, self.current.span),
+                    TokenKind::CaretEquals => (at_syntax::BinaryOp::BitXor, self.current.span),
+                    TokenKind::ShlEquals => (at_syntax::BinaryOp::Shl, self.current.span),
+                    TokenKind::ShrEquals => (at_syntax::BinaryOp::Shr, self.current.span),
+                    _ => unreachable!(),
+                };
+                self.advance();
                 Some((op, span))
             }
             _ => {
@@ -756,13 +791,90 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_range()?;
+        let mut expr = self.parse_bitwise_or()?;
         loop {
             let (op, span) = match self.current.kind {
                 TokenKind::Less => (at_syntax::BinaryOp::Lt, self.current.span),
                 TokenKind::LessEqual => (at_syntax::BinaryOp::Lte, self.current.span),
                 TokenKind::Greater => (at_syntax::BinaryOp::Gt, self.current.span),
                 TokenKind::GreaterEqual => (at_syntax::BinaryOp::Gte, self.current.span),
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitwise_or()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                op_span: span,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bitwise_xor()?;
+        loop {
+            let (op, span) = match self.current.kind {
+                TokenKind::Pipe => (at_syntax::BinaryOp::BitOr, self.current.span),
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitwise_xor()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                op_span: span,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bitwise_and()?;
+        loop {
+            let (op, span) = match self.current.kind {
+                TokenKind::Caret => (at_syntax::BinaryOp::BitXor, self.current.span),
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_bitwise_and()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                op_span: span,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_shift()?;
+        loop {
+            let (op, span) = match self.current.kind {
+                TokenKind::Ampersand => (at_syntax::BinaryOp::BitAnd, self.current.span),
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_shift()?;
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                op_span: span,
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_range()?;
+        loop {
+            let (op, span) = match self.current.kind {
+                TokenKind::Shl => (at_syntax::BinaryOp::Shl, self.current.span),
+                TokenKind::Shr => (at_syntax::BinaryOp::Shr, self.current.span),
                 _ => break,
             };
             self.advance();
@@ -1654,9 +1766,18 @@ impl<'a> Lexer<'a> {
                             end: self.index,
                         },
                     }
+                } else if self.current == Some('=') {
+                    self.bump();
+                    Token {
+                        kind: TokenKind::AmpersandEquals,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
                 } else {
                     Token {
-                        kind: TokenKind::Invalid('&'),
+                        kind: TokenKind::Ampersand,
                         span: Span {
                             start,
                             end: self.index,
@@ -1675,9 +1796,39 @@ impl<'a> Lexer<'a> {
                             end: self.index,
                         },
                     }
+                } else if self.current == Some('=') {
+                    self.bump();
+                    Token {
+                        kind: TokenKind::PipeEquals,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
                 } else {
                     Token {
                         kind: TokenKind::Pipe,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
+                }
+            }
+            Some('^') => {
+                self.bump();
+                if self.current == Some('=') {
+                    self.bump();
+                    Token {
+                        kind: TokenKind::CaretEquals,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Caret,
                         span: Span {
                             start,
                             end: self.index,
@@ -1708,7 +1859,27 @@ impl<'a> Lexer<'a> {
             }
             Some('<') => {
                 self.bump();
-                if self.current == Some('=') {
+                if self.current == Some('<') {
+                    self.bump();
+                    if self.current == Some('=') {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::ShlEquals,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    } else {
+                        Token {
+                            kind: TokenKind::Shl,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    }
+                } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::LessEqual,
@@ -1729,7 +1900,27 @@ impl<'a> Lexer<'a> {
             }
             Some('>') => {
                 self.bump();
-                if self.current == Some('=') {
+                if self.current == Some('>') {
+                    self.bump();
+                    if self.current == Some('=') {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::ShrEquals,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    } else {
+                        Token {
+                            kind: TokenKind::Shr,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    }
+                } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::GreaterEqual,

@@ -129,6 +129,11 @@ pub struct EnumVariant {
 pub enum BinaryOp {
     Or,
     And,
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shl,
+    Shr,
     Add,
     Sub,
     Mul,

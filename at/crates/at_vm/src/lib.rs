@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use at_syntax::{Expr, Function, Module, Span, Stmt};
+use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +117,11 @@ pub enum Op {
     Lte,
     Gt,
     Gte,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     Neg,
     Not,
     MatchResultOk(usize),
@@ -211,6 +216,12 @@ struct LoopContext {
     continues: Vec<usize>,
 }
 
+#[derive(Clone)]
+enum SetSegment {
+    Member(Ident),
+    Index { expr: Expr, span: Option<Span> },
+}
+
 impl LoopContext {
     fn new() -> Self {
         Self {
@@ -257,6 +268,96 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    fn compile_set_target(
+        &mut self,
+        base: &Expr,
+        segments: Vec<SetSegment>,
+        value: &Expr,
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        let mut path = Vec::new();
+        let mut current = base;
+        loop {
+            match current {
+                Expr::Member { base, name } => {
+                    path.push(SetSegment::Member(name.clone()));
+                    current = base;
+                }
+                Expr::Index {
+                    base,
+                    index,
+                    index_span,
+                } => {
+                    path.push(SetSegment::Index {
+                        expr: (**index).clone(),
+                        span: Some(*index_span),
+                    });
+                    current = base;
+                }
+                _ => break,
+            }
+        }
+
+        let root_ident = match current {
+            Expr::Ident(ident) => ident,
+            _ => {
+                return Err(compile_error(
+                    "set target must start with identifier".to_string(),
+                    expr_span(current),
+                ))
+            }
+        };
+
+        let slot = self.resolve_local(&root_ident.name).ok_or_else(|| {
+            compile_error(
+                format!("unknown identifier: {}", root_ident.name),
+                Some(root_ident.span),
+            )
+        })?;
+
+        path.reverse();
+        let mut all_segments = path;
+        all_segments.extend(segments);
+
+        chunk.push(Op::LoadLocal(slot), Some(root_ident.span));
+        for segment in all_segments
+            .iter()
+            .take(all_segments.len().saturating_sub(1))
+        {
+            match segment {
+                SetSegment::Member(name) => {
+                    chunk.push(Op::GetMember(name.name.clone()), Some(name.span));
+                }
+                SetSegment::Index { expr, span } => {
+                    self.compile_expr(expr, chunk)?;
+                    chunk.push(Op::Index, *span);
+                }
+            }
+        }
+
+        let last_segment = all_segments.last().ok_or_else(|| {
+            compile_error(
+                "set target is missing member/index".to_string(),
+                Some(root_ident.span),
+            )
+        })?;
+
+        match last_segment {
+            SetSegment::Member(name) => {
+                self.compile_expr(value, chunk)?;
+                chunk.push(Op::StoreMember(name.name.clone()), Some(name.span));
+            }
+            SetSegment::Index { expr, span } => {
+                self.compile_expr(expr, chunk)?;
+                self.compile_expr(value, chunk)?;
+                chunk.push(Op::StoreIndex, *span);
+            }
+        }
+
+        chunk.push(Op::StoreLocal(slot), Some(root_ident.span));
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             scopes: Vec::new(),
@@ -441,47 +542,17 @@ impl Compiler {
                 })?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
             }
-            Stmt::SetMember { base, field, value } => match base {
-                Expr::Ident(name) => {
-                    let slot = self.resolve_local(&name.name).ok_or_else(|| {
-                        compile_error(
-                            format!("unknown identifier: {}", name.name),
-                            Some(name.span),
-                        )
-                    })?;
-                    chunk.push(Op::LoadLocal(slot), Some(name.span));
-                    self.compile_expr(value, chunk)?;
-                    chunk.push(Op::StoreMember(field.name.clone()), Some(field.span));
-                    chunk.push(Op::StoreLocal(slot), Some(name.span));
-                }
-                other => {
-                    return Err(compile_error(
-                        "set member target must be an identifier".to_string(),
-                        expr_span(&other),
-                    ));
-                }
-            },
-            Stmt::SetIndex { base, index, value } => match base {
-                Expr::Ident(name) => {
-                    let slot = self.resolve_local(&name.name).ok_or_else(|| {
-                        compile_error(
-                            format!("unknown identifier: {}", name.name),
-                            Some(name.span),
-                        )
-                    })?;
-                    chunk.push(Op::LoadLocal(slot), Some(name.span));
-                    self.compile_expr(index, chunk)?;
-                    self.compile_expr(value, chunk)?;
-                    chunk.push(Op::StoreIndex, Some(name.span));
-                    chunk.push(Op::StoreLocal(slot), Some(name.span));
-                }
-                other => {
-                    return Err(compile_error(
-                        "set index target must be an identifier".to_string(),
-                        expr_span(&other),
-                    ));
-                }
-            },
+            Stmt::SetMember { base, field, value } => {
+                let segments = vec![SetSegment::Member(field.clone())];
+                self.compile_set_target(base, segments, value, chunk)?;
+            }
+            Stmt::SetIndex { base, index, value } => {
+                let segments = vec![SetSegment::Index {
+                    expr: index.clone(),
+                    span: expr_span(index),
+                }];
+                self.compile_set_target(base, segments, value, chunk)?;
+            }
             Stmt::While {
                 while_span,
                 condition,
@@ -691,6 +762,11 @@ impl Compiler {
                         at_syntax::BinaryOp::Mul => Op::Mul,
                         at_syntax::BinaryOp::Div => Op::Div,
                         at_syntax::BinaryOp::Mod => Op::Mod,
+                        at_syntax::BinaryOp::BitAnd => Op::BitAnd,
+                        at_syntax::BinaryOp::BitOr => Op::BitOr,
+                        at_syntax::BinaryOp::BitXor => Op::BitXor,
+                        at_syntax::BinaryOp::Shl => Op::Shl,
+                        at_syntax::BinaryOp::Shr => Op::Shr,
                         at_syntax::BinaryOp::Eq => Op::Eq,
                         at_syntax::BinaryOp::Neq => Op::Neq,
                         at_syntax::BinaryOp::Lt => Op::Lt,
@@ -3276,6 +3352,37 @@ impl Vm {
                         _ => {
                             return Err(runtime_error_at(
                                 "invalid comparison operands".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
+                }
+                op @ Op::BitAnd
+                | op @ Op::BitOr
+                | op @ Op::BitXor
+                | op @ Op::Shl
+                | op @ Op::Shr => {
+                    let right = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let left = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => {
+                            let result = match op {
+                                Op::BitAnd => left & right,
+                                Op::BitOr => left | right,
+                                Op::BitXor => left ^ right,
+                                Op::Shl => left << right,
+                                Op::Shr => left >> right,
+                                _ => unreachable!(),
+                            };
+                            self.stack.push(Value::Int(result));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "bitwise expects int".to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
