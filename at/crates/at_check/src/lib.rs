@@ -10,12 +10,12 @@ enum SimpleType {
     Float,
     Bool,
     String,
-    Array,
-    Option,
-    Result,
     Unit,
-    Function(usize),
-    Custom(String),
+    Array(Box<SimpleType>),
+    Option(Box<SimpleType>),
+    Result(Box<SimpleType>, Box<SimpleType>),
+    Function(Vec<SimpleType>, Box<SimpleType>),
+    Custom(String, Vec<SimpleType>),
     Unknown,
 }
 
@@ -354,16 +354,36 @@ impl TypeChecker {
                 }
                 let value_ty = self.check_expr(value);
                 if let Some(expected) = existing {
-                    if self.check_compatible(
+                    if let SimpleType::Option(inner) = &value_ty {
+                        if self.last_option_inner.is_none()
+                            && !matches!(**inner, SimpleType::Unknown)
+                        {
+                            self.last_option_inner = Some((**inner).clone());
+                        }
+                    }
+                    if let SimpleType::Result(ok, err) = &value_ty {
+                        if self.last_result_ok.is_none() && !matches!(**ok, SimpleType::Unknown) {
+                            self.last_result_ok = Some((**ok).clone());
+                        }
+                        if self.last_result_err.is_none() && !matches!(**err, SimpleType::Unknown) {
+                            self.last_result_err = Some((**err).clone());
+                        }
+                    }
+                    if matches!(expected, SimpleType::Option(_))
+                        && matches!(value_ty, SimpleType::Option(_))
+                    {
+                        self.merge_assigned_inners(name, &expected, name.span);
+                    } else if matches!(expected, SimpleType::Result(_, _))
+                        && matches!(value_ty, SimpleType::Result(_, _))
+                    {
+                        self.merge_assigned_inners(name, &expected, name.span);
+                    } else if self.check_compatible(
                         &expected,
                         &value_ty,
                         &format!("type mismatch for {}", name.name),
                         Some(name.span),
                     ) {
-                        // Only rebind on successful type check
                         self.merge_assigned_inners(name, &expected, name.span);
-                        self.infer_inner_from_expr(value, &value_ty);
-                        self.bind_inner_types_for_assignment(name, &value_ty);
                     }
                 }
             }
@@ -406,7 +426,7 @@ impl TypeChecker {
                 body,
             } => {
                 let iter_ty = self.check_expr(iter);
-                if iter_ty != SimpleType::Array && iter_ty != SimpleType::Unknown {
+                if !matches!(iter_ty, SimpleType::Array(_)) && iter_ty != SimpleType::Unknown {
                     self.push_error(
                         format!("for expects array, got {}", format_type(&iter_ty)),
                         Some(*for_span),
@@ -414,7 +434,11 @@ impl TypeChecker {
                 }
                 self.loop_depth += 1;
                 self.push_scope();
-                self.bind_local(item, SimpleType::Unknown);
+                let item_ty = match iter_ty {
+                    SimpleType::Array(inner) => (*inner).clone(),
+                    _ => SimpleType::Unknown,
+                };
+                self.bind_local(item, item_ty);
                 for stmt in body {
                     self.check_stmt(stmt);
                 }
@@ -456,12 +480,12 @@ impl TypeChecker {
                     self.last_result_err = None;
                     self.last_option_inner = None;
                     let found = self.check_expr(expr);
-                    if matches!(found, SimpleType::Result) {
-                        self.current_return = SimpleType::Result;
+                    if matches!(found, SimpleType::Result(_, _)) {
+                        self.current_return = found.clone();
                         self.update_return_result_inners(expr_span(expr));
                         self.update_return_from_ident(expr, expr_span(expr));
-                    } else if matches!(found, SimpleType::Option) {
-                        self.current_return = SimpleType::Option;
+                    } else if matches!(found, SimpleType::Option(_)) {
+                        self.current_return = found.clone();
                         self.update_return_option_inner(expr_span(expr));
                         self.update_return_from_ident(expr, expr_span(expr));
                     } else if found != SimpleType::Unknown {
@@ -479,11 +503,11 @@ impl TypeChecker {
                         "return type mismatch",
                         expr_span(expr),
                     );
-                    if matches!(expected, SimpleType::Result) {
+                    if matches!(expected, SimpleType::Result(_, _)) {
                         self.update_return_result_inners(expr_span(expr));
                         self.update_return_from_ident(expr, expr_span(expr));
                     }
-                    if matches!(expected, SimpleType::Option) {
+                    if matches!(expected, SimpleType::Option(_)) {
                         self.update_return_option_inner(expr_span(expr));
                         self.update_return_from_ident(expr, expr_span(expr));
                     }
@@ -517,10 +541,10 @@ impl TypeChecker {
                     );
                     SimpleType::Unknown
                 };
-                if matches!(ty, SimpleType::Option) {
+                if matches!(ty, SimpleType::Option(_)) {
                     self.last_option_inner = self.lookup_option_inner(&ident.name);
                 }
-                if matches!(ty, SimpleType::Result) {
+                if matches!(ty, SimpleType::Result(_, _)) {
                     self.last_result_ok = self.lookup_result_ok(&ident.name);
                     self.last_result_err = self.lookup_result_err(&ident.name);
                 }
@@ -541,7 +565,7 @@ impl TypeChecker {
             } => self.check_if(*if_span, condition, then_branch, else_branch.as_deref()),
             Expr::Member { base, name } => {
                 let base_ty = self.check_expr(base);
-                if let SimpleType::Custom(struct_name) = base_ty {
+                if let SimpleType::Custom(struct_name, _) = base_ty {
                     if let Some(fields) = self.structs.get(&struct_name) {
                         let field_ty = fields
                             .iter()
@@ -565,14 +589,18 @@ impl TypeChecker {
             }
             Expr::Try(expr) => {
                 let inner = self.check_expr(expr);
-                if inner != SimpleType::Result && inner != SimpleType::Unknown {
-                    self.push_error(
-                        format!("? expects result, got {}", format_type(&inner)),
-                        expr_span(expr),
-                    );
-                    SimpleType::Unknown
-                } else {
-                    self.last_result_ok.clone().unwrap_or(SimpleType::Unknown)
+                match &inner {
+                    SimpleType::Result(ok, _) => (**ok).clone(),
+                    SimpleType::Unknown => {
+                        self.last_result_ok.clone().unwrap_or(SimpleType::Unknown)
+                    }
+                    _ => {
+                        self.push_error(
+                            format!("? expects result, got {}", format_type(&inner)),
+                            expr_span(expr),
+                        );
+                        SimpleType::Unknown
+                    }
                 }
             }
             Expr::Match {
@@ -594,40 +622,46 @@ impl TypeChecker {
                 ty
             }
             Expr::Array { items, .. } => {
-                let mut array_ty = SimpleType::Unknown;
+                let mut array_inner = SimpleType::Unknown;
                 for item in items {
                     let item_ty = self.check_expr(item);
-                    if array_ty == SimpleType::Unknown {
-                        array_ty = item_ty;
-                    } else if item_ty != SimpleType::Unknown && item_ty != array_ty {
+                    if matches!(array_inner, SimpleType::Unknown) {
+                        array_inner = item_ty;
+                    } else if !matches!(item_ty, SimpleType::Unknown)
+                        && !self.types_compatible(&array_inner, &item_ty)
+                    {
                         self.push_error(
                             format!(
                                 "array element type mismatch: expected {}, got {}",
-                                format_type(&array_ty),
+                                format_type(&array_inner),
                                 format_type(&item_ty)
                             ),
                             expr_span(item),
                         );
                     }
                 }
-                SimpleType::Array
+                SimpleType::Array(Box::new(array_inner))
             }
             Expr::Index { base, index, .. } => {
                 let base_ty = self.check_expr(base);
-                if base_ty != SimpleType::Array && base_ty != SimpleType::Unknown {
-                    self.push_error(
-                        format!("index expects array, got {}", format_type(&base_ty)),
-                        expr_span(base),
-                    );
-                }
                 let index_ty = self.check_expr(index);
-                if index_ty != SimpleType::Int && index_ty != SimpleType::Unknown {
+                if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
                     self.push_error(
                         format!("index expects int, got {}", format_type(&index_ty)),
                         expr_span(index),
                     );
                 }
-                SimpleType::Unknown
+                match base_ty {
+                    SimpleType::Array(inner) => (*inner).clone(),
+                    SimpleType::Unknown => SimpleType::Unknown,
+                    _ => {
+                        self.push_error(
+                            format!("index expects array, got {}", format_type(&base_ty)),
+                            expr_span(base),
+                        );
+                        SimpleType::Unknown
+                    }
+                }
             }
             Expr::Tuple { items, .. } => {
                 for item in items {
@@ -638,7 +672,7 @@ impl TypeChecker {
             Expr::Range { start, end, .. } => {
                 self.check_expr(start);
                 self.check_expr(end);
-                SimpleType::Array
+                SimpleType::Array(Box::new(SimpleType::Int))
             }
             Expr::InterpolatedString { parts, .. } => {
                 for part in parts {
@@ -650,12 +684,15 @@ impl TypeChecker {
             }
             Expr::Closure { params, body, .. } => {
                 self.push_scope();
+                let mut param_tys = Vec::new();
                 for param in params {
-                    self.bind_local(param, SimpleType::Unknown);
+                    let ty = SimpleType::Unknown;
+                    self.bind_local(param, ty.clone());
+                    param_tys.push(ty);
                 }
-                self.check_expr(body);
+                let return_ty = self.check_expr(body);
                 self.pop_scope();
-                SimpleType::Function(params.len())
+                SimpleType::Function(param_tys, Box::new(return_ty))
             }
             Expr::EnumLiteral {
                 name,
@@ -712,7 +749,7 @@ impl TypeChecker {
                 } else if let Some(expr) = payload {
                     self.check_expr(expr);
                 }
-                SimpleType::Custom(name.name.clone())
+                SimpleType::Custom(name.name.clone(), Vec::new())
             }
             Expr::StructLiteral { name, fields, .. } => {
                 let struct_fields = self.structs.get(&name.name).cloned();
@@ -764,7 +801,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                SimpleType::Custom(name.name.clone())
+                SimpleType::Custom(name.name.clone(), Vec::new())
             }
         }
     }
@@ -872,7 +909,7 @@ impl TypeChecker {
             BinaryOp::Eq | BinaryOp::Neq => {
                 if left_ty != SimpleType::Unknown
                     && right_ty != SimpleType::Unknown
-                    && left_ty != right_ty
+                    && !self.types_compatible(&left_ty, &right_ty)
                 {
                     self.push_error(
                         format!(
@@ -918,6 +955,47 @@ impl TypeChecker {
         }
     }
 
+    fn types_compatible(&self, expected: &SimpleType, found: &SimpleType) -> bool {
+        if expected == found {
+            return true;
+        }
+        if matches!(expected, SimpleType::Unknown) || matches!(found, SimpleType::Unknown) {
+            return true;
+        }
+        match (expected, found) {
+            (SimpleType::Array(left), SimpleType::Array(right)) => {
+                self.types_compatible(left, right)
+            }
+            (SimpleType::Option(left), SimpleType::Option(right)) => {
+                self.types_compatible(left, right)
+            }
+            (SimpleType::Result(ok_left, err_left), SimpleType::Result(ok_right, err_right)) => {
+                self.types_compatible(ok_left, ok_right)
+                    && self.types_compatible(err_left, err_right)
+            }
+            (
+                SimpleType::Function(params_left, ret_left),
+                SimpleType::Function(params_right, ret_right),
+            ) => {
+                params_left.len() == params_right.len()
+                    && params_left
+                        .iter()
+                        .zip(params_right.iter())
+                        .all(|(left, right)| self.types_compatible(left, right))
+                    && self.types_compatible(ret_left, ret_right)
+            }
+            (SimpleType::Custom(left, left_args), SimpleType::Custom(right, right_args)) => {
+                left == right
+                    && left_args.len() == right_args.len()
+                    && left_args
+                        .iter()
+                        .zip(right_args.iter())
+                        .all(|(left, right)| self.types_compatible(left, right))
+            }
+            _ => false,
+        }
+    }
+
     fn check_if(
         &mut self,
         if_span: Span,
@@ -954,7 +1032,7 @@ impl TypeChecker {
         let else_option = self.last_option_inner.clone();
         let else_ok = self.last_result_ok.clone();
         let else_err = self.last_result_err.clone();
-        if then_ty == else_ty {
+        if self.types_compatible(&then_ty, &else_ty) {
             self.merge_if_inners(
                 if_span,
                 &then_ty,
@@ -1021,7 +1099,7 @@ impl TypeChecker {
         self.last_result_ok = None;
         self.last_result_err = None;
         match ty {
-            SimpleType::Option => {
+            SimpleType::Option(_) => {
                 self.last_option_inner = self.merge_inner(
                     then_option,
                     else_option,
@@ -1029,7 +1107,7 @@ impl TypeChecker {
                     Some(span),
                 );
             }
-            SimpleType::Result => {
+            SimpleType::Result(_, _) => {
                 self.last_result_ok =
                     self.merge_inner(then_ok, else_ok, "if result ok inner mismatch", Some(span));
                 self.last_result_err = self.merge_inner(
@@ -1052,7 +1130,23 @@ impl TypeChecker {
     ) -> Option<SimpleType> {
         match (left, right) {
             (Some(left), Some(right)) => {
-                self.check_inner_compatible(&left, &right, message, span);
+                if matches!(left, SimpleType::Unknown) && !matches!(right, SimpleType::Unknown) {
+                    return Some(right);
+                }
+                if matches!(right, SimpleType::Unknown) && !matches!(left, SimpleType::Unknown) {
+                    return Some(left);
+                }
+                if !self.types_compatible(&left, &right) {
+                    self.push_error(
+                        format!(
+                            "{}: expected {} but got {}",
+                            message,
+                            format_type(&left),
+                            format_type(&right)
+                        ),
+                        span,
+                    );
+                }
                 Some(left)
             }
             (Some(left), None) => Some(left),
@@ -1062,7 +1156,8 @@ impl TypeChecker {
     }
 
     fn merge_assigned_inners(&mut self, name: &Ident, ty: &SimpleType, span: Span) {
-        if matches!(ty, SimpleType::Option) {
+        let scope_index = self.find_local_scope_index(&name.name);
+        if matches!(ty, SimpleType::Option(_)) {
             let existing = self.lookup_option_inner(&name.name);
             let current = self.last_option_inner.clone();
             self.last_option_inner = self.merge_inner(
@@ -1071,8 +1166,17 @@ impl TypeChecker {
                 &format!("option inner mismatch for {}", name.name),
                 Some(span),
             );
+            if let Some(inner) = self.last_option_inner.clone() {
+                if let Some(index) = scope_index {
+                    if let Some(scope) = self.option_inner.get_mut(index) {
+                        scope.insert(name.name.clone(), inner);
+                    }
+                } else if let Some(scope) = self.option_inner.last_mut() {
+                    scope.insert(name.name.clone(), inner);
+                }
+            }
         }
-        if matches!(ty, SimpleType::Result) {
+        if matches!(ty, SimpleType::Result(_, _)) {
             let existing_ok = self.lookup_result_ok(&name.name);
             let current_ok = self.last_result_ok.clone();
             self.last_result_ok = self.merge_inner(
@@ -1089,6 +1193,24 @@ impl TypeChecker {
                 &format!("result err inner mismatch for {}", name.name),
                 Some(span),
             );
+            if let Some(inner) = self.last_result_ok.clone() {
+                if let Some(index) = scope_index {
+                    if let Some(scope) = self.result_ok.get_mut(index) {
+                        scope.insert(name.name.clone(), inner);
+                    }
+                } else if let Some(scope) = self.result_ok.last_mut() {
+                    scope.insert(name.name.clone(), inner);
+                }
+            }
+            if let Some(inner) = self.last_result_err.clone() {
+                if let Some(index) = scope_index {
+                    if let Some(scope) = self.result_err.get_mut(index) {
+                        scope.insert(name.name.clone(), inner);
+                    }
+                } else if let Some(scope) = self.result_err.last_mut() {
+                    scope.insert(name.name.clone(), inner);
+                }
+            }
         }
     }
 
@@ -1137,7 +1259,7 @@ impl TypeChecker {
                     if struct_fields.is_none() {
                         self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
                     }
-                    if let SimpleType::Custom(struct_name) = &value_ty {
+                    if let SimpleType::Custom(struct_name, _) = &value_ty {
                         if struct_name != &name.name {
                             self.push_error(
                                 format!("match expects struct {}, got {}", name.name, struct_name),
@@ -1187,7 +1309,7 @@ impl TypeChecker {
                     if enum_variants.is_none() {
                         self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
                     }
-                    if let SimpleType::Custom(enum_name) = &value_ty {
+                    if let SimpleType::Custom(enum_name, _) = &value_ty {
                         if enum_name != &name.name {
                             self.push_error(
                                 format!("match expects enum {}, got {}", name.name, enum_name),
@@ -1245,7 +1367,9 @@ impl TypeChecker {
                 }
                 at_syntax::MatchPattern::ResultOk(ident) => {
                     has_ok = true;
-                    if value_ty != SimpleType::Result && value_ty != SimpleType::Unknown {
+                    if !matches!(value_ty, SimpleType::Result(_, _))
+                        && value_ty != SimpleType::Unknown
+                    {
                         self.push_error("match expects result value".to_string(), Some(match_span));
                     }
                     let ty = result_ok.clone().unwrap_or(SimpleType::Unknown);
@@ -1253,7 +1377,9 @@ impl TypeChecker {
                 }
                 at_syntax::MatchPattern::ResultErr(ident) => {
                     has_err = true;
-                    if value_ty != SimpleType::Result && value_ty != SimpleType::Unknown {
+                    if !matches!(value_ty, SimpleType::Result(_, _))
+                        && value_ty != SimpleType::Unknown
+                    {
                         self.push_error("match expects result value".to_string(), Some(match_span));
                     }
                     let ty = result_err.clone().unwrap_or(SimpleType::Unknown);
@@ -1261,7 +1387,8 @@ impl TypeChecker {
                 }
                 at_syntax::MatchPattern::OptionSome(ident) => {
                     has_some = true;
-                    if value_ty != SimpleType::Option && value_ty != SimpleType::Unknown {
+                    if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
+                    {
                         self.push_error("match expects option value".to_string(), Some(match_span));
                     }
                     let ty = option_inner.clone().unwrap_or(SimpleType::Unknown);
@@ -1269,7 +1396,8 @@ impl TypeChecker {
                 }
                 at_syntax::MatchPattern::OptionNone => {
                     has_none = true;
-                    if value_ty != SimpleType::Option && value_ty != SimpleType::Unknown {
+                    if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
+                    {
                         self.push_error("match expects option value".to_string(), Some(match_span));
                     }
                 }
@@ -1290,7 +1418,7 @@ impl TypeChecker {
             self.last_result_err = None;
             self.last_option_inner = None;
             let arm_ty = self.check_expr(&arm.body);
-            if matches!(arm_ty, SimpleType::Result) {
+            if matches!(arm_ty, SimpleType::Result(_, _)) {
                 if let Some(ok_inner) = self.last_result_ok.clone() {
                     if let Some(existing) = inferred_ok.clone() {
                         self.check_inner_compatible(
@@ -1316,7 +1444,7 @@ impl TypeChecker {
                     }
                 }
             }
-            if matches!(arm_ty, SimpleType::Option) {
+            if matches!(arm_ty, SimpleType::Option(_)) {
                 if let Some(opt_inner) = self.last_option_inner.clone() {
                     if let Some(existing) = inferred_opt.clone() {
                         self.check_inner_compatible(
@@ -1344,13 +1472,13 @@ impl TypeChecker {
         }
 
         if !has_wildcard {
-            if matches!(value_ty, SimpleType::Result) && !(has_ok && has_err) {
+            if matches!(value_ty, SimpleType::Result(_, _)) && !(has_ok && has_err) {
                 self.push_error(
                     "non-exhaustive match for result".to_string(),
                     Some(match_span),
                 );
             }
-            if matches!(value_ty, SimpleType::Option) && !(has_some && has_none) {
+            if matches!(value_ty, SimpleType::Option(_)) && !(has_some && has_none) {
                 self.push_error(
                     "non-exhaustive match for option".to_string(),
                     Some(match_span),
@@ -1358,11 +1486,16 @@ impl TypeChecker {
             }
         }
 
-        if matches!(result_ty, SimpleType::Result) {
+        if let SimpleType::Result(ok, err) = &result_ty {
+            self.last_result_ok = Some((**ok).clone());
+            self.last_result_err = Some((**err).clone());
+        } else {
             self.last_result_ok = inferred_ok.clone();
             self.last_result_err = inferred_err.clone();
         }
-        if matches!(result_ty, SimpleType::Option) {
+        if let SimpleType::Option(inner) = &result_ty {
+            self.last_option_inner = Some((**inner).clone());
+        } else {
             self.last_option_inner = inferred_opt.clone();
         }
 
@@ -1435,12 +1568,12 @@ impl TypeChecker {
             self.check_expr(arg);
         }
         match callee_ty {
-            SimpleType::Function(params) => {
-                if params != args.len() {
+            SimpleType::Function(params, _) => {
+                if params.len() != args.len() {
                     self.push_error(
                         format!(
                             "wrong arity for closure: expected {} args, got {}",
-                            params,
+                            params.len(),
                             args.len()
                         ),
                         expr_span(callee),
@@ -1534,7 +1667,7 @@ impl TypeChecker {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array
+                    if !matches!(arg_ty, SimpleType::Array(_))
                         && arg_ty != SimpleType::String
                         && arg_ty != SimpleType::Unknown
                     {
@@ -1547,20 +1680,20 @@ impl TypeChecker {
                 self.check_arity(name, args, 2, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("append expects array".to_string(), expr_span(arg));
                     }
                 }
                 if args.len() == 2 {
                     self.check_expr(&args[1]);
                 }
-                Some(SimpleType::Array)
+                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
             }
             "contains" => {
                 self.check_arity(name, args, 2, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("contains expects array".to_string(), expr_span(arg));
                     }
                 }
@@ -1573,7 +1706,7 @@ impl TypeChecker {
                 self.check_arity(name, args, 3, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("slice expects array".to_string(), expr_span(arg));
                     }
                 }
@@ -1595,39 +1728,39 @@ impl TypeChecker {
                         );
                     }
                 }
-                Some(SimpleType::Array)
+                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
             }
             "map" => {
                 self.check_arity(name, args, 2, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("map expects array".to_string(), expr_span(arg));
                     }
                 }
                 if args.len() == 2 {
                     self.check_expr(&args[1]);
                 }
-                Some(SimpleType::Array)
+                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
             }
             "filter" => {
                 self.check_arity(name, args, 2, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("filter expects array".to_string(), expr_span(arg));
                     }
                 }
                 if args.len() == 2 {
                     self.check_expr(&args[1]);
                 }
-                Some(SimpleType::Array)
+                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
             }
             "reduce" => {
                 self.check_arity(name, args, 3, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Array && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("reduce expects array".to_string(), expr_span(arg));
                     }
                 }
@@ -1650,48 +1783,64 @@ impl TypeChecker {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let inner = self.check_expr(arg);
-                    self.last_option_inner = Some(inner);
+                    self.last_option_inner = Some(inner.clone());
                     if matches!(self.current_return, SimpleType::Unknown) {
-                        self.current_return = SimpleType::Option;
+                        self.current_return = SimpleType::Option(Box::new(inner.clone()));
                     }
                 }
-                Some(SimpleType::Option)
+                Some(SimpleType::Option(Box::new(
+                    self.last_option_inner
+                        .clone()
+                        .unwrap_or(SimpleType::Unknown),
+                )))
             }
             "none" => {
                 self.check_arity(name, args, 0, span);
                 self.last_option_inner = None;
                 if matches!(self.current_return, SimpleType::Unknown) {
-                    self.current_return = SimpleType::Option;
+                    self.current_return = SimpleType::Option(Box::new(SimpleType::Unknown));
                 }
-                Some(SimpleType::Option)
+                Some(SimpleType::Option(Box::new(SimpleType::Unknown)))
             }
             "ok" => {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let inner = self.check_expr(arg);
-                    self.last_result_ok = Some(inner);
+                    self.last_result_ok = Some(inner.clone());
                     if matches!(self.current_return, SimpleType::Unknown) {
-                        self.current_return = SimpleType::Result;
+                        self.current_return = SimpleType::Result(
+                            Box::new(inner.clone()),
+                            Box::new(SimpleType::Unknown),
+                        );
                     }
                 }
-                Some(SimpleType::Result)
+                Some(SimpleType::Result(
+                    Box::new(self.last_result_ok.clone().unwrap_or(SimpleType::Unknown)),
+                    Box::new(SimpleType::Unknown),
+                ))
             }
             "err" => {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let inner = self.check_expr(arg);
-                    self.last_result_err = Some(inner);
+                    self.last_result_err = Some(inner.clone());
                     if matches!(self.current_return, SimpleType::Unknown) {
-                        self.current_return = SimpleType::Result;
+                        self.current_return = SimpleType::Result(
+                            Box::new(SimpleType::Unknown),
+                            Box::new(inner.clone()),
+                        );
                     }
                 }
-                Some(SimpleType::Result)
+                Some(SimpleType::Result(
+                    Box::new(SimpleType::Unknown),
+                    Box::new(self.last_result_err.clone().unwrap_or(SimpleType::Unknown)),
+                ))
             }
             "is_some" | "is_none" => {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Option && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Option(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error(
                             format!("{} expects option, got {}", name, format_type(&arg_ty)),
                             expr_span(arg),
@@ -1704,7 +1853,8 @@ impl TypeChecker {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if arg_ty != SimpleType::Result && arg_ty != SimpleType::Unknown {
+                    if !matches!(arg_ty, SimpleType::Result(_, _)) && arg_ty != SimpleType::Unknown
+                    {
                         self.push_error(
                             format!("{} expects result, got {}", name, format_type(&arg_ty)),
                             expr_span(arg),
@@ -1772,7 +1922,7 @@ impl TypeChecker {
         message: &str,
         span: Option<Span>,
     ) -> bool {
-        if expected == found {
+        if self.types_compatible(expected, found) {
             return true;
         }
         if matches!(expected, SimpleType::Unknown) || matches!(found, SimpleType::Unknown) {
@@ -1863,58 +2013,17 @@ impl TypeChecker {
     }
 
     fn bind_inner_types(&mut self, name: &Ident, ty: &SimpleType) {
-        if matches!(ty, SimpleType::Option) {
-            if let Some(inner) = self.last_option_inner.clone() {
-                if let Some(scope) = self.option_inner.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
+        if let SimpleType::Option(inner) = ty {
+            if let Some(scope) = self.option_inner.last_mut() {
+                scope.insert(name.name.clone(), (**inner).clone());
             }
         }
-        if matches!(ty, SimpleType::Result) {
-            if let Some(inner) = self.last_result_ok.clone() {
-                if let Some(scope) = self.result_ok.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
+        if let SimpleType::Result(ok, err) = ty {
+            if let Some(scope) = self.result_ok.last_mut() {
+                scope.insert(name.name.clone(), (**ok).clone());
             }
-            if let Some(inner) = self.last_result_err.clone() {
-                if let Some(scope) = self.result_err.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
-            }
-        }
-    }
-
-    fn bind_inner_types_for_assignment(&mut self, name: &Ident, ty: &SimpleType) {
-        let scope_index = self.find_local_scope_index(&name.name);
-        if matches!(ty, SimpleType::Option) {
-            if let Some(inner) = self.last_option_inner.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.option_inner.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.option_inner.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
-            }
-        }
-        if matches!(ty, SimpleType::Result) {
-            if let Some(inner) = self.last_result_ok.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.result_ok.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.result_ok.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
-            }
-            if let Some(inner) = self.last_result_err.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.result_err.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.result_err.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
+            if let Some(scope) = self.result_err.last_mut() {
+                scope.insert(name.name.clone(), (**err).clone());
             }
         }
     }
@@ -2026,7 +2135,7 @@ impl TypeChecker {
     fn inferred_return_string(&self) -> Option<String> {
         match &self.current_return {
             SimpleType::Unknown => None,
-            SimpleType::Result => {
+            SimpleType::Result(_, _) => {
                 let ok = self.return_result_ok.as_ref().map(format_type);
                 let err = self.return_result_err.as_ref().map(format_type);
                 if let (Some(ok), Some(err)) = (ok, err) {
@@ -2035,7 +2144,7 @@ impl TypeChecker {
                     Some("result".to_string())
                 }
             }
-            SimpleType::Option => {
+            SimpleType::Option(_) => {
                 if let Some(inner) = &self.return_option_inner {
                     Some(format!("option<{}>", format_type(inner)))
                 } else {
@@ -2051,7 +2160,7 @@ impl TypeChecker {
             Expr::Ident(ident) => ident,
             _ => return,
         };
-        if matches!(self.current_return, SimpleType::Option) {
+        if matches!(self.current_return, SimpleType::Option(_)) {
             if let Some(inner) = self.lookup_option_inner(&ident.name) {
                 let existing = self.return_option_inner.clone();
                 if let Some(existing) = existing {
@@ -2066,7 +2175,7 @@ impl TypeChecker {
                 }
             }
         }
-        if matches!(self.current_return, SimpleType::Result) {
+        if matches!(self.current_return, SimpleType::Result(_, _)) {
             if let Some(inner) = self.lookup_result_ok(&ident.name) {
                 let existing = self.return_result_ok.clone();
                 if let Some(existing) = existing {
@@ -2138,10 +2247,10 @@ impl TypeChecker {
     fn infer_inner_from_expr(&mut self, expr: &Expr, ty: &SimpleType) {
         match expr {
             Expr::Ident(ident) => {
-                if matches!(ty, SimpleType::Option) {
+                if matches!(ty, SimpleType::Option(_)) {
                     self.last_option_inner = self.lookup_option_inner(&ident.name);
                 }
-                if matches!(ty, SimpleType::Result) {
+                if matches!(ty, SimpleType::Result(_, _)) {
                     self.last_result_ok = self.lookup_result_ok(&ident.name);
                     self.last_result_err = self.lookup_result_err(&ident.name);
                 }
@@ -2150,6 +2259,23 @@ impl TypeChecker {
                 // inner types may already be recorded by check_match
             }
             _ => {}
+        }
+        if self.last_option_inner.is_none() {
+            if let SimpleType::Option(inner) = ty {
+                if !matches!(**inner, SimpleType::Unknown) {
+                    self.last_option_inner = Some((**inner).clone());
+                }
+            }
+        }
+        if self.last_result_ok.is_none() || self.last_result_err.is_none() {
+            if let SimpleType::Result(ok, err) = ty {
+                if self.last_result_ok.is_none() && !matches!(**ok, SimpleType::Unknown) {
+                    self.last_result_ok = Some((**ok).clone());
+                }
+                if self.last_result_err.is_none() && !matches!(**err, SimpleType::Unknown) {
+                    self.last_result_err = Some((**err).clone());
+                }
+            }
         }
     }
 
@@ -2172,7 +2298,7 @@ impl TypeChecker {
     fn type_from_ref(&mut self, ty: &TypeRef) -> SimpleType {
         self.validate_type_ref(ty);
         match ty {
-            TypeRef::Named { name, .. } => {
+            TypeRef::Named { name, args } => {
                 if let Some(alias) = self.resolve_alias(name) {
                     return self.type_from_ref(&alias);
                 }
@@ -2181,14 +2307,47 @@ impl TypeChecker {
                     "float" => SimpleType::Float,
                     "bool" => SimpleType::Bool,
                     "string" => SimpleType::String,
-                    "array" => SimpleType::Array,
-                    "option" => SimpleType::Option,
-                    "result" => SimpleType::Result,
                     "unit" => SimpleType::Unit,
-                    other => SimpleType::Custom(other.to_string()),
+                    "array" => {
+                        let inner = args
+                            .get(0)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        SimpleType::Array(Box::new(inner))
+                    }
+                    "option" => {
+                        let inner = args
+                            .get(0)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        SimpleType::Option(Box::new(inner))
+                    }
+                    "result" => {
+                        let ok = args
+                            .get(0)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        let err = args
+                            .get(1)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        SimpleType::Result(Box::new(ok), Box::new(err))
+                    }
+                    other => {
+                        let args = args.iter().map(|arg| self.type_from_ref(arg)).collect();
+                        SimpleType::Custom(other.to_string(), args)
+                    }
                 }
             }
-            TypeRef::Function { params, .. } => SimpleType::Function(params.len()),
+            TypeRef::Function {
+                params, return_ty, ..
+            } => SimpleType::Function(
+                params
+                    .iter()
+                    .map(|param| self.type_from_ref(param))
+                    .collect(),
+                Box::new(self.type_from_ref(return_ty)),
+            ),
         }
     }
 
@@ -2296,13 +2455,27 @@ fn format_type(ty: &SimpleType) -> String {
         SimpleType::Int => "int".to_string(),
         SimpleType::Bool => "bool".to_string(),
         SimpleType::String => "string".to_string(),
-        SimpleType::Array => "array".to_string(),
-        SimpleType::Option => "option".to_string(),
-        SimpleType::Result => "result".to_string(),
+        SimpleType::Array(inner) => format!("array<{}>", format_type(inner)),
+        SimpleType::Option(inner) => format!("option<{}>", format_type(inner)),
+        SimpleType::Result(ok, err) => format!("result<{}, {}>", format_type(ok), format_type(err)),
         SimpleType::Unit => "unit".to_string(),
         SimpleType::Float => "float".to_string(),
-        SimpleType::Function(params) => format!("fn({params})"),
-        SimpleType::Custom(name) => name.clone(),
+        SimpleType::Function(params, return_ty) => {
+            let params = params
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({params}) -> {}", format_type(return_ty))
+        }
+        SimpleType::Custom(name, args) => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                format!("{}<{}>", name, args)
+            }
+        }
         SimpleType::Unknown => "unknown".to_string(),
     }
 }
