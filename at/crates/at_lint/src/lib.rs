@@ -386,6 +386,11 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(&field.value, used);
             }
         }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                collect_used_capabilities_expr(expr, used);
+            }
+        }
         Expr::Closure { body, .. } => {
             collect_used_capabilities_expr(body, used);
         }
@@ -395,7 +400,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
 
 fn lint_unused_match_bindings_stmt(stmt: &Stmt, errors: &mut Vec<LintError>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             lint_unused_match_bindings_expr(value, errors);
         }
@@ -535,6 +540,11 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
                 lint_unused_match_bindings_expr(&field.value, errors);
             }
         }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                lint_unused_match_bindings_expr(expr, errors);
+            }
+        }
         Expr::Closure { body, .. } => {
             lint_unused_match_bindings_expr(body, errors);
         }
@@ -553,6 +563,9 @@ fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
             .iter()
             .filter_map(|field| field.binding.clone().or_else(|| Some(field.name.clone())))
             .collect(),
+        at_syntax::MatchPattern::Enum { binding, .. } => {
+            binding.clone().map_or_else(Vec::new, |ident| vec![ident])
+        }
         at_syntax::MatchPattern::Wildcard => Vec::new(),
     }
 }
@@ -664,7 +677,7 @@ fn collect_local_defs_stmt(
 
 fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_local_uses_expr(value, used);
         }
@@ -795,6 +808,11 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(&field.value, used);
             }
         }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                collect_local_uses_expr(expr, used);
+            }
+        }
         Expr::Closure { body, .. } => {
             collect_local_uses_expr(body, used);
         }
@@ -815,7 +833,7 @@ fn collect_alias_usage(module: &Module, used: &mut HashSet<String>) {
 
 fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_alias_usage_expr(value, used);
         }
@@ -946,6 +964,11 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(&field.value, used);
             }
         }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                collect_alias_usage_expr(expr, used);
+            }
+        }
         Expr::Closure { body, .. } => {
             collect_alias_usage_expr(body, used);
         }
@@ -966,7 +989,7 @@ fn collect_called_functions(module: &Module, used: &mut HashSet<String>) {
 
 fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_called_functions_expr(value, used);
         }
@@ -1091,6 +1114,11 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::StructLiteral { fields, .. } => {
             for field in fields {
                 collect_called_functions_expr(&field.value, used);
+            }
+        }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                collect_called_functions_expr(expr, used);
             }
         }
         Expr::Closure { body, .. } => {

@@ -2278,6 +2278,19 @@ fn value_to_json(value: Value) -> JsonValue {
             }
             JsonValue::Object(obj)
         }
+        Value::Enum {
+            name,
+            variant,
+            payload,
+        } => {
+            let mut obj = serde_json::Map::new();
+            obj.insert("enum".to_string(), JsonValue::String(name.clone()));
+            obj.insert("variant".to_string(), JsonValue::String(variant.clone()));
+            if let Some(payload) = payload {
+                obj.insert("value".to_string(), value_to_json((*payload).clone()));
+            }
+            JsonValue::Object(obj)
+        }
         Value::Tuple(items) => {
             JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
         }

@@ -76,6 +76,24 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             format_type_ref(ty, out);
             out.push_str(";\n");
         }
+        Stmt::Enum { name, variants } => {
+            indent_to(out, indent);
+            out.push_str("enum ");
+            out.push_str(&name.name);
+            out.push_str(" {\n");
+            for variant in variants {
+                indent_to(out, indent + 4);
+                out.push_str(&variant.name.name);
+                if let Some(payload) = &variant.payload {
+                    out.push('(');
+                    format_type_ref(payload, out);
+                    out.push(')');
+                }
+                out.push_str(",\n");
+            }
+            indent_to(out, indent);
+            out.push_str("}\n");
+        }
         Stmt::Struct { name, fields } => {
             indent_to(out, indent);
             out.push_str("struct ");
@@ -451,6 +469,21 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             }
             out.push_str(" }");
         }
+        Expr::EnumLiteral {
+            name,
+            variant,
+            payload,
+            ..
+        } => {
+            out.push_str(&name.name);
+            out.push_str("::");
+            out.push_str(&variant.name);
+            if let Some(expr) = payload {
+                out.push('(');
+                format_expr_prec_indent(expr, out, 0, indent);
+                out.push(')');
+            }
+        }
         Expr::Closure { params, body, .. } => {
             out.push('|');
             for (idx, param) in params.iter().enumerate() {
@@ -589,7 +622,7 @@ fn infer_needs(func: &Function, import_aliases: &HashSet<String>) -> Vec<String>
 
 fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_needs_expr(value, needs, import_aliases);
         }
@@ -680,6 +713,11 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
                 collect_needs_expr(&field.value, needs, import_aliases);
             }
         }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                collect_needs_expr(expr, needs, import_aliases);
+            }
+        }
         Expr::Closure { body, .. } => {
             collect_needs_expr(body, needs, import_aliases);
         }
@@ -736,6 +774,20 @@ fn format_match_pattern(pattern: &MatchPattern, out: &mut String) {
                 }
             }
             out.push_str(" }");
+        }
+        MatchPattern::Enum {
+            name,
+            variant,
+            binding,
+        } => {
+            out.push_str(&name.name);
+            out.push_str("::");
+            out.push_str(&variant.name);
+            if let Some(binding) = binding {
+                out.push('(');
+                out.push_str(&binding.name);
+                out.push(')');
+            }
         }
         MatchPattern::Wildcard => {
             out.push('_');

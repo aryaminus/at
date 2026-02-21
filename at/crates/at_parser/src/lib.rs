@@ -1,6 +1,6 @@
 use at_syntax::{
-    Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span, Stmt,
-    StructField, StructLiteralField, StructPatternField, TypeRef,
+    EnumVariant, Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span,
+    Stmt, StructField, StructLiteralField, StructPatternField, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,7 @@ pub enum TokenKind {
     Set,
     Struct,
     Type,
+    Enum,
     Break,
     Continue,
     Return,
@@ -50,6 +51,7 @@ pub enum TokenKind {
     FatArrow,
     Arrow,
     Colon,
+    ColonColon,
     Question,
     LParen,
     RParen,
@@ -215,6 +217,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::If
                 | TokenKind::Struct
                 | TokenKind::Type
+                | TokenKind::Enum
                 | TokenKind::Eof => {
                     break;
                 }
@@ -243,6 +246,7 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Import => self.parse_import_stmt(),
             TokenKind::Type => self.parse_type_alias_stmt(),
+            TokenKind::Enum => self.parse_enum_stmt(),
             TokenKind::Struct => self.parse_struct_stmt(),
             TokenKind::Let => self.parse_let_stmt(),
             TokenKind::Using => self.parse_using_stmt(),
@@ -362,6 +366,39 @@ impl<'a> Parser<'a> {
         let ty = self.parse_type_ref()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::TypeAlias { name, ty })
+    }
+
+    fn parse_enum_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut variants = Vec::new();
+        if self.current.kind != TokenKind::RBrace {
+            loop {
+                let variant_name = self.expect_ident()?;
+                let payload = if self.current.kind == TokenKind::LParen {
+                    self.advance();
+                    let ty = self.parse_type_ref()?;
+                    self.expect(TokenKind::RParen)?;
+                    Some(ty)
+                } else {
+                    None
+                };
+                variants.push(EnumVariant {
+                    name: variant_name,
+                    payload,
+                });
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.current.kind == TokenKind::RBrace {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::Enum { name, variants })
     }
 
     fn parse_struct_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -918,6 +955,9 @@ impl<'a> Parser<'a> {
                     span: self.current.span,
                 };
                 self.advance();
+                if self.current.kind == TokenKind::ColonColon {
+                    return self.parse_enum_literal(ident);
+                }
                 let is_type_name = ident
                     .name
                     .chars()
@@ -1125,6 +1165,26 @@ impl<'a> Parser<'a> {
         Ok(Expr::StructLiteral { span, name, fields })
     }
 
+    fn parse_enum_literal(&mut self, name: Ident) -> Result<Expr, ParseError> {
+        let span = name.span;
+        self.expect(TokenKind::ColonColon)?;
+        let variant = self.expect_ident()?;
+        let payload = if self.current.kind == TokenKind::LParen {
+            self.advance();
+            let expr = self.parse_expr()?;
+            self.expect(TokenKind::RParen)?;
+            Some(Box::new(expr))
+        } else {
+            None
+        };
+        Ok(Expr::EnumLiteral {
+            span,
+            name,
+            variant,
+            payload,
+        })
+    }
+
     fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         let if_span = self.current.span;
         self.advance();
@@ -1271,6 +1331,23 @@ impl<'a> Parser<'a> {
             }
         }
         let head = self.expect_ident()?;
+        if self.current.kind == TokenKind::ColonColon {
+            self.advance();
+            let variant = self.expect_ident()?;
+            let binding = if self.current.kind == TokenKind::LParen {
+                self.advance();
+                let binding = self.expect_ident()?;
+                self.expect(TokenKind::RParen)?;
+                Some(binding)
+            } else {
+                None
+            };
+            return Ok(MatchPattern::Enum {
+                name: head,
+                variant,
+                binding,
+            });
+        }
         match head.name.as_str() {
             "ok" => {
                 self.expect(TokenKind::LParen)?;
@@ -1705,12 +1782,23 @@ impl<'a> Lexer<'a> {
             }
             Some(':') => {
                 self.bump();
-                Token {
-                    kind: TokenKind::Colon,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                if self.current == Some(':') {
+                    self.bump();
+                    Token {
+                        kind: TokenKind::ColonColon,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Colon,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
                 }
             }
             Some('?') => {
@@ -2075,6 +2163,7 @@ impl<'a> Lexer<'a> {
             "set" => TokenKind::Set,
             "struct" => TokenKind::Struct,
             "type" => TokenKind::Type,
+            "enum" => TokenKind::Enum,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,

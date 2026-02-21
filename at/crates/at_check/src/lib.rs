@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use at_syntax::{
-    BinaryOp, Expr, Function, Ident, Module, Span, Stmt, StructField, TypeRef, UnaryOp,
+    BinaryOp, EnumVariant, Expr, Function, Ident, Module, Span, Stmt, StructField, TypeRef, UnaryOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +63,7 @@ struct TypeChecker {
     function_needs: HashMap<String, Vec<String>>,
     structs: HashMap<String, Vec<StructField>>,
     type_aliases: HashMap<String, TypeRef>,
+    enums: HashMap<String, Vec<EnumVariant>>,
     locals: Vec<HashMap<String, SimpleType>>,
     option_inner: Vec<HashMap<String, SimpleType>>,
     result_ok: Vec<HashMap<String, SimpleType>>,
@@ -88,6 +89,7 @@ impl TypeChecker {
             function_needs: HashMap::new(),
             structs: HashMap::new(),
             type_aliases: HashMap::new(),
+            enums: HashMap::new(),
             locals: Vec::new(),
             option_inner: Vec::new(),
             result_ok: Vec::new(),
@@ -145,6 +147,7 @@ impl TypeChecker {
         self.check_duplicate_import_aliases(module);
         self.load_type_aliases(module);
         self.load_structs(module);
+        self.load_enums(module);
         for func in &module.functions {
             self.check_function(func);
         }
@@ -247,6 +250,28 @@ impl TypeChecker {
         }
     }
 
+    fn load_enums(&mut self, module: &Module) {
+        self.enums.clear();
+        for stmt in &module.stmts {
+            if let Stmt::Enum { name, variants } = stmt {
+                if self.enums.contains_key(&name.name) {
+                    self.push_error(format!("duplicate enum: {}", name.name), Some(name.span));
+                    continue;
+                }
+                let mut seen = HashSet::new();
+                for variant in variants {
+                    if !seen.insert(variant.name.name.clone()) {
+                        self.push_error(
+                            format!("duplicate enum variant: {}", variant.name.name),
+                            Some(variant.name.span),
+                        );
+                    }
+                }
+                self.enums.insert(name.name.clone(), variants.clone());
+            }
+        }
+    }
+
     fn load_type_aliases(&mut self, module: &Module) {
         self.type_aliases.clear();
         for stmt in &module.stmts {
@@ -267,6 +292,7 @@ impl TypeChecker {
         match stmt {
             Stmt::Import { .. } => {}
             Stmt::TypeAlias { .. } => {}
+            Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, ty, value } => {
                 self.last_option_inner = None;
@@ -630,6 +656,63 @@ impl TypeChecker {
                 self.check_expr(body);
                 self.pop_scope();
                 SimpleType::Function(params.len())
+            }
+            Expr::EnumLiteral {
+                name,
+                variant,
+                payload,
+                ..
+            } => {
+                let enum_variants = self.enums.get(&name.name).cloned();
+                if enum_variants.is_none() {
+                    self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
+                }
+                if let Some(enum_variants) = enum_variants {
+                    if let Some(expected) = enum_variants
+                        .iter()
+                        .find(|entry| entry.name.name == variant.name)
+                    {
+                        match (&expected.payload, payload) {
+                            (Some(expected_ty), Some(expr)) => {
+                                let value_ty = self.check_expr(expr);
+                                let expected_ty = self.type_from_ref(expected_ty);
+                                self.check_compatible(
+                                    &expected_ty,
+                                    &value_ty,
+                                    &format!(
+                                        "type mismatch for enum {}::{}",
+                                        name.name, variant.name
+                                    ),
+                                    Some(variant.span),
+                                );
+                            }
+                            (None, Some(_)) => {
+                                self.push_error(
+                                    format!(
+                                        "enum {}::{} does not take a value",
+                                        name.name, variant.name
+                                    ),
+                                    Some(variant.span),
+                                );
+                            }
+                            (Some(_), None) => {
+                                self.push_error(
+                                    format!("enum {}::{} expects a value", name.name, variant.name),
+                                    Some(variant.span),
+                                );
+                            }
+                            (None, None) => {}
+                        }
+                    } else {
+                        self.push_error(
+                            format!("unknown variant {}::{}", name.name, variant.name),
+                            Some(variant.span),
+                        );
+                    }
+                } else if let Some(expr) = payload {
+                    self.check_expr(expr);
+                }
+                SimpleType::Custom(name.name.clone())
             }
             Expr::StructLiteral { name, fields, .. } => {
                 let struct_fields = self.structs.get(&name.name).cloned();
@@ -1092,6 +1175,71 @@ impl TypeChecker {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+                at_syntax::MatchPattern::Enum {
+                    name,
+                    variant,
+                    binding,
+                } => {
+                    let enum_variants = self.enums.get(&name.name).cloned();
+                    if enum_variants.is_none() {
+                        self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
+                    }
+                    if let SimpleType::Custom(enum_name) = &value_ty {
+                        if enum_name != &name.name {
+                            self.push_error(
+                                format!("match expects enum {}, got {}", name.name, enum_name),
+                                Some(match_span),
+                            );
+                        }
+                    } else if value_ty != SimpleType::Unknown {
+                        self.push_error(
+                            format!(
+                                "match expects enum {}, got {}",
+                                name.name,
+                                format_type(&value_ty)
+                            ),
+                            Some(match_span),
+                        );
+                    }
+
+                    if let Some(enum_variants) = enum_variants {
+                        if let Some(expected) = enum_variants
+                            .iter()
+                            .find(|entry| entry.name.name == variant.name)
+                        {
+                            match (&expected.payload, binding) {
+                                (Some(expected_ty), Some(binding)) => {
+                                    let expected_ty = self.type_from_ref(expected_ty);
+                                    self.bind_local(binding, expected_ty);
+                                }
+                                (None, Some(binding)) => {
+                                    self.push_error(
+                                        format!(
+                                            "enum {}::{} does not take a value",
+                                            name.name, variant.name
+                                        ),
+                                        Some(binding.span),
+                                    );
+                                }
+                                (Some(_), None) => {
+                                    self.push_error(
+                                        format!(
+                                            "enum {}::{} expects a value",
+                                            name.name, variant.name
+                                        ),
+                                        Some(variant.span),
+                                    );
+                                }
+                                (None, None) => {}
+                            }
+                        } else {
+                            self.push_error(
+                                format!("unknown variant {}::{}", name.name, variant.name),
+                                Some(variant.span),
+                            );
                         }
                     }
                 }
@@ -2077,7 +2225,7 @@ impl TypeChecker {
                         if let Some(alias) = self.resolve_alias(name) {
                             self.validate_type_ref(&alias);
                         }
-                    } else if !self.structs.contains_key(other) {
+                    } else if !self.structs.contains_key(other) && !self.enums.contains_key(other) {
                         self.push_error(format!("unknown type: {}", other), Some(name.span));
                     }
                 }
@@ -2138,6 +2286,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::InterpolatedString { span, .. } => Some(*span),
         Expr::Closure { span, .. } => Some(*span),
         Expr::StructLiteral { span, .. } => Some(*span),
+        Expr::EnumLiteral { span, .. } => Some(*span),
         Expr::Float(_, span) => Some(*span),
     }
 }

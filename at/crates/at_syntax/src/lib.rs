@@ -99,6 +99,12 @@ pub enum Expr {
         name: Ident,
         fields: Vec<StructLiteralField>,
     },
+    EnumLiteral {
+        span: Span,
+        name: Ident,
+        variant: Ident,
+        payload: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +117,12 @@ pub struct StructField {
 pub struct StructLiteralField {
     pub name: Ident,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: Ident,
+    pub payload: Option<TypeRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +172,11 @@ pub enum MatchPattern {
         name: Ident,
         fields: Vec<StructPatternField>,
     },
+    Enum {
+        name: Ident,
+        variant: Ident,
+        binding: Option<Ident>,
+    },
     Wildcard,
 }
 
@@ -178,6 +195,10 @@ pub enum Stmt {
     TypeAlias {
         name: Ident,
         ty: TypeRef,
+    },
+    Enum {
+        name: Ident,
+        variants: Vec<EnumVariant>,
     },
     Struct {
         name: Ident,

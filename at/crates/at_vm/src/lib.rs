@@ -15,6 +15,11 @@ pub enum Value {
     Array(Rc<Vec<Value>>),
     Tuple(Rc<Vec<Value>>),
     Struct(Rc<BTreeMap<String, Value>>),
+    Enum {
+        name: String,
+        variant: String,
+        payload: Option<Rc<Value>>,
+    },
     Option(Option<Rc<Value>>),
     Result(Result<Rc<Value>, Rc<Value>>),
     Closure(Rc<ClosureValue>),
@@ -49,6 +54,17 @@ pub fn format_value(value: &Value) -> String {
                 items.push(format!("{key}: {}", format_value(value)));
             }
             format!("{{{}}}", items.join(", "))
+        }
+        Value::Enum {
+            name,
+            variant,
+            payload,
+        } => {
+            if let Some(payload) = payload {
+                format!("{name}::{variant}({})", format_value(payload))
+            } else {
+                format!("{name}::{variant}")
+            }
         }
         Value::Tuple(items) => format!(
             "({})",
@@ -87,6 +103,11 @@ pub enum Op {
     StoreMember(String),
     Struct(Vec<String>),
     GetMember(String),
+    Enum {
+        name: String,
+        variant: String,
+        has_payload: bool,
+    },
     Closure(usize, usize),
     CallValue(usize),
     Range(bool),
@@ -103,6 +124,12 @@ pub enum Op {
     MatchOptionSome(usize),
     MatchOptionNone(usize),
     MatchStruct(Vec<String>, usize),
+    MatchEnum {
+        name: String,
+        variant: String,
+        has_payload: bool,
+        target: usize,
+    },
     MatchInt(i64, usize),
     MatchFail,
     JumpIfFalse(usize),
@@ -391,6 +418,7 @@ impl Compiler {
         match stmt {
             Stmt::Import { .. } => {}
             Stmt::TypeAlias { .. } => {}
+            Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } => {
                 self.compile_expr(value, chunk)?;
@@ -782,6 +810,24 @@ impl Compiler {
                     chunk.push(Op::Struct(field_names), Some(name.span));
                 }
             }
+            Expr::EnumLiteral {
+                name,
+                variant,
+                payload,
+                ..
+            } => {
+                if let Some(expr) = payload {
+                    self.compile_expr(expr, chunk)?;
+                }
+                chunk.push(
+                    Op::Enum {
+                        name: name.name.clone(),
+                        variant: variant.name.clone(),
+                        has_payload: payload.is_some(),
+                    },
+                    Some(name.span),
+                );
+            }
             Expr::Closure { span, params, body } => {
                 self.compile_closure_expr(*span, params, body, chunk)?;
             }
@@ -1110,19 +1156,29 @@ impl Compiler {
             } else {
                 let match_op_index = chunk.code.len();
                 chunk.push(
-                    match arm.pattern {
-                        at_syntax::MatchPattern::Int(value) => Op::MatchInt(value, usize::MAX),
+                    match &arm.pattern {
+                        at_syntax::MatchPattern::Int(value) => Op::MatchInt(*value, usize::MAX),
                         at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
                         at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
                         at_syntax::MatchPattern::OptionSome(_) => Op::MatchOptionSome(usize::MAX),
                         at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
-                        at_syntax::MatchPattern::Struct { ref fields, .. } => {
+                        at_syntax::MatchPattern::Struct { fields, .. } => {
                             let names = fields
                                 .iter()
                                 .map(|field| field.name.name.clone())
                                 .collect::<Vec<_>>();
                             Op::MatchStruct(names, usize::MAX)
                         }
+                        at_syntax::MatchPattern::Enum {
+                            name,
+                            variant,
+                            binding,
+                        } => Op::MatchEnum {
+                            name: name.name.clone(),
+                            variant: variant.name.clone(),
+                            has_payload: binding.is_some(),
+                            target: usize::MAX,
+                        },
                         at_syntax::MatchPattern::Wildcard => unreachable!(),
                     },
                     Some(match_span),
@@ -1147,6 +1203,16 @@ impl Compiler {
                     binding_span = Some(ident.span);
                 }
                 at_syntax::MatchPattern::OptionNone => {}
+                at_syntax::MatchPattern::Enum { binding, .. } => {
+                    if let Some(binding) = binding {
+                        let slot = self.bind_local_checked(&binding.name, binding.span)?;
+                        chunk.push(Op::StoreLocal(slot), Some(binding.span));
+                        binding_slot = Some(slot);
+                        binding_span = Some(binding.span);
+                    } else {
+                        chunk.push(Op::Pop, Some(match_span));
+                    }
+                }
                 at_syntax::MatchPattern::Struct { fields, .. } => {
                     for field in fields.iter().rev() {
                         let binding = field.binding.as_ref().unwrap_or(&field.name);
@@ -1191,14 +1257,23 @@ impl Compiler {
                 let guard_fail_index = chunk.code.len();
                 patch_jump(&mut chunk.code, guard_jump_index, guard_fail_index);
 
-                match arm.pattern {
+                match &arm.pattern {
                     at_syntax::MatchPattern::Int(value) => {
-                        let idx = chunk.add_const(Value::Int(value));
+                        let idx = chunk.add_const(Value::Int(*value));
                         chunk.push(Op::Const(idx), Some(match_span));
                     }
                     at_syntax::MatchPattern::Struct { .. } => {
                         if let Some(slot) = struct_guard_slot {
                             chunk.push(Op::LoadLocal(slot), Some(match_span));
+                        }
+                    }
+                    at_syntax::MatchPattern::Enum { binding, .. } => {
+                        if binding.is_some() {
+                            let slot = binding_slot.ok_or_else(|| {
+                                compile_error("missing match binding".to_string(), Some(match_span))
+                            })?;
+                            let span = binding_span.or(Some(match_span));
+                            chunk.push(Op::LoadLocal(slot), span);
                         }
                     }
                     at_syntax::MatchPattern::ResultOk(_) => {
@@ -1657,6 +1732,11 @@ impl Compiler {
                     }
                 }
             }
+            Expr::EnumLiteral { payload, .. } => {
+                if let Some(expr) = payload {
+                    self.collect_free_vars_expr(expr, bound, captures, seen);
+                }
+            }
             Expr::StructLiteral { fields, .. } => {
                 for field in fields {
                     self.collect_free_vars_expr(&field.value, bound, captures, seen);
@@ -1676,6 +1756,7 @@ impl Compiler {
         match stmt {
             Stmt::Import { .. } => {}
             Stmt::TypeAlias { .. } => {}
+            Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } | Stmt::Using { name, value, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
@@ -1750,6 +1831,7 @@ impl Compiler {
             | at_syntax::MatchPattern::OptionNone
             | at_syntax::MatchPattern::Wildcard => None,
             at_syntax::MatchPattern::Struct { .. } => None,
+            at_syntax::MatchPattern::Enum { binding, .. } => binding.as_ref().map(|b| &b.name),
         };
         if let Some(name) = name {
             if let Some(scope) = bound.last_mut() {
@@ -1757,15 +1839,25 @@ impl Compiler {
             }
         }
 
-        if let at_syntax::MatchPattern::Struct { fields, .. } = pattern {
-            if let Some(scope) = bound.last_mut() {
-                for field in fields {
-                    let binding = field.binding.as_ref().unwrap_or(&field.name);
+        match pattern {
+            at_syntax::MatchPattern::Struct { fields, .. } => {
+                if let Some(scope) = bound.last_mut() {
+                    for field in fields {
+                        let binding = field.binding.as_ref().unwrap_or(&field.name);
+                        if binding.name != "_" {
+                            scope.insert(binding.name.clone());
+                        }
+                    }
+                }
+            }
+            at_syntax::MatchPattern::Enum { binding, .. } => {
+                if let (Some(scope), Some(binding)) = (bound.last_mut(), binding.as_ref()) {
                     if binding.name != "_" {
                         scope.insert(binding.name.clone());
                     }
                 }
             }
+            _ => {}
         }
     }
 
@@ -2933,6 +3025,27 @@ impl Vm {
                     }
                     self.stack.push(Value::Struct(Rc::new(map)));
                 }
+                Op::Enum {
+                    name,
+                    variant,
+                    has_payload,
+                } => {
+                    let payload = if *has_payload {
+                        Some(Rc::new(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?))
+                    } else {
+                        None
+                    };
+                    self.stack.push(Value::Enum {
+                        name: name.clone(),
+                        variant: variant.clone(),
+                        payload,
+                    });
+                }
                 Op::GetMember(field) => {
                     let base_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -3290,6 +3403,52 @@ impl Vm {
                         }
                     }
                 }
+                Op::MatchEnum {
+                    name,
+                    variant,
+                    has_payload,
+                    target,
+                } => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Enum {
+                            name: enum_name,
+                            variant: enum_variant,
+                            payload,
+                        } => {
+                            if &enum_name == name && &enum_variant == variant {
+                                if *has_payload {
+                                    if let Some(payload) = payload {
+                                        self.stack.push((*payload).clone());
+                                    } else {
+                                        return Err(self.runtime_error(
+                                            format!("enum {}::{} expects value", name, variant),
+                                            self.current_span(program),
+                                            program,
+                                        ));
+                                    }
+                                }
+                            } else {
+                                self.stack.push(Value::Enum {
+                                    name: enum_name,
+                                    variant: enum_variant,
+                                    payload,
+                                });
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects enum".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
                 Op::MatchInt(expected, target) => {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -3456,6 +3615,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::InterpolatedString { span, .. } => Some(*span),
         Expr::Closure { span, .. } => Some(*span),
         Expr::StructLiteral { span, .. } => Some(*span),
+        Expr::EnumLiteral { span, .. } => Some(*span),
     }
 }
 
@@ -3471,6 +3631,10 @@ fn patch_jump(code: &mut [Op], index: usize, target: usize) {
         | Op::MatchOptionNone(ref mut slot)
         | Op::MatchStruct(_, ref mut slot)
         | Op::MatchInt(_, ref mut slot)
+        | Op::MatchEnum {
+            target: ref mut slot,
+            ..
+        }
         | Op::JumpIfFalse(ref mut slot)
         | Op::Jump(ref mut slot) => {
             *slot = target;
