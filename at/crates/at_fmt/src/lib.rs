@@ -100,6 +100,27 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             format_expr_with_indent(value, out, indent);
             out.push_str(";\n");
         }
+        Stmt::SetMember { base, field, value } => {
+            indent_to(out, indent);
+            out.push_str("set ");
+            format_expr_with_indent(base, out, indent);
+            out.push('.');
+            out.push_str(&field.name);
+            out.push_str(" = ");
+            format_expr_with_indent(value, out, indent);
+            out.push_str(";\n");
+        }
+        Stmt::SetIndex { base, index, value } => {
+            indent_to(out, indent);
+            out.push_str("set ");
+            format_expr_with_indent(base, out, indent);
+            out.push('[');
+            format_expr_with_indent(index, out, indent);
+            out.push(']');
+            out.push_str(" = ");
+            format_expr_with_indent(value, out, indent);
+            out.push_str(";\n");
+        }
         Stmt::While {
             condition, body, ..
         } => {
@@ -274,12 +295,9 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             format_expr_prec_indent(condition, out, 0, indent);
             out.push(' ');
             format_expr_prec_indent(then_branch, out, 0, indent);
-            if matches!(else_branch.as_ref(), Expr::If { .. }) {
+            if let Some(else_expr) = else_branch {
                 out.push_str(" else ");
-                format_expr_prec_indent(else_branch, out, 0, indent);
-            } else {
-                out.push_str(" else ");
-                format_expr_prec_indent(else_branch, out, 0, indent);
+                format_expr_prec_indent(else_expr, out, 0, indent);
             }
             if wrap {
                 out.push(')');
@@ -354,6 +372,55 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             out.push('[');
             format_expr_prec_indent(index, out, 0, indent);
             out.push(']');
+        }
+        Expr::Tuple { items, .. } => {
+            out.push('(');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                format_expr_prec_indent(item, out, 0, indent);
+            }
+            out.push(')');
+        }
+        Expr::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } => {
+            format_expr_prec_indent(start, out, 0, indent);
+            if *inclusive {
+                out.push_str("..=");
+            } else {
+                out.push_str("..");
+            }
+            format_expr_prec_indent(end, out, 0, indent);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            out.push('"');
+            for part in parts {
+                match part {
+                    at_syntax::InterpPart::String(s) => out.push_str(s),
+                    at_syntax::InterpPart::Expr(expr) => {
+                        out.push('{');
+                        format_expr_prec_indent(expr, out, 0, indent);
+                        out.push('}');
+                    }
+                }
+            }
+            out.push('"');
+        }
+        Expr::Closure { params, body, .. } => {
+            out.push('|');
+            for (idx, param) in params.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&param.name);
+            }
+            out.push_str("| ");
+            format_expr_prec_indent(body, out, 0, indent);
         }
     }
 }
@@ -469,7 +536,7 @@ fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &Has
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_needs_expr(value, needs, import_aliases);
         }
-        Stmt::Set { value, .. } => {
+        Stmt::Set { value, .. } | Stmt::SetMember { value, .. } | Stmt::SetIndex { value, .. } => {
             collect_needs_expr(value, needs, import_aliases);
         }
         Stmt::While {
@@ -518,7 +585,9 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
         } => {
             collect_needs_expr(condition, needs, import_aliases);
             collect_needs_expr(then_branch, needs, import_aliases);
-            collect_needs_expr(else_branch, needs, import_aliases);
+            if let Some(else_expr) = else_branch {
+                collect_needs_expr(else_expr, needs, import_aliases);
+            }
         }
         Expr::Member { base, .. } => {
             if let Expr::Ident(ident) = base.as_ref() {
@@ -532,6 +601,25 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
             for arg in args {
                 collect_needs_expr(arg, needs, import_aliases);
             }
+        }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_needs_expr(item, needs, import_aliases);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_needs_expr(start, needs, import_aliases);
+            collect_needs_expr(end, needs, import_aliases);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let at_syntax::InterpPart::Expr(expr) = part {
+                    collect_needs_expr(expr, needs, import_aliases);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_needs_expr(body, needs, import_aliases);
         }
         Expr::Try(expr) => {
             collect_needs_expr(expr, needs, import_aliases);

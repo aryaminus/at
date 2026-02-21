@@ -292,6 +292,15 @@ impl TypeChecker {
                     }
                 }
             }
+            Stmt::SetMember { base, value, .. } => {
+                let _ = self.check_expr(base);
+                self.check_expr(value);
+            }
+            Stmt::SetIndex { base, index, value } => {
+                let _ = self.check_expr(base);
+                let _ = self.check_expr(index);
+                self.check_expr(value);
+            }
             Stmt::While {
                 while_span,
                 condition,
@@ -454,7 +463,7 @@ impl TypeChecker {
                 condition,
                 then_branch,
                 else_branch,
-            } => self.check_if(*if_span, condition, then_branch, else_branch),
+            } => self.check_if(*if_span, condition, then_branch, else_branch.as_deref()),
             Expr::Member { base, .. } => {
                 let _ = self.check_expr(base);
                 SimpleType::Unknown
@@ -527,6 +536,32 @@ impl TypeChecker {
                         expr_span(index),
                     );
                 }
+                SimpleType::Unknown
+            }
+            Expr::Tuple { items, .. } => {
+                for item in items {
+                    self.check_expr(item);
+                }
+                SimpleType::Unknown
+            }
+            Expr::Range { start, end, .. } => {
+                self.check_expr(start);
+                self.check_expr(end);
+                SimpleType::Array
+            }
+            Expr::InterpolatedString { parts, .. } => {
+                for part in parts {
+                    if let at_syntax::InterpPart::Expr(expr) = part {
+                        self.check_expr(expr);
+                    }
+                }
+                SimpleType::String
+            }
+            Expr::Closure { params, body, .. } => {
+                for param in params {
+                    self.bind_local(param, SimpleType::Unknown);
+                }
+                self.check_expr(body);
                 SimpleType::Unknown
             }
         }
@@ -686,7 +721,7 @@ impl TypeChecker {
         if_span: Span,
         condition: &Expr,
         then_branch: &Expr,
-        else_branch: &Expr,
+        else_branch: Option<&Expr>,
     ) -> SimpleType {
         let cond_ty = self.check_expr(condition);
         if cond_ty != SimpleType::Bool
@@ -709,7 +744,11 @@ impl TypeChecker {
         self.last_option_inner = None;
         self.last_result_ok = None;
         self.last_result_err = None;
-        let else_ty = self.check_expr(else_branch);
+        let else_ty = if let Some(else_expr) = else_branch {
+            self.check_expr(else_expr)
+        } else {
+            SimpleType::Unit
+        };
         let else_option = self.last_option_inner.clone();
         let else_ok = self.last_result_ok.clone();
         let else_err = self.last_result_err.clone();
@@ -1797,6 +1836,10 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),
         Expr::Index { index_span, .. } => Some(*index_span),
+        Expr::Tuple { tuple_span, .. } => Some(*tuple_span),
+        Expr::Range { range_span, .. } => Some(*range_span),
+        Expr::InterpolatedString { span, .. } => Some(*span),
+        Expr::Closure { span, .. } => Some(*span),
         Expr::Float(_, span) => Some(*span),
     }
 }

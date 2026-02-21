@@ -1,5 +1,5 @@
 use at_syntax::{
-    Expr, Function, Ident, MatchArm, MatchPattern, Module, Param, Span, Stmt, TypeRef,
+    Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span, Stmt, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +35,7 @@ pub enum TokenKind {
     Percent,
     AndAnd,
     OrOr,
+    Pipe,
     EqualEqual,
     Bang,
     BangEqual,
@@ -55,6 +56,8 @@ pub enum TokenKind {
     RBrace,
     Comma,
     Dot,
+    DotDot,
+    DotDotEquals,
     Semicolon,
     Invalid(char),
     UnterminatedString,
@@ -123,7 +126,18 @@ impl std::error::Error for ParseError {}
 pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut lexer = Lexer::new(source);
     let mut parser = Parser::new(&mut lexer);
-    parser.parse_module()
+    let (module, errors) = parser.parse_module_with_errors();
+    if let Some(error) = errors.into_iter().next() {
+        Err(error)
+    } else {
+        Ok(module)
+    }
+}
+
+pub fn parse_module_with_errors(source: &str) -> (Module, Vec<ParseError>) {
+    let mut lexer = Lexer::new(source);
+    let mut parser = Parser::new(&mut lexer);
+    parser.parse_module_with_errors()
 }
 
 struct Parser<'a> {
@@ -137,17 +151,87 @@ impl<'a> Parser<'a> {
         Self { lexer, current }
     }
 
-    fn parse_module(&mut self) -> Result<Module, ParseError> {
+    fn parse_module_with_errors(&mut self) -> (Module, Vec<ParseError>) {
         let mut functions = Vec::new();
         let mut stmts = Vec::new();
+        let mut errors = Vec::new();
         while self.current.kind != TokenKind::Eof {
             match self.current.kind {
-                TokenKind::Fn => functions.push(self.parse_function(false)?),
-                TokenKind::Tool => functions.push(self.parse_tool_function()?),
-                _ => stmts.push(self.parse_stmt()?),
+                TokenKind::Fn => match self.parse_function(false) {
+                    Ok(func) => functions.push(func),
+                    Err(err) => {
+                        errors.push(err);
+                        self.recover_to_function_end();
+                    }
+                },
+                TokenKind::Tool => match self.parse_tool_function() {
+                    Ok(func) => functions.push(func),
+                    Err(err) => {
+                        errors.push(err);
+                        self.recover_to_function_end();
+                    }
+                },
+                _ => match self.parse_stmt() {
+                    Ok(stmt) => stmts.push(stmt),
+                    Err(err) => {
+                        errors.push(err);
+                        self.recover_to_stmt_boundary();
+                    }
+                },
             }
         }
-        Ok(Module { functions, stmts })
+        (Module { functions, stmts }, errors)
+    }
+
+    fn recover_to_stmt_boundary(&mut self) {
+        if self.current.kind != TokenKind::Eof {
+            self.advance();
+        }
+        loop {
+            match self.current.kind {
+                TokenKind::Semicolon => {
+                    self.advance();
+                    break;
+                }
+                TokenKind::RBrace => {
+                    self.advance();
+                    break;
+                }
+                TokenKind::Fn
+                | TokenKind::Tool
+                | TokenKind::Import
+                | TokenKind::Let
+                | TokenKind::Using
+                | TokenKind::Set
+                | TokenKind::Return
+                | TokenKind::Test
+                | TokenKind::While
+                | TokenKind::For
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::If
+                | TokenKind::Eof => {
+                    break;
+                }
+                _ => self.advance(),
+            }
+        }
+    }
+
+    fn recover_to_function_end(&mut self) {
+        if self.current.kind != TokenKind::Eof {
+            self.advance();
+        }
+        loop {
+            match self.current.kind {
+                TokenKind::RBrace => {
+                    self.advance();
+                    break;
+                }
+                TokenKind::Eof => break,
+                _ => self.advance(),
+            }
+        }
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -285,11 +369,87 @@ impl<'a> Parser<'a> {
 
     fn parse_set_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
-        let ident = self.expect_ident()?;
-        self.expect(TokenKind::Equals)?;
-        let value = self.parse_expr()?;
-        self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Set { name: ident, value })
+        let base_ident = self.expect_ident()?;
+
+        let mut base_expr = Expr::Ident(base_ident.clone());
+        let mut last_field: Option<Ident> = None;
+        let mut last_index: Option<Expr> = None;
+
+        loop {
+            if self.current.kind == TokenKind::Dot {
+                self.advance();
+                let field = self.expect_ident()?;
+
+                if self.current.kind == TokenKind::Dot || self.current.kind == TokenKind::LBracket {
+                    base_expr = Expr::Member {
+                        base: Box::new(base_expr),
+                        name: field,
+                    };
+                    last_field = None;
+                    last_index = None;
+                    continue;
+                }
+
+                last_field = Some(field);
+                last_index = None;
+                break;
+            } else if self.current.kind == TokenKind::LBracket {
+                let index_span = self.current.span;
+                self.advance();
+                let index = self.parse_expr()?;
+                self.expect(TokenKind::RBracket)?;
+
+                if self.current.kind == TokenKind::Dot || self.current.kind == TokenKind::LBracket {
+                    base_expr = Expr::Index {
+                        index_span,
+                        base: Box::new(base_expr),
+                        index: Box::new(index),
+                    };
+                    last_field = None;
+                    last_index = None;
+                    continue;
+                }
+
+                last_field = None;
+                last_index = Some(index);
+                break;
+            } else {
+                break;
+            }
+        }
+
+        match (last_field, last_index) {
+            (Some(field), None) => {
+                self.expect(TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Stmt::SetMember {
+                    base: base_expr,
+                    field,
+                    value,
+                })
+            }
+            (None, Some(index)) => {
+                self.expect(TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Stmt::SetIndex {
+                    base: base_expr,
+                    index,
+                    value,
+                })
+            }
+            (None, None) => {
+                self.expect(TokenKind::Equals)?;
+                let value = self.parse_expr()?;
+                self.expect(TokenKind::Semicolon)?;
+                Ok(Stmt::Set {
+                    name: base_ident,
+                    value,
+                })
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -446,7 +606,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_term()?;
+        let mut expr = self.parse_range()?;
         loop {
             let (op, span) = match self.current.kind {
                 TokenKind::Less => (at_syntax::BinaryOp::Lt, self.current.span),
@@ -456,12 +616,29 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_term()?;
+            let right = self.parse_range()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
                 op_span: span,
                 right: Box::new(right),
+            };
+        }
+        Ok(expr)
+    }
+
+    fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_term()?;
+        if self.current.kind == TokenKind::DotDot || self.current.kind == TokenKind::DotDotEquals {
+            let range_span = self.current.span;
+            let inclusive = self.current.kind == TokenKind::DotDotEquals;
+            self.advance();
+            let end = self.parse_term()?;
+            expr = Expr::Range {
+                range_span,
+                start: Box::new(expr),
+                end: Box::new(end),
+                inclusive,
             };
         }
         Ok(expr)
@@ -608,6 +785,9 @@ impl<'a> Parser<'a> {
                 let span = self.current.span;
                 let v = value.clone();
                 self.advance();
+                if v.contains('{') {
+                    return self.parse_interpolated_string(v, span);
+                }
                 Ok(Expr::String(v, span))
             }
             TokenKind::UnterminatedString => Err(ParseError::UnterminatedString {
@@ -628,11 +808,47 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Ident(ident))
             }
             TokenKind::LParen => {
+                let paren_span = self.current.span;
                 self.advance();
-                let expr = self.parse_expr()?;
+
+                if self.current.kind == TokenKind::RParen {
+                    self.advance();
+                    return Ok(Expr::Tuple {
+                        tuple_span: paren_span,
+                        items: vec![],
+                    });
+                }
+
+                let first_expr = self.parse_expr()?;
+                if self.current.kind == TokenKind::Comma {
+                    self.advance();
+                    let mut items = vec![first_expr];
+                    while self.current.kind != TokenKind::RParen {
+                        items.push(self.parse_expr()?);
+                        if self.current.kind == TokenKind::Comma {
+                            self.advance();
+                            if self.current.kind == TokenKind::RParen {
+                                break;
+                            }
+                        } else if self.current.kind != TokenKind::RParen {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "comma or closing paren".to_string(),
+                                found: self.current.kind.clone(),
+                                span: self.current.span,
+                            });
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expr::Tuple {
+                        tuple_span: paren_span,
+                        items,
+                    });
+                }
+
                 self.expect(TokenKind::RParen)?;
-                Ok(expr)
+                Ok(first_expr)
             }
+            TokenKind::Pipe => self.parse_closure_expr(),
             TokenKind::LBracket => self.parse_array_literal(),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression".to_string(),
@@ -640,6 +856,105 @@ impl<'a> Parser<'a> {
                 span: self.current.span,
             }),
         }
+    }
+
+    fn parse_interpolated_string(&mut self, value: String, span: Span) -> Result<Expr, ParseError> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut chars = value.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    current.push('{');
+                    continue;
+                }
+                if !current.is_empty() {
+                    parts.push(InterpPart::String(current.clone()));
+                    current.clear();
+                }
+                let mut expr_str = String::new();
+                let mut depth = 1;
+                while let Some(ch) = chars.next() {
+                    if ch == '{' {
+                        depth += 1;
+                        expr_str.push(ch);
+                    } else if ch == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        expr_str.push(ch);
+                    } else {
+                        expr_str.push(ch);
+                    }
+                }
+                let mut expr_lexer = Lexer::new(expr_str.as_str());
+                let mut expr_parser = Parser::new(&mut expr_lexer);
+                let expr = expr_parser.parse_expr()?;
+                if expr_parser.current.kind != TokenKind::Eof {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of interpolation".to_string(),
+                        found: expr_parser.current.kind.clone(),
+                        span: expr_parser.current.span,
+                    });
+                }
+                parts.push(InterpPart::Expr(expr));
+                continue;
+            }
+            if ch == '}' && chars.peek() == Some(&'}') {
+                chars.next();
+                current.push('}');
+                continue;
+            }
+            current.push(ch);
+        }
+
+        if !current.is_empty() {
+            parts.push(InterpPart::String(current));
+        }
+
+        Ok(Expr::InterpolatedString { span, parts })
+    }
+
+    fn parse_closure_expr(&mut self) -> Result<Expr, ParseError> {
+        let span = self.current.span;
+        self.expect(TokenKind::Pipe)?;
+
+        let mut params = Vec::new();
+        if self.current.kind != TokenKind::Pipe {
+            loop {
+                if let TokenKind::Ident(name) = &self.current.kind {
+                    params.push(Ident {
+                        name: name.clone(),
+                        span: self.current.span,
+                    });
+                    self.advance();
+                    if self.current.kind != TokenKind::Comma {
+                        break;
+                    }
+                    self.advance();
+                    if self.current.kind == TokenKind::Pipe {
+                        break;
+                    }
+                } else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "parameter name".to_string(),
+                        found: self.current.kind.clone(),
+                        span: self.current.span,
+                    });
+                }
+            }
+        }
+        self.expect(TokenKind::Pipe)?;
+
+        let body = self.parse_expr()?;
+        Ok(Expr::Closure {
+            span,
+            params,
+            body: Box::new(body),
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
@@ -667,17 +982,22 @@ impl<'a> Parser<'a> {
         self.advance();
         let condition = self.parse_expr()?;
         let then_branch = self.parse_block_expr()?;
-        self.expect(TokenKind::Else)?;
-        let else_branch = if self.current.kind == TokenKind::If {
-            self.parse_if_expr()?
+        let else_branch = if self.current.kind == TokenKind::Else {
+            self.advance();
+            let else_expr = if self.current.kind == TokenKind::If {
+                self.parse_if_expr()?
+            } else {
+                self.parse_block_expr()?
+            };
+            Some(Box::new(else_expr))
         } else {
-            self.parse_block_expr()?
+            None
         };
         Ok(Expr::If {
             if_span,
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
-            else_branch: Box::new(else_branch),
+            else_branch,
         })
     }
 
@@ -1027,7 +1347,7 @@ impl<'a> Lexer<'a> {
                     }
                 } else {
                     Token {
-                        kind: TokenKind::Invalid('|'),
+                        kind: TokenKind::Pipe,
                         span: Span {
                             start,
                             end: self.index,
@@ -1100,12 +1420,34 @@ impl<'a> Lexer<'a> {
             }
             Some('.') => {
                 self.bump();
-                Token {
-                    kind: TokenKind::Dot,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                if self.current == Some('.') {
+                    self.bump();
+                    if self.current == Some('=') {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::DotDotEquals,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    } else {
+                        Token {
+                            kind: TokenKind::DotDot,
+                            span: Span {
+                                start,
+                                end: self.index,
+                            },
+                        }
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Dot,
+                        span: Span {
+                            start,
+                            end: self.index,
+                        },
+                    }
                 }
             }
             Some(':') => {
@@ -1238,7 +1580,14 @@ impl<'a> Lexer<'a> {
                     },
                 }
             }
-            Some('"') => self.string_token(start),
+            Some('"') => {
+                if self.peek() == Some('"') && self.peek_next() == Some('"') {
+                    self.multiline_string_token(start)
+                } else {
+                    self.string_token(start)
+                }
+            }
+            Some('r') if self.peek() == Some('"') => self.raw_string_token(start),
             Some(ch) if ch.is_ascii_digit() => self.number_token(start),
             Some(ch) if is_ident_start(ch) => self.ident_or_keyword(start),
             Some(ch) => {
@@ -1308,6 +1657,75 @@ impl<'a> Lexer<'a> {
                 value.push(ch);
                 self.bump();
             }
+        }
+        if terminated {
+            Token {
+                kind: TokenKind::String(value),
+                span: Span {
+                    start,
+                    end: self.index,
+                },
+            }
+        } else {
+            Token {
+                kind: TokenKind::UnterminatedString,
+                span: Span {
+                    start,
+                    end: self.index,
+                },
+            }
+        }
+    }
+
+    fn raw_string_token(&mut self, start: usize) -> Token {
+        self.bump();
+        self.bump();
+        let mut value = String::new();
+        let mut terminated = false;
+        while let Some(ch) = self.current {
+            if ch == '"' {
+                self.bump();
+                terminated = true;
+                break;
+            }
+            value.push(ch);
+            self.bump();
+        }
+        if terminated {
+            Token {
+                kind: TokenKind::String(value),
+                span: Span {
+                    start,
+                    end: self.index,
+                },
+            }
+        } else {
+            Token {
+                kind: TokenKind::UnterminatedString,
+                span: Span {
+                    start,
+                    end: self.index,
+                },
+            }
+        }
+    }
+
+    fn multiline_string_token(&mut self, start: usize) -> Token {
+        self.bump();
+        self.bump();
+        self.bump();
+        let mut value = String::new();
+        let mut terminated = false;
+        while let Some(ch) = self.current {
+            if ch == '"' && self.peek() == Some('"') && self.peek_next() == Some('"') {
+                self.bump();
+                self.bump();
+                self.bump();
+                terminated = true;
+                break;
+            }
+            value.push(ch);
+            self.bump();
         }
         if terminated {
             Token {
@@ -1474,6 +1892,12 @@ impl<'a> Lexer<'a> {
 
     fn peek(&self) -> Option<char> {
         self.chars.clone().next()
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        let mut chars = self.chars.clone();
+        chars.next()?;
+        chars.next()
     }
 
     fn bump(&mut self) {

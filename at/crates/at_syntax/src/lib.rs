@@ -38,7 +38,7 @@ pub enum Expr {
         if_span: Span,
         condition: Box<Expr>,
         then_branch: Box<Expr>,
-        else_branch: Box<Expr>,
+        else_branch: Option<Box<Expr>>,
     },
     Member {
         base: Box<Expr>,
@@ -68,6 +68,25 @@ pub enum Expr {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    Tuple {
+        tuple_span: Span,
+        items: Vec<Expr>,
+    },
+    Range {
+        range_span: Span,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
+    InterpolatedString {
+        span: Span,
+        parts: Vec<InterpPart>,
+    },
+    Closure {
+        span: Span,
+        params: Vec<Ident>,
+        body: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +110,12 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Neg,
     Not,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpPart {
+    String(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +151,16 @@ pub enum Stmt {
     },
     Set {
         name: Ident,
+        value: Expr,
+    },
+    SetMember {
+        base: Expr,
+        field: Ident,
+        value: Expr,
+    },
+    SetIndex {
+        base: Expr,
+        index: Expr,
         value: Expr,
     },
     While {

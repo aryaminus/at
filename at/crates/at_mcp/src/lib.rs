@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
 
@@ -10,7 +11,7 @@ pub struct McpServer {
     tools: Vec<Tool>,
     context: Option<String>,
     tool_handler: Option<Rc<ToolHandler>>,
-    client_initialized: bool,
+    client_initialized: Cell<bool>,
 }
 
 pub type ToolHandler = dyn Fn(&str, &JsonValue) -> Result<JsonValue, String>;
@@ -34,7 +35,7 @@ impl McpServer {
             tools: Vec::new(),
             context: None,
             tool_handler: None,
-            client_initialized: false,
+            client_initialized: Cell::new(false),
         }
     }
 
@@ -119,6 +120,7 @@ impl McpServer {
                 // Handle notifications (messages without id)
                 match method {
                     "notifications/initialized" => {
+                        self.client_initialized.set(true);
                         eprintln!("[at-mcp] client initialized");
                     }
                     _ => {

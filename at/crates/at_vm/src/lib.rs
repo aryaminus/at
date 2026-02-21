@@ -13,6 +13,7 @@ pub enum Value {
     String(Rc<String>),
     Bool(bool),
     Array(Rc<Vec<Value>>),
+    Tuple(Rc<Vec<Value>>),
     Option(Option<Rc<Value>>),
     Result(Result<Rc<Value>, Rc<Value>>),
     Unit,
@@ -27,6 +28,14 @@ pub fn format_value(value: &Value) -> String {
         Value::Unit => "unit".to_string(),
         Value::Array(items) => format!(
             "[{}]",
+            items
+                .iter()
+                .map(format_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Tuple(items) => format!(
+            "({})",
             items
                 .iter()
                 .map(format_value)
@@ -56,7 +65,11 @@ pub enum Op {
     Div,
     Mod,
     Array(usize),
+    Tuple(usize),
     Index,
+    StoreIndex,
+    StoreMember(String),
+    Range(bool),
     Eq,
     Neq,
     Lt,
@@ -337,6 +350,47 @@ impl Compiler {
                 })?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
             }
+            Stmt::SetMember { base, field, value } => match base {
+                Expr::Ident(name) => {
+                    let slot = self.resolve_local(&name.name).ok_or_else(|| {
+                        compile_error(
+                            format!("unknown identifier: {}", name.name),
+                            Some(name.span),
+                        )
+                    })?;
+                    chunk.push(Op::LoadLocal(slot), Some(name.span));
+                    self.compile_expr(value, chunk)?;
+                    chunk.push(Op::StoreMember(field.name.clone()), Some(field.span));
+                    chunk.push(Op::StoreLocal(slot), Some(name.span));
+                }
+                other => {
+                    return Err(compile_error(
+                        "set member target must be an identifier".to_string(),
+                        expr_span(&other),
+                    ));
+                }
+            },
+            Stmt::SetIndex { base, index, value } => match base {
+                Expr::Ident(name) => {
+                    let slot = self.resolve_local(&name.name).ok_or_else(|| {
+                        compile_error(
+                            format!("unknown identifier: {}", name.name),
+                            Some(name.span),
+                        )
+                    })?;
+                    chunk.push(Op::LoadLocal(slot), Some(name.span));
+                    self.compile_expr(index, chunk)?;
+                    self.compile_expr(value, chunk)?;
+                    chunk.push(Op::StoreIndex, Some(name.span));
+                    chunk.push(Op::StoreLocal(slot), Some(name.span));
+                }
+                other => {
+                    return Err(compile_error(
+                        "set index target must be an identifier".to_string(),
+                        expr_span(&other),
+                    ));
+                }
+            },
             Stmt::While {
                 while_span,
                 condition,
@@ -593,7 +647,13 @@ impl Compiler {
                 chunk.push(Op::Jump(usize::MAX), Some(*if_span));
                 let else_start = chunk.code.len();
                 patch_jump(&mut chunk.code, jump_if_false, else_start);
-                self.compile_expr(else_branch, chunk)?;
+                if let Some(else_expr) = else_branch {
+                    self.compile_expr(else_expr, chunk)?;
+                } else {
+                    let unit_index = chunk.constants.len();
+                    chunk.constants.push(Value::Unit);
+                    chunk.push(Op::Const(unit_index), Some(*if_span));
+                }
                 let end = chunk.code.len();
                 patch_jump(&mut chunk.code, jump_to_end, end);
             }
@@ -621,6 +681,46 @@ impl Compiler {
                 self.compile_expr(base, chunk)?;
                 self.compile_expr(index, chunk)?;
                 chunk.push(Op::Index, expr_span(expr));
+            }
+            Expr::Tuple { items, .. } => {
+                for item in items {
+                    self.compile_expr(item, chunk)?;
+                }
+                chunk.push(Op::Tuple(items.len()), expr_span(expr));
+            }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
+                self.compile_expr(start, chunk)?;
+                self.compile_expr(end, chunk)?;
+                chunk.push(Op::Range(*inclusive), expr_span(expr));
+            }
+            Expr::InterpolatedString { parts, .. } => {
+                let empty_idx = chunk.constants.len();
+                chunk.constants.push(Value::String(Rc::new(String::new())));
+                chunk.push(Op::Const(empty_idx), expr_span(expr));
+                for part in parts {
+                    match part {
+                        at_syntax::InterpPart::String(s) => {
+                            let idx = chunk.constants.len();
+                            chunk.constants.push(Value::String(Rc::new(s.clone())));
+                            chunk.push(Op::Const(idx), expr_span(expr));
+                        }
+                        at_syntax::InterpPart::Expr(e) => {
+                            self.compile_expr(e, chunk)?;
+                        }
+                    }
+                    chunk.push(Op::Add, expr_span(expr));
+                }
+            }
+            Expr::Closure { .. } => {
+                return Err(compile_error(
+                    "closures not yet implemented".to_string(),
+                    expr_span(expr),
+                ));
             }
             Expr::Call { callee, args } => {
                 if let Expr::Member { base, name } = callee.as_ref() {
@@ -1495,8 +1595,7 @@ impl Vm {
                                     // &mut self which we don't have here
                                     let mut new_items = (*items).clone();
                                     new_items.push(value);
-                                    self.stack.push(Value::Array(Rc::new(new_items)));
-                                    Value::Unit
+                                    Value::Array(Rc::new(new_items))
                                 }
                                 _ => {
                                     return Err(runtime_error_at(
@@ -1660,11 +1759,28 @@ impl Vm {
                             combined.push_str(&right);
                             self.stack.push(Value::String(Rc::new(combined)));
                         }
-                        _ => {
-                            return Err(runtime_error_at(
-                                "invalid binary operands".to_string(),
-                                span_at(chunk, frame_ip),
-                            ))
+                        (Value::String(left), right) => {
+                            let right_str = format_value(&right).trim_matches('"').to_string();
+                            let mut combined = String::with_capacity(left.len() + right_str.len());
+                            combined.push_str(&left);
+                            combined.push_str(&right_str);
+                            self.stack.push(Value::String(Rc::new(combined)));
+                        }
+                        (left, Value::String(right)) => {
+                            let left_str = format_value(&left).trim_matches('"').to_string();
+                            let mut combined = String::with_capacity(left_str.len() + right.len());
+                            combined.push_str(&left_str);
+                            combined.push_str(&right);
+                            self.stack.push(Value::String(Rc::new(combined)));
+                        }
+                        (left, right) => {
+                            let left_str = format_value(&left);
+                            let right_str = format_value(&right);
+                            let mut combined =
+                                String::with_capacity(left_str.len() + right_str.len());
+                            combined.push_str(&left_str);
+                            combined.push_str(&right_str);
+                            self.stack.push(Value::String(Rc::new(combined)));
                         }
                     };
                 }
@@ -1799,6 +1915,50 @@ impl Vm {
                     items.reverse();
                     self.stack.push(Value::Array(Rc::new(items)));
                 }
+                Op::Tuple(count) => {
+                    if self.stack.len() < *count {
+                        return Err(runtime_error_at(
+                            "stack underflow".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut items = Vec::with_capacity(*count);
+                    for _ in 0..*count {
+                        items.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    items.reverse();
+                    self.stack.push(Value::Tuple(Rc::new(items)));
+                }
+                Op::Range(inclusive) => {
+                    let end_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let start_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let (start, end) = match (start_value, end_value) {
+                        (Value::Int(start), Value::Int(end)) => (start, end),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "range expects int bounds".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    let end_val = if *inclusive { end } else { end - 1 };
+                    let mut items = Vec::new();
+                    let mut current = start;
+                    while current <= end_val {
+                        items.push(Value::Int(current));
+                        current += 1;
+                    }
+                    self.stack.push(Value::Array(Rc::new(items)));
+                }
                 Op::Index => {
                     let index_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -1837,6 +1997,118 @@ impl Vm {
                         )
                     })?;
                     self.stack.push(value);
+                }
+                Op::StoreIndex => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let index_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let base_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let index = match index_value {
+                        Value::Int(value) => value,
+                        _ => {
+                            return Err(runtime_error_at(
+                                "set index expects int".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if index < 0 {
+                        return Err(runtime_error_at(
+                            "index out of bounds".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let (items, idx) = match base_value {
+                        Value::Array(items) => (items, index as usize),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "set index expects array".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if idx >= items.len() {
+                        return Err(runtime_error_at(
+                            "index out of bounds".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut new_items = (*items).clone();
+                    new_items[idx] = value;
+                    self.stack.push(Value::Array(Rc::new(new_items)));
+                }
+                Op::StoreMember(field) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let base_value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match base_value {
+                        Value::Array(items) => {
+                            let mut new_items = (*items).clone();
+                            let mut pending = Some(value);
+                            for item in &mut new_items {
+                                match item {
+                                    Value::Tuple(tuple_items) => {
+                                        if tuple_items.len() != 2 {
+                                            return Err(runtime_error_at(
+                                                "set member expects array of (string, value) tuples"
+                                                    .to_string(),
+                                                span_at(chunk, frame_ip),
+                                            ));
+                                        }
+                                        if let Value::String(key) = &tuple_items[0] {
+                                            if key.as_str() == field {
+                                                let value = pending.take().ok_or_else(|| {
+                                                    runtime_error_at(
+                                                        "set member internal error".to_string(),
+                                                        span_at(chunk, frame_ip),
+                                                    )
+                                                })?;
+                                                *item = Value::Tuple(Rc::new(vec![
+                                                    Value::String(Rc::new(field.clone())),
+                                                    value,
+                                                ]));
+                                                break;
+                                            }
+                                        } else {
+                                            return Err(runtime_error_at(
+                                                "set member expects array of (string, value) tuples"
+                                                    .to_string(),
+                                                span_at(chunk, frame_ip),
+                                            ));
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(runtime_error_at(
+                                            "set member expects array of (string, value) tuples"
+                                                .to_string(),
+                                            span_at(chunk, frame_ip),
+                                        ))
+                                    }
+                                }
+                            }
+                            if let Some(value) = pending {
+                                new_items.push(Value::Tuple(Rc::new(vec![
+                                    Value::String(Rc::new(field.clone())),
+                                    value,
+                                ])));
+                            }
+                            self.stack.push(Value::Array(Rc::new(new_items)));
+                        }
+                        _ => {
+                            return Err(runtime_error_at(
+                                "set member expects array of (string, value) tuples".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    }
                 }
                 Op::Eq => {
                     let right = self.stack.pop().ok_or_else(|| {
@@ -2179,6 +2451,10 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),
         Expr::Index { index_span, .. } => Some(*index_span),
+        Expr::Tuple { tuple_span, .. } => Some(*tuple_span),
+        Expr::Range { range_span, .. } => Some(*range_span),
+        Expr::InterpolatedString { span, .. } => Some(*span),
+        Expr::Closure { span, .. } => Some(*span),
     }
 }
 

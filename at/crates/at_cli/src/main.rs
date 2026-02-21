@@ -2222,6 +2222,9 @@ fn value_to_json(value: Value) -> JsonValue {
         Value::Array(items) => {
             JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
         }
+        Value::Tuple(items) => {
+            JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
+        }
         Value::Option(Some(inner)) => value_to_json((*inner).clone()),
         Value::Option(None) => JsonValue::Null,
         Value::Result(Ok(inner)) => json!({

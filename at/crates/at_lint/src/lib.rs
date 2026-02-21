@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use at_syntax::{Expr, Ident, Module, Span, Stmt};
+use at_syntax::{Expr, Ident, InterpPart, Module, Span, Stmt};
 
 /// An edit to apply to fix a lint error
 #[derive(Debug, Clone)]
@@ -266,6 +266,15 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
         Stmt::Set { value, .. } => {
             collect_used_capabilities_expr(value, used);
         }
+        Stmt::SetMember { base, value, .. } => {
+            collect_used_capabilities_expr(base, used);
+            collect_used_capabilities_expr(value, used);
+        }
+        Stmt::SetIndex { base, index, value } => {
+            collect_used_capabilities_expr(base, used);
+            collect_used_capabilities_expr(index, used);
+            collect_used_capabilities_expr(value, used);
+        }
         Stmt::While {
             condition, body, ..
         } => {
@@ -323,7 +332,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         } => {
             collect_used_capabilities_expr(condition, used);
             collect_used_capabilities_expr(then_branch, used);
-            collect_used_capabilities_expr(else_branch, used);
+            if let Some(else_expr) = else_branch {
+                collect_used_capabilities_expr(else_expr, used);
+            }
         }
         Expr::Match { value, arms, .. } => {
             collect_used_capabilities_expr(value, used);
@@ -351,6 +362,25 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Try(expr) => {
             collect_used_capabilities_expr(expr, used);
         }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_used_capabilities_expr(item, used);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_used_capabilities_expr(start, used);
+            collect_used_capabilities_expr(end, used);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr) = part {
+                    collect_used_capabilities_expr(expr, used);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_used_capabilities_expr(body, used);
+        }
         _ => {}
     }
 }
@@ -362,6 +392,15 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, errors: &mut Vec<LintError>) {
             lint_unused_match_bindings_expr(value, errors);
         }
         Stmt::Set { value, .. } => {
+            lint_unused_match_bindings_expr(value, errors);
+        }
+        Stmt::SetMember { base, value, .. } => {
+            lint_unused_match_bindings_expr(base, errors);
+            lint_unused_match_bindings_expr(value, errors);
+        }
+        Stmt::SetIndex { base, index, value } => {
+            lint_unused_match_bindings_expr(base, errors);
+            lint_unused_match_bindings_expr(index, errors);
             lint_unused_match_bindings_expr(value, errors);
         }
         Stmt::While {
@@ -428,7 +467,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
         } => {
             lint_unused_match_bindings_expr(condition, errors);
             lint_unused_match_bindings_expr(then_branch, errors);
-            lint_unused_match_bindings_expr(else_branch, errors);
+            if let Some(else_expr) = else_branch {
+                lint_unused_match_bindings_expr(else_expr, errors);
+            }
         }
         Expr::Call { callee, args } => {
             lint_unused_match_bindings_expr(callee, errors);
@@ -458,6 +499,25 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
         Expr::Index { base, index, .. } => {
             lint_unused_match_bindings_expr(base, errors);
             lint_unused_match_bindings_expr(index, errors);
+        }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                lint_unused_match_bindings_expr(item, errors);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            lint_unused_match_bindings_expr(start, errors);
+            lint_unused_match_bindings_expr(end, errors);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr) = part {
+                    lint_unused_match_bindings_expr(expr, errors);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            lint_unused_match_bindings_expr(body, errors);
         }
         _ => {}
     }
@@ -551,7 +611,7 @@ fn collect_local_defs_stmt(
             }
             locals.push(name.clone());
         }
-        Stmt::Set { .. } => {}
+        Stmt::Set { .. } | Stmt::SetMember { .. } | Stmt::SetIndex { .. } => {}
         Stmt::While { body, .. } => {
             let mut inner_seen = HashSet::new();
             for stmt in body {
@@ -585,6 +645,15 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_local_uses_expr(value, used);
         }
         Stmt::Set { value, .. } => {
+            collect_local_uses_expr(value, used);
+        }
+        Stmt::SetMember { base, value, .. } => {
+            collect_local_uses_expr(base, used);
+            collect_local_uses_expr(value, used);
+        }
+        Stmt::SetIndex { base, index, value } => {
+            collect_local_uses_expr(base, used);
+            collect_local_uses_expr(index, used);
             collect_local_uses_expr(value, used);
         }
         Stmt::While {
@@ -635,7 +704,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
         } => {
             collect_local_uses_expr(condition, used);
             collect_local_uses_expr(then_branch, used);
-            collect_local_uses_expr(else_branch, used);
+            if let Some(else_expr) = else_branch {
+                collect_local_uses_expr(else_expr, used);
+            }
         }
         Expr::Member { base, .. } => {
             if let Expr::Ident(ident) = base.as_ref() {
@@ -676,6 +747,25 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
             collect_local_uses_expr(base, used);
             collect_local_uses_expr(index, used);
         }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_local_uses_expr(item, used);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_local_uses_expr(start, used);
+            collect_local_uses_expr(end, used);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr) = part {
+                    collect_local_uses_expr(expr, used);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_local_uses_expr(body, used);
+        }
         _ => {}
     }
 }
@@ -698,6 +788,15 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_alias_usage_expr(value, used);
         }
         Stmt::Set { value, .. } => {
+            collect_alias_usage_expr(value, used);
+        }
+        Stmt::SetMember { base, value, .. } => {
+            collect_alias_usage_expr(base, used);
+            collect_alias_usage_expr(value, used);
+        }
+        Stmt::SetIndex { base, index, value } => {
+            collect_alias_usage_expr(base, used);
+            collect_alias_usage_expr(index, used);
             collect_alias_usage_expr(value, used);
         }
         Stmt::While {
@@ -748,7 +847,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
         } => {
             collect_alias_usage_expr(condition, used);
             collect_alias_usage_expr(then_branch, used);
-            collect_alias_usage_expr(else_branch, used);
+            if let Some(else_expr) = else_branch {
+                collect_alias_usage_expr(else_expr, used);
+            }
         }
         Expr::Member { base, .. } => {
             if let Expr::Ident(ident) = base.as_ref() {
@@ -789,6 +890,25 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
             collect_alias_usage_expr(base, used);
             collect_alias_usage_expr(index, used);
         }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_alias_usage_expr(item, used);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_alias_usage_expr(start, used);
+            collect_alias_usage_expr(end, used);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr) = part {
+                    collect_alias_usage_expr(expr, used);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_alias_usage_expr(body, used);
+        }
         _ => {}
     }
 }
@@ -811,6 +931,15 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_called_functions_expr(value, used);
         }
         Stmt::Set { value, .. } => {
+            collect_called_functions_expr(value, used);
+        }
+        Stmt::SetMember { base, value, .. } => {
+            collect_called_functions_expr(base, used);
+            collect_called_functions_expr(value, used);
+        }
+        Stmt::SetIndex { base, index, value } => {
+            collect_called_functions_expr(base, used);
+            collect_called_functions_expr(index, used);
             collect_called_functions_expr(value, used);
         }
         Stmt::While {
@@ -867,7 +996,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         } => {
             collect_called_functions_expr(condition, used);
             collect_called_functions_expr(then_branch, used);
-            collect_called_functions_expr(else_branch, used);
+            if let Some(else_expr) = else_branch {
+                collect_called_functions_expr(else_expr, used);
+            }
         }
         Expr::Member { base, .. } => {
             collect_called_functions_expr(base, used);
@@ -897,6 +1028,25 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Index { base, index, .. } => {
             collect_called_functions_expr(base, used);
             collect_called_functions_expr(index, used);
+        }
+        Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_called_functions_expr(item, used);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_called_functions_expr(start, used);
+            collect_called_functions_expr(end, used);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr) = part {
+                    collect_called_functions_expr(expr, used);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            collect_called_functions_expr(body, used);
         }
         _ => {}
     }
