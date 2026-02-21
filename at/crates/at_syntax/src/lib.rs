@@ -156,7 +156,17 @@ pub enum MatchPattern {
     ResultErr(Ident),
     OptionSome(Ident),
     OptionNone,
+    Struct {
+        name: Ident,
+        fields: Vec<StructPatternField>,
+    },
     Wildcard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructPatternField {
+    pub name: Ident,
+    pub binding: Option<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

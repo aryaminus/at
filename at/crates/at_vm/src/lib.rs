@@ -102,6 +102,7 @@ pub enum Op {
     MatchResultErr(usize),
     MatchOptionSome(usize),
     MatchOptionNone(usize),
+    MatchStruct(Vec<String>, usize),
     MatchInt(i64, usize),
     MatchFail,
     JumpIfFalse(usize),
@@ -1115,6 +1116,13 @@ impl Compiler {
                         at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
                         at_syntax::MatchPattern::OptionSome(_) => Op::MatchOptionSome(usize::MAX),
                         at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
+                        at_syntax::MatchPattern::Struct { ref fields, .. } => {
+                            let names = fields
+                                .iter()
+                                .map(|field| field.name.name.clone())
+                                .collect::<Vec<_>>();
+                            Op::MatchStruct(names, usize::MAX)
+                        }
                         at_syntax::MatchPattern::Wildcard => unreachable!(),
                     },
                     Some(match_span),
@@ -1127,6 +1135,7 @@ impl Compiler {
             self.push_scope();
             let mut binding_slot: Option<usize> = None;
             let mut binding_span: Option<Span> = None;
+            let mut struct_guard_slot: Option<usize> = None;
             match &arm.pattern {
                 at_syntax::MatchPattern::Int(_) => {}
                 at_syntax::MatchPattern::ResultOk(ident)
@@ -1138,6 +1147,26 @@ impl Compiler {
                     binding_span = Some(ident.span);
                 }
                 at_syntax::MatchPattern::OptionNone => {}
+                at_syntax::MatchPattern::Struct { fields, .. } => {
+                    for field in fields.iter().rev() {
+                        let binding = field.binding.as_ref().unwrap_or(&field.name);
+                        if binding.name == "_" {
+                            chunk.push(Op::Pop, Some(binding.span));
+                            continue;
+                        }
+                        let slot = self.bind_local_checked(&binding.name, binding.span)?;
+                        chunk.push(Op::StoreLocal(slot), Some(binding.span));
+                    }
+
+                    if arm.guard.is_some() {
+                        let temp_name = self.next_synthetic_name("match_struct");
+                        let temp_slot = self.bind_local_checked(&temp_name, match_span)?;
+                        chunk.push(Op::StoreLocal(temp_slot), Some(match_span));
+                        struct_guard_slot = Some(temp_slot);
+                    } else {
+                        chunk.push(Op::Pop, Some(match_span));
+                    }
+                }
                 at_syntax::MatchPattern::Wildcard => {}
             }
 
@@ -1166,6 +1195,11 @@ impl Compiler {
                     at_syntax::MatchPattern::Int(value) => {
                         let idx = chunk.add_const(Value::Int(value));
                         chunk.push(Op::Const(idx), Some(match_span));
+                    }
+                    at_syntax::MatchPattern::Struct { .. } => {
+                        if let Some(slot) = struct_guard_slot {
+                            chunk.push(Op::LoadLocal(slot), Some(match_span));
+                        }
                     }
                     at_syntax::MatchPattern::ResultOk(_) => {
                         let slot = binding_slot.ok_or_else(|| {
@@ -1715,10 +1749,22 @@ impl Compiler {
             at_syntax::MatchPattern::Int(_)
             | at_syntax::MatchPattern::OptionNone
             | at_syntax::MatchPattern::Wildcard => None,
+            at_syntax::MatchPattern::Struct { .. } => None,
         };
         if let Some(name) = name {
             if let Some(scope) = bound.last_mut() {
                 scope.insert(name.clone());
+            }
+        }
+
+        if let at_syntax::MatchPattern::Struct { fields, .. } = pattern {
+            if let Some(scope) = bound.last_mut() {
+                for field in fields {
+                    let binding = field.binding.as_ref().unwrap_or(&field.name);
+                    if binding.name != "_" {
+                        scope.insert(binding.name.clone());
+                    }
+                }
             }
         }
     }
@@ -3208,6 +3254,42 @@ impl Vm {
                         }
                     }
                 }
+                Op::MatchStruct(fields, target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Struct(values) => {
+                            let mut extracted = Vec::with_capacity(fields.len());
+                            let mut ok = true;
+                            for field in fields {
+                                if let Some(val) = values.get(field) {
+                                    extracted.push(val.clone());
+                                } else {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if ok {
+                                self.stack.push(Value::Struct(values));
+                                for value in extracted {
+                                    self.stack.push(value);
+                                }
+                            } else {
+                                self.stack.push(Value::Struct(values));
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects struct".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
                 Op::MatchInt(expected, target) => {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -3387,6 +3469,7 @@ fn patch_jump(code: &mut [Op], index: usize, target: usize) {
         | Op::MatchResultErr(ref mut slot)
         | Op::MatchOptionSome(ref mut slot)
         | Op::MatchOptionNone(ref mut slot)
+        | Op::MatchStruct(_, ref mut slot)
         | Op::MatchInt(_, ref mut slot)
         | Op::JumpIfFalse(ref mut slot)
         | Op::Jump(ref mut slot) => {

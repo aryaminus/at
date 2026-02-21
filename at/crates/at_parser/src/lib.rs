@@ -1,6 +1,6 @@
 use at_syntax::{
     Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span, Stmt,
-    StructField, StructLiteralField, TypeRef,
+    StructField, StructLiteralField, StructPatternField, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1291,11 +1291,48 @@ impl<'a> Parser<'a> {
                 Ok(MatchPattern::OptionSome(name))
             }
             "none" => Ok(MatchPattern::OptionNone),
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "match pattern".to_string(),
-                found: TokenKind::Ident(head.name),
-                span: head.span,
-            }),
+            _ => {
+                let is_type_name = head
+                    .name
+                    .chars()
+                    .next()
+                    .map(|ch| ch.is_uppercase())
+                    .unwrap_or(false);
+                if is_type_name && self.current.kind == TokenKind::LBrace {
+                    self.advance();
+                    let mut fields = Vec::new();
+                    if self.current.kind != TokenKind::RBrace {
+                        loop {
+                            let field_name = self.expect_ident()?;
+                            let binding = if self.current.kind == TokenKind::Colon {
+                                self.advance();
+                                Some(self.expect_ident()?)
+                            } else {
+                                None
+                            };
+                            fields.push(StructPatternField {
+                                name: field_name,
+                                binding,
+                            });
+                            if self.current.kind != TokenKind::Comma {
+                                break;
+                            }
+                            self.advance();
+                            if self.current.kind == TokenKind::RBrace {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    Ok(MatchPattern::Struct { name: head, fields })
+                } else {
+                    Err(ParseError::UnexpectedToken {
+                        expected: "match pattern".to_string(),
+                        found: TokenKind::Ident(head.name),
+                        span: head.span,
+                    })
+                }
+            }
         }
     }
 

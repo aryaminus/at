@@ -722,6 +722,21 @@ fn format_match_pattern(pattern: &MatchPattern, out: &mut String) {
         MatchPattern::OptionNone => {
             out.push_str("none");
         }
+        MatchPattern::Struct { name, fields } => {
+            out.push_str(&name.name);
+            out.push_str(" { ");
+            for (idx, field) in fields.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&field.name.name);
+                if let Some(binding) = &field.binding {
+                    out.push_str(": ");
+                    out.push_str(&binding.name);
+                }
+            }
+            out.push_str(" }");
+        }
         MatchPattern::Wildcard => {
             out.push('_');
         }

@@ -549,6 +549,10 @@ fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
         | at_syntax::MatchPattern::ResultErr(ident)
         | at_syntax::MatchPattern::OptionSome(ident) => vec![ident.clone()],
         at_syntax::MatchPattern::OptionNone => Vec::new(),
+        at_syntax::MatchPattern::Struct { fields, .. } => fields
+            .iter()
+            .filter_map(|field| field.binding.clone().or_else(|| Some(field.name.clone())))
+            .collect(),
         at_syntax::MatchPattern::Wildcard => Vec::new(),
     }
 }

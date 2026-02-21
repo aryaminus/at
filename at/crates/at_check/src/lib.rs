@@ -1049,6 +1049,52 @@ impl TypeChecker {
                         self.push_error("match expects int value".to_string(), Some(match_span));
                     }
                 }
+                at_syntax::MatchPattern::Struct { name, fields } => {
+                    let struct_fields = self.structs.get(&name.name).cloned();
+                    if struct_fields.is_none() {
+                        self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
+                    }
+                    if let SimpleType::Custom(struct_name) = &value_ty {
+                        if struct_name != &name.name {
+                            self.push_error(
+                                format!("match expects struct {}, got {}", name.name, struct_name),
+                                Some(match_span),
+                            );
+                        }
+                    } else if value_ty != SimpleType::Unknown {
+                        self.push_error(
+                            format!(
+                                "match expects struct {}, got {}",
+                                name.name,
+                                format_type(&value_ty)
+                            ),
+                            Some(match_span),
+                        );
+                    }
+
+                    if let Some(struct_fields) = struct_fields {
+                        for field in fields {
+                            let binding = field.binding.as_ref().unwrap_or(&field.name);
+                            if binding.name != "_" {
+                                if let Some(expected) = struct_fields
+                                    .iter()
+                                    .find(|entry| entry.name.name == field.name.name)
+                                {
+                                    let expected_ty = self.type_from_ref(&expected.ty);
+                                    self.bind_local(binding, expected_ty);
+                                } else {
+                                    self.push_error(
+                                        format!(
+                                            "unknown field {} on struct {}",
+                                            field.name.name, name.name
+                                        ),
+                                        Some(field.name.span),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 at_syntax::MatchPattern::ResultOk(ident) => {
                     has_ok = true;
                     if value_ty != SimpleType::Result && value_ty != SimpleType::Unknown {
