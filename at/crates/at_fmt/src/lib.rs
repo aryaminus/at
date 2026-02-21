@@ -1,17 +1,36 @@
 use std::collections::HashSet;
 
-use at_syntax::{Expr, Function, MatchPattern, Module, Stmt};
+use at_syntax::{Comment, Expr, Function, MatchPattern, Module, Stmt};
 
 pub fn format_module(module: &Module) -> String {
     let mut out = String::new();
     let import_aliases = collect_import_aliases(module);
+    let mut comments: Vec<Comment> = module.comments.clone();
+    comments.sort_by_key(|comment| comment.span.start);
+    let mut comment_index = 0usize;
+    let mut emit_comments = |out: &mut String, limit: usize| {
+        while comment_index < comments.len() {
+            let comment = &comments[comment_index];
+            if comment.span.start >= limit {
+                break;
+            }
+            out.push_str(comment.text.trim_end());
+            if !comment.text.ends_with('\n') {
+                out.push('\n');
+            }
+            comment_index += 1;
+        }
+    };
     for func in &module.functions {
+        emit_comments(&mut out, func.name.span.start);
         format_function(func, &mut out, 0, &import_aliases);
         out.push('\n');
     }
     for stmt in &module.stmts {
+        emit_comments(&mut out, stmt_span(stmt));
         format_stmt(stmt, &mut out, 0);
     }
+    emit_comments(&mut out, usize::MAX);
     out
 }
 
@@ -56,6 +75,56 @@ fn format_function(
     }
     indent_to(out, indent);
     out.push_str("}\n");
+}
+
+fn stmt_span(stmt: &Stmt) -> usize {
+    match stmt {
+        Stmt::Import { alias, .. } => alias.span.start,
+        Stmt::TypeAlias { name, .. } => name.span.start,
+        Stmt::Enum { name, .. } => name.span.start,
+        Stmt::Struct { name, .. } => name.span.start,
+        Stmt::Let { name, .. } => name.span.start,
+        Stmt::Using { name, .. } => name.span.start,
+        Stmt::Set { name, .. } => name.span.start,
+        Stmt::SetMember { field, .. } => field.span.start,
+        Stmt::SetIndex { base, .. } => expr_span(base).unwrap_or(0),
+        Stmt::While { while_span, .. } => while_span.start,
+        Stmt::For { for_span, .. } => for_span.start,
+        Stmt::Break { break_span } => break_span.start,
+        Stmt::Continue { continue_span } => continue_span.start,
+        Stmt::Expr(expr) => expr_span(expr).unwrap_or(0),
+        Stmt::Return(expr) => expr.as_ref().and_then(expr_span).unwrap_or(0),
+        Stmt::Block(stmts) => stmts
+            .first()
+            .and_then(|stmt| Some(stmt_span(stmt)))
+            .unwrap_or(0),
+        Stmt::Test { .. } => 0,
+    }
+}
+
+fn expr_span(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Int(_, span) | Expr::Float(_, span) | Expr::String(_, span) | Expr::Bool(_, span) => {
+            Some(span.start)
+        }
+        Expr::Ident(ident) => Some(ident.span.start),
+        Expr::Unary { expr, .. } => expr_span(expr),
+        Expr::Binary { left, .. } => expr_span(left),
+        Expr::If { condition, .. } => expr_span(condition),
+        Expr::Member { base, .. } => expr_span(base),
+        Expr::Call { callee, .. } => expr_span(callee),
+        Expr::Try(expr) => expr_span(expr),
+        Expr::Match { match_span, .. } => Some(match_span.start),
+        Expr::Block { block_span, .. } => Some(block_span.start),
+        Expr::Array { array_span, .. } => Some(array_span.start),
+        Expr::Index { index_span, .. } => Some(index_span.start),
+        Expr::Tuple { tuple_span, .. } => Some(tuple_span.start),
+        Expr::Range { range_span, .. } => Some(range_span.start),
+        Expr::InterpolatedString { span, .. } => Some(span.start),
+        Expr::Closure { span, .. } => Some(span.start),
+        Expr::StructLiteral { span, .. } => Some(span.start),
+        Expr::EnumLiteral { span, .. } => Some(span.start),
+    }
 }
 
 fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {

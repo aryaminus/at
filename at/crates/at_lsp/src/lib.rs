@@ -1155,7 +1155,11 @@ fn get_cached_module(
         uri.clone(),
         DocCacheEntry {
             hash,
-            module: module.clone(),
+            module: Module {
+                functions: module.functions.clone(),
+                stmts: module.stmts.clone(),
+                comments: Vec::new(),
+            },
         },
     );
     Some(module)

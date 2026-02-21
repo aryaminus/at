@@ -1,6 +1,6 @@
 use at_syntax::{
-    EnumVariant, Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param, Span,
-    Stmt, StructField, StructLiteralField, StructPatternField, TypeRef,
+    Comment, EnumVariant, Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param,
+    Span, Stmt, StructField, StructLiteralField, StructPatternField, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,11 +73,18 @@ pub enum TokenKind {
     DotDot,
     DotDotEquals,
     Semicolon,
+    Comment,
     Invalid(char),
     UnterminatedString,
     UnterminatedBlockComment,
     InvalidNumber,
     Eof,
+}
+
+impl TokenKind {
+    fn is_comment(&self) -> bool {
+        matches!(self, TokenKind::Comment)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,12 +147,7 @@ impl std::error::Error for ParseError {}
 pub fn parse_module(source: &str) -> Result<Module, ParseError> {
     let mut lexer = Lexer::new(source);
     let mut parser = Parser::new(&mut lexer);
-    let (module, errors) = parser.parse_module_with_errors();
-    if let Some(error) = errors.into_iter().next() {
-        Err(error)
-    } else {
-        Ok(module)
-    }
+    parser.parse_module()
 }
 
 pub fn parse_module_with_errors(source: &str) -> (Module, Vec<ParseError>) {
@@ -157,12 +159,21 @@ pub fn parse_module_with_errors(source: &str) -> (Module, Vec<ParseError>) {
 struct Parser<'a> {
     lexer: &'a mut Lexer<'a>,
     current: Token,
+    comments: Vec<Comment>,
 }
 
 impl<'a> Parser<'a> {
     fn new(lexer: &'a mut Lexer<'a>) -> Self {
-        let current = lexer.next_token();
-        Self { lexer, current }
+        let mut parser = Self {
+            lexer,
+            current: Token {
+                kind: TokenKind::Eof,
+                span: Span { start: 0, end: 0 },
+            },
+            comments: Vec::new(),
+        };
+        parser.advance();
+        parser
     }
 
     fn parse_module_with_errors(&mut self) -> (Module, Vec<ParseError>) {
@@ -194,7 +205,31 @@ impl<'a> Parser<'a> {
                 },
             }
         }
-        (Module { functions, stmts }, errors)
+        (
+            Module {
+                functions,
+                stmts,
+                comments: std::mem::take(&mut self.comments),
+            },
+            errors,
+        )
+    }
+
+    fn parse_module(&mut self) -> Result<Module, ParseError> {
+        let mut functions = Vec::new();
+        let mut stmts = Vec::new();
+        while self.current.kind != TokenKind::Eof {
+            match self.current.kind {
+                TokenKind::Fn => functions.push(self.parse_function(false)?),
+                TokenKind::Tool => functions.push(self.parse_tool_function()?),
+                _ => stmts.push(self.parse_stmt()?),
+            }
+        }
+        Ok(Module {
+            functions,
+            stmts,
+            comments: std::mem::take(&mut self.comments),
+        })
     }
 
     fn recover_to_stmt_boundary(&mut self) {
@@ -1667,11 +1702,25 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) {
-        self.current = self.lexer.next_token();
+        loop {
+            self.current = self.lexer.next_token();
+            if self.current.kind.is_comment() {
+                self.capture_comment();
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn capture_comment(&mut self) {
+        let span = self.current.span;
+        let text = self.lexer.source[span.start..span.end].to_string();
+        self.comments.push(Comment { span, text });
     }
 }
 
 struct Lexer<'a> {
+    source: &'a str,
     chars: std::str::Chars<'a>,
     index: usize,
     current: Option<char>,
@@ -1682,6 +1731,7 @@ impl<'a> Lexer<'a> {
         let mut chars = source.chars();
         let current = chars.next();
         Self {
+            source,
             chars,
             index: 0,
             current,
@@ -2379,6 +2429,7 @@ impl<'a> Lexer<'a> {
                     self.bump();
                 }
                 Some('/') if self.peek() == Some('/') => {
+                    let comment_start = self.index;
                     self.bump();
                     self.bump();
                     while let Some(ch) = self.current {
@@ -2387,6 +2438,13 @@ impl<'a> Lexer<'a> {
                         }
                         self.bump();
                     }
+                    return Some(Token {
+                        kind: TokenKind::Comment,
+                        span: Span {
+                            start: comment_start,
+                            end: self.index,
+                        },
+                    });
                 }
                 Some('/') if self.peek() == Some('*') => {
                     let comment_start = self.index;
@@ -2418,6 +2476,13 @@ impl<'a> Lexer<'a> {
                             },
                         });
                     }
+                    return Some(Token {
+                        kind: TokenKind::Comment,
+                        span: Span {
+                            start: comment_start,
+                            end: self.index,
+                        },
+                    });
                 }
                 _ => break,
             }

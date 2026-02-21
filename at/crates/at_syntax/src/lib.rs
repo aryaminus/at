@@ -279,4 +279,11 @@ pub struct Param {
 pub struct Module {
     pub functions: Vec<Function>,
     pub stmts: Vec<Stmt>,
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub span: Span,
+    pub text: String,
 }

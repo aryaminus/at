@@ -1068,6 +1068,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
             module: Module {
                 functions: Vec::new(),
                 stmts: Vec::new(),
+                comments: Vec::new(),
             },
             imports: Vec::new(),
             import_aliases: Vec::new(),
@@ -1135,6 +1136,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
         module: Module {
             functions: merged_functions,
             stmts: merged_stmts,
+            comments: Vec::new(),
         },
         imports: merged_imports,
         import_aliases: merged_aliases,
