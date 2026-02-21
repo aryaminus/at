@@ -373,7 +373,14 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}\n");
+            out.push('}');
+            if !stmts.is_empty() {
+                let last = stmt_span(stmts.last().unwrap());
+                comment_state.emit_inline_between(out, last, last + 1);
+            }
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
         }
         Stmt::Test { name, body } => {
             indent_to(out, indent);
@@ -385,7 +392,14 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}\n");
+            out.push('}');
+            if !body.is_empty() {
+                let last = stmt_span(body.last().unwrap());
+                comment_state.emit_inline_between(out, last, last + 1);
+            }
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
         }
     }
 }
