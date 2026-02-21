@@ -294,6 +294,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             indent_to(out, indent);
             out.push_str("while ");
             format_expr_with_indent(condition, out, indent, comment_state);
+            if let Some(condition_span) = expr_span(condition) {
+                comment_state.emit_inline_between(out, condition_span, condition_span + 1);
+            }
             out.push_str(" {\n");
             for stmt in body {
                 comment_state.emit_until(out, stmt_span(stmt));
@@ -310,6 +313,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push_str(&item.name);
             out.push_str(" in ");
             format_expr_with_indent(iter, out, indent, comment_state);
+            if let Some(iter_span) = expr_span(iter) {
+                comment_state.emit_inline_between(out, iter_span, iter_span + 1);
+            }
             out.push_str(" {\n");
             for stmt in body {
                 comment_state.emit_until(out, stmt_span(stmt));
@@ -481,6 +487,9 @@ fn format_expr_prec_indent(
             }
             out.push_str("if ");
             format_expr_prec_indent(condition, out, 0, indent, comment_state);
+            if let Some(condition_span) = expr_span(condition) {
+                comment_state.emit_inline_between(out, condition_span, condition_span + 1);
+            }
             out.push(' ');
             format_expr_prec_indent(then_branch, out, 0, indent, comment_state);
             if let Some(else_expr) = else_branch {
@@ -518,6 +527,9 @@ fn format_expr_prec_indent(
             }
             out.push_str("match ");
             format_expr_prec_indent(value, out, 0, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(" {\n");
             for arm in arms {
                 indent_to(out, indent + 4);
@@ -525,6 +537,9 @@ fn format_expr_prec_indent(
                 if let Some(guard) = &arm.guard {
                     out.push_str(" if ");
                     format_expr_prec_indent(guard, out, 0, indent + 4, comment_state);
+                    if let Some(guard_span) = expr_span(guard) {
+                        comment_state.emit_inline_between(out, guard_span, guard_span + 1);
+                    }
                 }
                 out.push_str(" => ");
                 format_expr_prec_indent(&arm.body, out, 0, indent + 4, comment_state);
