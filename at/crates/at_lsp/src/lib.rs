@@ -478,6 +478,7 @@ fn provide_signature_help(
     })
 }
 
+#[allow(deprecated)]
 fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<DocumentSymbolResponse> {
     let owned_module;
     let module = if let Some(module) = module {
