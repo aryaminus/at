@@ -588,6 +588,17 @@ impl TypeChecker {
                 result
             }
             Expr::Try(expr) => {
+                let expects_result = matches!(self.current_return, SimpleType::Result(_, _))
+                    || matches!(
+                        self.current_return_ref,
+                        Some(TypeRef::Named { ref name, .. }) if name.name == "result"
+                    );
+                if !expects_result {
+                    self.push_error(
+                        "? requires function returning result".to_string(),
+                        expr_span(expr),
+                    );
+                }
                 let inner = self.check_expr(expr);
                 match &inner {
                     SimpleType::Result(ok, _) => (**ok).clone(),
