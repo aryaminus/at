@@ -1615,7 +1615,7 @@ mod tests {
         let file = temp_dir.join("test.at");
         fs::write(
             &file,
-            "struct Root { items: array<array<int> > }\nlet store = Root { items: [[1]] };\nset store.items[0][0] = 2;\nprint(store.items[0][0]);",
+            "struct Root { items: array<array<int>> }\nlet store = Root { items: [[1]] };\nset store.items[0][0] = 2;\nprint(store.items[0][0]);",
         )
         .expect("write test file");
 

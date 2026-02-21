@@ -160,6 +160,7 @@ struct Parser<'a> {
     lexer: &'a mut Lexer<'a>,
     current: Token,
     comments: Vec<Comment>,
+    pending_token: Option<Token>,
 }
 
 impl<'a> Parser<'a> {
@@ -171,6 +172,7 @@ impl<'a> Parser<'a> {
                 span: Span { start: 0, end: 0 },
             },
             comments: Vec::new(),
+            pending_token: None,
         };
         parser.advance();
         parser
@@ -1664,17 +1666,53 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     self.advance();
-                    if self.current.kind == TokenKind::Greater {
+                    if self.current.kind == TokenKind::Greater
+                        || self.current.kind == TokenKind::Shr
+                    {
                         break;
                     }
                 }
             }
-            self.expect(TokenKind::Greater)?;
+            self.consume_type_greater()?;
             items
         } else {
             Vec::new()
         };
         Ok(TypeRef::Named { name, args })
+    }
+
+    fn consume_type_greater(&mut self) -> Result<(), ParseError> {
+        match &self.current.kind {
+            TokenKind::Greater => {
+                self.advance();
+                Ok(())
+            }
+            TokenKind::Shr => {
+                let span = self.current.span;
+                let mid = span.start.saturating_add(1).min(span.end);
+                self.pending_token = Some(Token {
+                    kind: TokenKind::Greater,
+                    span: Span {
+                        start: mid,
+                        end: span.end,
+                    },
+                });
+                self.current = Token {
+                    kind: TokenKind::Greater,
+                    span: Span {
+                        start: span.start,
+                        end: mid,
+                    },
+                };
+                self.advance();
+                Ok(())
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "Greater".to_string(),
+                found: self.current.kind.clone(),
+                span: self.current.span,
+            }),
+        }
     }
 
     fn expect_ident(&mut self) -> Result<Ident, ParseError> {
@@ -1709,6 +1747,10 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) {
+        if let Some(token) = self.pending_token.take() {
+            self.current = token;
+            return;
+        }
         loop {
             self.current = self.lexer.next_token();
             if self.current.kind.is_comment() {
