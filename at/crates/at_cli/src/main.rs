@@ -851,13 +851,37 @@ fn run_file(path: &str, extra_args: &[String]) {
 
 fn format_runtime_error(err: &at_vm::VmError, source: Option<&str>) -> String {
     match err {
-        at_vm::VmError::Runtime { message, span } => {
-            if let (Some(span), Some(source)) = (span, source) {
+        at_vm::VmError::Runtime {
+            message,
+            span,
+            stack,
+        } => {
+            let mut output = if let (Some(span), Some(source)) = (span, source) {
                 if let Some((line, column)) = offset_to_line_col(source, span.start) {
-                    return format!("runtime error: {message} at {line}:{column}");
+                    format!("runtime error: {message} at {line}:{column}")
+                } else {
+                    format!("runtime error: {message}")
+                }
+            } else {
+                format!("runtime error: {message}")
+            };
+
+            if let Some(stack) = stack {
+                if !stack.is_empty() {
+                    output.push_str("\nstack trace:");
+                    for frame in stack {
+                        let mut line = format!("\n  at {}", frame.name);
+                        if let (Some(span), Some(source)) = (frame.span, source) {
+                            if let Some((line_no, col)) = offset_to_line_col(source, span.start) {
+                                line.push_str(&format!(" ({line_no}:{col})"));
+                            }
+                        }
+                        output.push_str(&line);
+                    }
                 }
             }
-            format!("runtime error: {message}")
+
+            output
         }
         other => format!("runtime error: {other:?}"),
     }

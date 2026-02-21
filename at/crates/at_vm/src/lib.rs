@@ -124,6 +124,19 @@ impl Chunk {
         self.code.push(op);
         self.spans.push(span);
     }
+
+    fn add_const(&mut self, value: Value) -> usize {
+        if let Some(index) = self
+            .constants
+            .iter()
+            .position(|existing| existing == &value)
+        {
+            return index;
+        }
+        let index = self.constants.len();
+        self.constants.push(value);
+        index
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,9 +173,24 @@ impl LoopContext {
 #[derive(Debug)]
 pub enum VmError {
     StackUnderflow,
-    Compile { message: String, span: Option<Span> },
-    Runtime { message: String, span: Option<Span> },
-    ExecutionLimit { message: String },
+    Compile {
+        message: String,
+        span: Option<Span>,
+    },
+    Runtime {
+        message: String,
+        span: Option<Span>,
+        stack: Option<Vec<StackFrame>>,
+    },
+    ExecutionLimit {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackFrame {
+    pub name: String,
+    pub span: Option<Span>,
 }
 
 pub struct Compiler {
@@ -303,8 +331,7 @@ impl Compiler {
         for stmt in &func.body {
             self.compile_stmt(stmt, &mut chunk)?;
         }
-        let unit_index = chunk.constants.len();
-        chunk.constants.push(Value::Unit);
+        let unit_index = chunk.add_const(Value::Unit);
         chunk.push(Op::Const(unit_index), None);
         chunk.push(Op::Return, None);
         Ok((chunk, self.next_local))
@@ -431,8 +458,7 @@ impl Compiler {
 
                 let idx_name = self.next_synthetic_name("for_idx");
                 let idx_slot = self.bind_local_checked(&idx_name, item.span)?;
-                let zero_index = chunk.constants.len();
-                chunk.constants.push(Value::Int(0));
+                let zero_index = chunk.add_const(Value::Int(0));
                 chunk.push(Op::Const(zero_index), Some(*for_span));
                 chunk.push(Op::StoreLocal(idx_slot), Some(*for_span));
 
@@ -457,8 +483,7 @@ impl Compiler {
                 self.pop_scope();
 
                 let continue_target = chunk.code.len();
-                let one_index = chunk.constants.len();
-                chunk.constants.push(Value::Int(1));
+                let one_index = chunk.add_const(Value::Int(1));
                 chunk.push(Op::LoadLocal(idx_slot), Some(*for_span));
                 chunk.push(Op::Const(one_index), Some(*for_span));
                 chunk.push(Op::Add, Some(*for_span));
@@ -508,8 +533,7 @@ impl Compiler {
                 if let Some(expr) = expr {
                     self.compile_expr(expr, chunk)?;
                 } else {
-                    let unit_index = chunk.constants.len();
-                    chunk.constants.push(Value::Unit);
+                    let unit_index = chunk.add_const(Value::Unit);
                     chunk.push(Op::Const(unit_index), None);
                 }
                 chunk.push(Op::Return, expr.as_ref().and_then(expr_span));
@@ -536,23 +560,19 @@ impl Compiler {
     fn compile_expr(&mut self, expr: &Expr, chunk: &mut Chunk) -> Result<(), VmError> {
         match expr {
             Expr::Int(value, _) => {
-                let index = chunk.constants.len();
-                chunk.constants.push(Value::Int(*value));
+                let index = chunk.add_const(Value::Int(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
             Expr::Float(value, _) => {
-                let index = chunk.constants.len();
-                chunk.constants.push(Value::Float(*value));
+                let index = chunk.add_const(Value::Float(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
             Expr::String(value, _) => {
-                let index = chunk.constants.len();
-                chunk.constants.push(Value::String(Rc::new(value.clone())));
+                let index = chunk.add_const(Value::String(Rc::new(value.clone())));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
             Expr::Bool(value, _) => {
-                let index = chunk.constants.len();
-                chunk.constants.push(Value::Bool(*value));
+                let index = chunk.add_const(Value::Bool(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
             Expr::Ident(ident) => {
@@ -577,8 +597,7 @@ impl Compiler {
                     self.compile_to_bool(right, chunk)?;
                     let jump_to_end = chunk.code.len();
                     chunk.push(Op::Jump(usize::MAX), Some(*op_span));
-                    let false_index = chunk.constants.len();
-                    chunk.constants.push(Value::Bool(false));
+                    let false_index = chunk.add_const(Value::Bool(false));
                     let false_pos = chunk.code.len();
                     chunk.push(Op::Const(false_index), Some(*op_span));
                     patch_jump(&mut chunk.code, jump_if_false, false_pos);
@@ -589,8 +608,7 @@ impl Compiler {
                     self.compile_to_bool(left, chunk)?;
                     let jump_if_false = chunk.code.len();
                     chunk.push(Op::JumpIfFalse(usize::MAX), Some(*op_span));
-                    let true_index = chunk.constants.len();
-                    chunk.constants.push(Value::Bool(true));
+                    let true_index = chunk.add_const(Value::Bool(true));
                     chunk.push(Op::Const(true_index), Some(*op_span));
                     let jump_to_end = chunk.code.len();
                     chunk.push(Op::Jump(usize::MAX), Some(*op_span));
@@ -650,8 +668,7 @@ impl Compiler {
                 if let Some(else_expr) = else_branch {
                     self.compile_expr(else_expr, chunk)?;
                 } else {
-                    let unit_index = chunk.constants.len();
-                    chunk.constants.push(Value::Unit);
+                    let unit_index = chunk.add_const(Value::Unit);
                     chunk.push(Op::Const(unit_index), Some(*if_span));
                 }
                 let end = chunk.code.len();
@@ -665,8 +682,7 @@ impl Compiler {
                 if let Some(expr) = tail {
                     self.compile_expr(expr, chunk)?;
                 } else {
-                    let unit_index = chunk.constants.len();
-                    chunk.constants.push(Value::Unit);
+                    let unit_index = chunk.add_const(Value::Unit);
                     chunk.push(Op::Const(unit_index), None);
                 }
                 self.pop_scope();
@@ -699,14 +715,12 @@ impl Compiler {
                 chunk.push(Op::Range(*inclusive), expr_span(expr));
             }
             Expr::InterpolatedString { parts, .. } => {
-                let empty_idx = chunk.constants.len();
-                chunk.constants.push(Value::String(Rc::new(String::new())));
+                let empty_idx = chunk.add_const(Value::String(Rc::new(String::new())));
                 chunk.push(Op::Const(empty_idx), expr_span(expr));
                 for part in parts {
                     match part {
                         at_syntax::InterpPart::String(s) => {
-                            let idx = chunk.constants.len();
-                            chunk.constants.push(Value::String(Rc::new(s.clone())));
+                            let idx = chunk.add_const(Value::String(Rc::new(s.clone())));
                             chunk.push(Op::Const(idx), expr_span(expr));
                         }
                         at_syntax::InterpPart::Expr(e) => {
@@ -993,8 +1007,7 @@ impl Compiler {
         chunk: &mut Chunk,
     ) -> Result<(), VmError> {
         if arms.is_empty() {
-            let unit_index = chunk.constants.len();
-            chunk.constants.push(Value::Unit);
+            let unit_index = chunk.add_const(Value::Unit);
             chunk.push(Op::Const(unit_index), Some(match_span));
             return Ok(());
         }
@@ -1136,6 +1149,31 @@ pub struct Vm {
 }
 
 impl Vm {
+    fn runtime_error(&self, message: String, span: Option<Span>, program: &Program) -> VmError {
+        VmError::Runtime {
+            message,
+            span,
+            stack: Some(self.build_stack_trace(program)),
+        }
+    }
+
+    fn build_stack_trace(&self, program: &Program) -> Vec<StackFrame> {
+        self.frames
+            .iter()
+            .rev()
+            .map(|frame| {
+                let (name, span) = if frame.chunk_id == usize::MAX {
+                    ("<main>".to_string(), span_at(&program.main, frame.ip))
+                } else if let Some(func) = program.functions.get(frame.chunk_id) {
+                    (func.name.clone(), span_at(&func.chunk, frame.ip))
+                } else {
+                    ("<unknown>".to_string(), None)
+                };
+                StackFrame { name, span }
+            })
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             stack: Vec::with_capacity(256),
@@ -1259,9 +1297,10 @@ impl Vm {
                 {
                     Some(chunk) => chunk,
                     None => {
-                        return Err(runtime_error_at(
+                        return Err(self.runtime_error(
                             format!("invalid function id: {}", frame_chunk_id),
                             None,
+                            program,
                         ))
                     }
                 }
@@ -1270,6 +1309,8 @@ impl Vm {
             if frame_ip >= chunk.code.len() {
                 return Ok(self.stack.pop());
             }
+
+            set_stack_trace(self.build_stack_trace(program));
 
             let mut advance = true;
             match &chunk.code[frame_ip] {
@@ -1693,24 +1734,27 @@ impl Vm {
                     })?;
                     match value {
                         Value::Int(0) => {
-                            return Err(VmError::Runtime {
-                                message: "assert failed".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "assert failed".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                         Value::Int(_) => {}
                         Value::Bool(false) => {
-                            return Err(VmError::Runtime {
-                                message: "assert failed".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "assert failed".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                         Value::Bool(true) => {}
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "assert expects bool or int".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "assert expects bool or int".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                     self.stack.push(Value::Unit);
@@ -1732,10 +1776,11 @@ impl Vm {
                             self.stack.push(value);
                         }
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "? expects result".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "? expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                 }
@@ -1748,7 +1793,14 @@ impl Vm {
                     })?;
                     match (left, right) {
                         (Value::Int(left), Value::Int(right)) => {
-                            self.stack.push(Value::Int(left + right));
+                            if let Some(value) = left.checked_add(right) {
+                                self.stack.push(Value::Int(value));
+                            } else {
+                                return Err(runtime_error_at(
+                                    "integer overflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left + right));
@@ -1793,7 +1845,14 @@ impl Vm {
                     })?;
                     match (left, right) {
                         (Value::Int(left), Value::Int(right)) => {
-                            self.stack.push(Value::Int(left - right));
+                            if let Some(value) = left.checked_sub(right) {
+                                self.stack.push(Value::Int(value));
+                            } else {
+                                return Err(runtime_error_at(
+                                    "integer overflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left - right));
@@ -1815,7 +1874,14 @@ impl Vm {
                     })?;
                     match (left, right) {
                         (Value::Int(left), Value::Int(right)) => {
-                            self.stack.push(Value::Int(left * right));
+                            if let Some(value) = left.checked_mul(right) {
+                                self.stack.push(Value::Int(value));
+                            } else {
+                                return Err(runtime_error_at(
+                                    "integer overflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left * right));
@@ -1843,7 +1909,14 @@ impl Vm {
                                     span_at(chunk, frame_ip),
                                 ));
                             }
-                            self.stack.push(Value::Int(left / right));
+                            if let Some(value) = left.checked_div(right) {
+                                self.stack.push(Value::Int(value));
+                            } else {
+                                return Err(runtime_error_at(
+                                    "integer overflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             if right == 0.0 {
@@ -1877,7 +1950,14 @@ impl Vm {
                                     span_at(chunk, frame_ip),
                                 ));
                             }
-                            self.stack.push(Value::Int(left % right));
+                            if let Some(value) = left.checked_rem(right) {
+                                self.stack.push(Value::Int(value));
+                            } else {
+                                return Err(runtime_error_at(
+                                    "integer overflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             if right == 0.0 {
@@ -1983,9 +2063,10 @@ impl Vm {
                     }
                     let (items, idx) = match base_value {
                         Value::Array(items) => (items, index as usize),
+                        Value::Tuple(items) => (items, index as usize),
                         _ => {
                             return Err(runtime_error_at(
-                                "index expects array".to_string(),
+                                "index expects array or tuple".to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
@@ -2023,24 +2104,38 @@ impl Vm {
                             span_at(chunk, frame_ip),
                         ));
                     }
-                    let (items, idx) = match base_value {
-                        Value::Array(items) => (items, index as usize),
+                    match base_value {
+                        Value::Array(items) => {
+                            let idx = index as usize;
+                            if idx >= items.len() {
+                                return Err(runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let mut new_items = (*items).clone();
+                            new_items[idx] = value;
+                            self.stack.push(Value::Array(Rc::new(new_items)));
+                        }
+                        Value::Tuple(items) => {
+                            let idx = index as usize;
+                            if idx >= items.len() {
+                                return Err(runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let mut new_items = (*items).clone();
+                            new_items[idx] = value;
+                            self.stack.push(Value::Tuple(Rc::new(new_items)));
+                        }
                         _ => {
                             return Err(runtime_error_at(
-                                "set index expects array".to_string(),
+                                "set index expects array or tuple".to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
-                    };
-                    if idx >= items.len() {
-                        return Err(runtime_error_at(
-                            "index out of bounds".to_string(),
-                            span_at(chunk, frame_ip),
-                        ));
                     }
-                    let mut new_items = (*items).clone();
-                    new_items[idx] = value;
-                    self.stack.push(Value::Array(Rc::new(new_items)));
                 }
                 Op::StoreMember(field) => {
                     let value = self.stack.pop().ok_or_else(|| {
@@ -2262,10 +2357,11 @@ impl Vm {
                             advance = false;
                         }
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "match expects result".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "match expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                 }
@@ -2283,10 +2379,11 @@ impl Vm {
                             advance = false;
                         }
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "match expects result".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "match expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                 }
@@ -2304,10 +2401,11 @@ impl Vm {
                             advance = false;
                         }
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "match expects option".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "match expects option".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                 }
@@ -2323,18 +2421,20 @@ impl Vm {
                             advance = false;
                         }
                         _ => {
-                            return Err(VmError::Runtime {
-                                message: "match expects option".to_string(),
-                                span: self.current_span(program),
-                            })
+                            return Err(self.runtime_error(
+                                "match expects option".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
                         }
                     }
                 }
                 Op::MatchFail => {
-                    return Err(VmError::Runtime {
-                        message: "non-exhaustive match".to_string(),
-                        span: self.current_span(program),
-                    });
+                    return Err(self.runtime_error(
+                        "non-exhaustive match".to_string(),
+                        self.current_span(program),
+                        program,
+                    ));
                 }
                 Op::JumpIfFalse(target) => {
                     let value = self.stack.pop().ok_or_else(|| {
@@ -2426,12 +2526,30 @@ impl Vm {
     }
 }
 
+thread_local! {
+    static STACK_TRACE: RefCell<Option<Vec<StackFrame>>> = RefCell::new(None);
+}
+
+fn set_stack_trace(trace: Vec<StackFrame>) {
+    STACK_TRACE.with(|cell| {
+        *cell.borrow_mut() = Some(trace);
+    });
+}
+
+fn current_stack_trace() -> Option<Vec<StackFrame>> {
+    STACK_TRACE.with(|cell| cell.borrow().clone())
+}
+
 fn span_at(chunk: &Chunk, ip: usize) -> Option<Span> {
     chunk.spans.get(ip).cloned().flatten()
 }
 
 fn runtime_error_at(message: String, span: Option<Span>) -> VmError {
-    VmError::Runtime { message, span }
+    VmError::Runtime {
+        message,
+        span,
+        stack: current_stack_trace(),
+    }
 }
 
 fn expr_span(expr: &Expr) -> Option<Span> {
@@ -2510,7 +2628,7 @@ f();
         let mut vm = Vm::new();
         let err = vm.run(&program).expect_err("expected runtime error");
         match err {
-            VmError::Runtime { message, span } => {
+            VmError::Runtime { message, span, .. } => {
                 assert!(span.is_some(), "missing span for runtime error: {message}");
             }
             other => panic!("unexpected error: {other:?}"),
