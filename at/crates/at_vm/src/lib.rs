@@ -82,6 +82,7 @@ pub enum Op {
     MatchResultErr(usize),
     MatchOptionSome(usize),
     MatchOptionNone(usize),
+    MatchInt(i64, usize),
     MatchFail,
     JumpIfFalse(usize),
     Jump(usize),
@@ -1032,6 +1033,7 @@ impl Compiler {
                 let match_op_index = chunk.code.len();
                 chunk.push(
                     match arm.pattern {
+                        at_syntax::MatchPattern::Int(value) => Op::MatchInt(value, usize::MAX),
                         at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
                         at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
                         at_syntax::MatchPattern::OptionSome(_) => Op::MatchOptionSome(usize::MAX),
@@ -1049,6 +1051,7 @@ impl Compiler {
             let mut binding_slot: Option<usize> = None;
             let mut binding_span: Option<Span> = None;
             match &arm.pattern {
+                at_syntax::MatchPattern::Int(_) => {}
                 at_syntax::MatchPattern::ResultOk(ident)
                 | at_syntax::MatchPattern::ResultErr(ident)
                 | at_syntax::MatchPattern::OptionSome(ident) => {
@@ -1083,6 +1086,10 @@ impl Compiler {
                 patch_jump(&mut chunk.code, guard_jump_index, guard_fail_index);
 
                 match arm.pattern {
+                    at_syntax::MatchPattern::Int(value) => {
+                        let idx = chunk.add_const(Value::Int(value));
+                        chunk.push(Op::Const(idx), Some(match_span));
+                    }
                     at_syntax::MatchPattern::ResultOk(_) => {
                         let slot = binding_slot.ok_or_else(|| {
                             compile_error("missing match binding".to_string(), Some(match_span))
@@ -2499,6 +2506,27 @@ impl Vm {
                         }
                     }
                 }
+                Op::MatchInt(expected, target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Int(actual) => {
+                            if actual != *expected {
+                                self.stack.push(Value::Int(actual));
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects int".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
                 Op::MatchFail => {
                     return Err(self.runtime_error(
                         "non-exhaustive match".to_string(),
@@ -2656,6 +2684,7 @@ fn patch_jump(code: &mut [Op], index: usize, target: usize) {
         | Op::MatchResultErr(ref mut slot)
         | Op::MatchOptionSome(ref mut slot)
         | Op::MatchOptionNone(ref mut slot)
+        | Op::MatchInt(_, ref mut slot)
         | Op::JumpIfFalse(ref mut slot)
         | Op::Jump(ref mut slot) => {
             *slot = target;

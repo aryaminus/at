@@ -925,6 +925,11 @@ impl TypeChecker {
         for arm in arms {
             self.push_scope();
             match &arm.pattern {
+                at_syntax::MatchPattern::Int(_) => {
+                    if value_ty != SimpleType::Int && value_ty != SimpleType::Unknown {
+                        self.push_error("match expects int value".to_string(), Some(match_span));
+                    }
+                }
                 at_syntax::MatchPattern::ResultOk(ident) => {
                     has_ok = true;
                     if value_ty != SimpleType::Result && value_ty != SimpleType::Unknown {

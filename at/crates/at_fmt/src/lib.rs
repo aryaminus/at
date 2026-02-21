@@ -643,6 +643,9 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
 
 fn format_match_pattern(pattern: &MatchPattern, out: &mut String) {
     match pattern {
+        MatchPattern::Int(value) => {
+            out.push_str(&value.to_string());
+        }
         MatchPattern::ResultOk(ident) => {
             out.push_str("ok(");
             out.push_str(&ident.name);

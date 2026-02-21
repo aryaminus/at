@@ -534,6 +534,7 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
 
 fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
     match pattern {
+        at_syntax::MatchPattern::Int(_) => Vec::new(),
         at_syntax::MatchPattern::ResultOk(ident)
         | at_syntax::MatchPattern::ResultErr(ident)
         | at_syntax::MatchPattern::OptionSome(ident) => vec![ident.clone()],

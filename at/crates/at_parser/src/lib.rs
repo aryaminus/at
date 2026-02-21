@@ -1097,6 +1097,29 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(MatchPattern::Wildcard);
         }
+        if let TokenKind::Int(value) = self.current.kind {
+            let value = value;
+            self.advance();
+            return Ok(MatchPattern::Int(value));
+        }
+        if self.current.kind == TokenKind::Minus {
+            let span = self.current.span;
+            self.advance();
+            match self.current.kind {
+                TokenKind::Int(value) => {
+                    let value = value;
+                    self.advance();
+                    return Ok(MatchPattern::Int(-value));
+                }
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "int literal".to_string(),
+                        found: self.current.kind.clone(),
+                        span,
+                    })
+                }
+            }
+        }
         let head = self.expect_ident()?;
         match head.name.as_str() {
             "ok" => {

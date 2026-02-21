@@ -127,6 +127,7 @@ pub struct MatchArm {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchPattern {
+    Int(i64),
     ResultOk(Ident),
     ResultErr(Ident),
     OptionSome(Ident),
