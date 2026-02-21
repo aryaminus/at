@@ -374,6 +374,7 @@ impl<'a> Parser<'a> {
         let mut base_expr = Expr::Ident(base_ident.clone());
         let mut last_field: Option<Ident> = None;
         let mut last_index: Option<Expr> = None;
+        let mut last_index_span: Option<Span> = None;
 
         loop {
             if self.current.kind == TokenKind::Dot {
@@ -387,11 +388,13 @@ impl<'a> Parser<'a> {
                     };
                     last_field = None;
                     last_index = None;
+                    last_index_span = None;
                     continue;
                 }
 
                 last_field = Some(field);
                 last_index = None;
+                last_index_span = None;
                 break;
             } else if self.current.kind == TokenKind::LBracket {
                 let index_span = self.current.span;
@@ -407,22 +410,67 @@ impl<'a> Parser<'a> {
                     };
                     last_field = None;
                     last_index = None;
+                    last_index_span = None;
                     continue;
                 }
 
                 last_field = None;
                 last_index = Some(index);
+                last_index_span = Some(index_span);
                 break;
             } else {
                 break;
             }
         }
 
+        let assign_op = match self.current.kind {
+            TokenKind::Equals => {
+                self.advance();
+                None
+            }
+            TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent => {
+                let (op, span) = match self.current.kind {
+                    TokenKind::Plus => (at_syntax::BinaryOp::Add, self.current.span),
+                    TokenKind::Minus => (at_syntax::BinaryOp::Sub, self.current.span),
+                    TokenKind::Star => (at_syntax::BinaryOp::Mul, self.current.span),
+                    TokenKind::Slash => (at_syntax::BinaryOp::Div, self.current.span),
+                    TokenKind::Percent => (at_syntax::BinaryOp::Mod, self.current.span),
+                    _ => unreachable!(),
+                };
+                self.advance();
+                self.expect(TokenKind::Equals)?;
+                Some((op, span))
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "assignment operator".to_string(),
+                    found: self.current.kind.clone(),
+                    span: self.current.span,
+                })
+            }
+        };
+
         match (last_field, last_index) {
             (Some(field), None) => {
-                self.expect(TokenKind::Equals)?;
                 let value = self.parse_expr()?;
                 self.expect(TokenKind::Semicolon)?;
+                let value = if let Some((op, op_span)) = assign_op {
+                    Expr::Binary {
+                        left: Box::new(Expr::Member {
+                            base: Box::new(base_expr.clone()),
+                            name: field.clone(),
+                        }),
+                        op,
+                        op_span,
+                        right: Box::new(value),
+                    }
+                } else {
+                    value
+                };
                 Ok(Stmt::SetMember {
                     base: base_expr,
                     field,
@@ -430,9 +478,22 @@ impl<'a> Parser<'a> {
                 })
             }
             (None, Some(index)) => {
-                self.expect(TokenKind::Equals)?;
                 let value = self.parse_expr()?;
                 self.expect(TokenKind::Semicolon)?;
+                let value = if let Some((op, op_span)) = assign_op {
+                    Expr::Binary {
+                        left: Box::new(Expr::Index {
+                            index_span: last_index_span.unwrap_or(op_span),
+                            base: Box::new(base_expr.clone()),
+                            index: Box::new(index.clone()),
+                        }),
+                        op,
+                        op_span,
+                        right: Box::new(value),
+                    }
+                } else {
+                    value
+                };
                 Ok(Stmt::SetIndex {
                     base: base_expr,
                     index,
@@ -440,9 +501,18 @@ impl<'a> Parser<'a> {
                 })
             }
             (None, None) => {
-                self.expect(TokenKind::Equals)?;
                 let value = self.parse_expr()?;
                 self.expect(TokenKind::Semicolon)?;
+                let value = if let Some((op, op_span)) = assign_op {
+                    Expr::Binary {
+                        left: Box::new(Expr::Ident(base_ident.clone())),
+                        op,
+                        op_span,
+                        right: Box::new(value),
+                    }
+                } else {
+                    value
+                };
                 Ok(Stmt::Set {
                     name: base_ident,
                     value,
