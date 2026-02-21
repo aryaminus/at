@@ -14,9 +14,10 @@ use lsp_types::{
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams,
     Location, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
-    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
-    SignatureInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
+    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use sha2::{Digest, Sha256};
 
@@ -36,6 +37,16 @@ pub fn run_stdio() -> Result<(), String> {
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
         }),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
+        semantic_tokens_provider: Some(
+            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                SemanticTokensOptions {
+                    legend: semantic_tokens_legend(),
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                    range: None,
+                    work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+                },
+            ),
+        ),
         ..ServerCapabilities::default()
     };
 
@@ -262,6 +273,18 @@ fn handle_request(
             };
             Ok(Some(response))
         }
+        "textDocument/semanticTokens/full" => {
+            let params: SemanticTokensParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let tokens = provide_semantic_tokens(text);
+                Response::new_ok(request.id.clone(), serde_json::to_value(tokens).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
         _ => Ok(None),
     }
 }
@@ -480,6 +503,127 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
         }
     }
     Some(DocumentSymbolResponse::Nested(symbols))
+}
+
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::VARIABLE,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::STRING,
+            SemanticTokenType::NUMBER,
+        ],
+        token_modifiers: Vec::new(),
+    }
+}
+
+fn provide_semantic_tokens(text: &str) -> SemanticTokens {
+    let legend = semantic_tokens_legend();
+    let mut data: Vec<SemanticToken> = Vec::new();
+    let mut last_line = 0u32;
+    let mut last_char = 0u32;
+
+    let mut push_token = |start: Position, length: u32, token_type: SemanticTokenType| {
+        let line = start.line;
+        let character = start.character;
+        let delta_line = line - last_line;
+        let delta_start = if delta_line == 0 {
+            character.saturating_sub(last_char)
+        } else {
+            character
+        };
+        let token_index = legend
+            .token_types
+            .iter()
+            .position(|t| *t == token_type)
+            .unwrap_or(0) as u32;
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: token_index,
+            token_modifiers_bitset: 0,
+        });
+        last_line = line;
+        last_char = character;
+    };
+
+    let mut offset = 0usize;
+    while offset < text.len() {
+        let ch = text[offset..].chars().next().unwrap();
+        if ch.is_whitespace() {
+            offset += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '"' {
+            let start = offset_to_position(text, offset);
+            offset += 1;
+            while offset < text.len() {
+                let next = text[offset..].chars().next().unwrap();
+                offset += next.len_utf8();
+                if next == '"' {
+                    break;
+                }
+            }
+            let end = offset_to_position(text, offset);
+            let length = end.character.saturating_sub(start.character);
+            push_token(start, length, SemanticTokenType::STRING);
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let start = offset;
+            offset += ch.len_utf8();
+            while offset < text.len() {
+                let next = text[offset..].chars().next().unwrap();
+                if !next.is_ascii_digit() && next != '.' {
+                    break;
+                }
+                offset += next.len_utf8();
+            }
+            let start_pos = offset_to_position(text, start);
+            let end_pos = offset_to_position(text, offset);
+            let length = end_pos.character.saturating_sub(start_pos.character);
+            push_token(start_pos, length, SemanticTokenType::NUMBER);
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = offset;
+            offset += ch.len_utf8();
+            while offset < text.len() {
+                let next = text[offset..].chars().next().unwrap();
+                if !is_ident_continue(next) {
+                    break;
+                }
+                offset += next.len_utf8();
+            }
+            let ident = &text[start..offset];
+            let token_type = match ident {
+                "fn" | "let" | "set" | "using" | "if" | "else" | "match" | "while" | "for"
+                | "in" | "break" | "continue" | "return" | "import" | "as" | "struct" | "enum"
+                | "type" | "test" | "true" | "false" | "needs" | "tool" => {
+                    SemanticTokenType::KEYWORD
+                }
+                _ => SemanticTokenType::VARIABLE,
+            };
+            let start_pos = offset_to_position(text, start);
+            let end_pos = offset_to_position(text, offset);
+            let length = end_pos.character.saturating_sub(start_pos.character);
+            push_token(start_pos, length, token_type);
+            continue;
+        }
+
+        offset += ch.len_utf8();
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
+    }
 }
 
 fn provide_definition(
