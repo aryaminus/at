@@ -62,6 +62,7 @@ name = "at_lsp"
 version = "0.1.0"
 dependencies = [
  "at_check",
+ "at_fmt",
  "at_lint",
  "at_parser",
  "at_syntax",

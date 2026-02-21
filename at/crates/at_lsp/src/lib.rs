@@ -19,7 +19,8 @@ use lsp_types::{
     SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
     SemanticTokensOptions, SemanticTokensParams, ServerCapabilities, SignatureHelp,
     SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Uri,
 };
 use sha2::{Digest, Sha256};
 
@@ -41,6 +42,8 @@ pub fn run_stdio() -> Result<(), String> {
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
         folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
+        document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+        document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
         semantic_tokens_provider: Some(
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 SemanticTokensOptions {
@@ -316,6 +319,30 @@ fn handle_request(
                 let module = get_cached_module(text, &url, doc_cache);
                 let ranges = provide_folding_ranges(text, module.as_ref());
                 Response::new_ok(request.id.clone(), serde_json::to_value(ranges).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/formatting" => {
+            let params: lsp_types::DocumentFormattingParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let edits = provide_formatting(text, None);
+                Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/rangeFormatting" => {
+            let params: lsp_types::DocumentRangeFormattingParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let edits = provide_formatting(text, Some(params.range));
+                Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -751,6 +778,36 @@ fn provide_folding_ranges(text: &str, module: Option<&Module>) -> Option<Vec<Fol
         }
     }
     Some(ranges)
+}
+
+fn provide_formatting(text: &str, range: Option<Range>) -> Vec<TextEdit> {
+    let module = match parse_module(text) {
+        Ok(module) => module,
+        Err(_) => return Vec::new(),
+    };
+    let formatted = at_fmt::format_module(&module);
+    match range {
+        Some(range) => {
+            let start = position_to_offset(text, range.start);
+            let end = position_to_offset(text, range.end);
+            if start <= end && end <= text.len() {
+                let new_text = formatted.clone();
+                vec![TextEdit { range, new_text }]
+            } else {
+                Vec::new()
+            }
+        }
+        None => vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: offset_to_position(text, text.len()),
+            },
+            new_text: formatted,
+        }],
+    }
 }
 
 fn provide_definition(
