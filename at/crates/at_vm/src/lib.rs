@@ -16,7 +16,14 @@ pub enum Value {
     Tuple(Rc<Vec<Value>>),
     Option(Option<Rc<Value>>),
     Result(Result<Rc<Value>, Rc<Value>>),
+    Closure(Rc<ClosureValue>),
     Unit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosureValue {
+    func_id: usize,
+    captures: Vec<Value>,
 }
 
 pub fn format_value(value: &Value) -> String {
@@ -26,6 +33,7 @@ pub fn format_value(value: &Value) -> String {
         Value::String(value) => format!("\"{}\"", value),
         Value::Bool(value) => value.to_string(),
         Value::Unit => "unit".to_string(),
+        Value::Closure(_) => "<closure>".to_string(),
         Value::Array(items) => format!(
             "[{}]",
             items
@@ -69,6 +77,8 @@ pub enum Op {
     Index,
     StoreIndex,
     StoreMember(String),
+    Closure(usize, usize),
+    CallValue(usize),
     Range(bool),
     Eq,
     Neq,
@@ -144,6 +154,7 @@ impl Chunk {
 pub struct FunctionChunk {
     pub name: String,
     pub params: usize,
+    pub captures: usize,
     pub locals: usize,
     pub needs: Vec<String>,
     pub chunk: Chunk,
@@ -203,6 +214,8 @@ pub struct Compiler {
     current_function: Option<String>,
     loop_stack: Vec<LoopContext>,
     synthetic_id: usize,
+    base_function_count: usize,
+    closure_chunks: Vec<FunctionChunk>,
 }
 
 impl Compiler {
@@ -216,6 +229,8 @@ impl Compiler {
             current_function: None,
             loop_stack: Vec::new(),
             synthetic_id: 0,
+            base_function_count: 0,
+            closure_chunks: Vec::new(),
         }
     }
 
@@ -226,6 +241,8 @@ impl Compiler {
         self.function_arity.clear();
         self.function_needs.clear();
         self.current_function = None;
+        self.closure_chunks.clear();
+        self.base_function_count = module.functions.len();
 
         for func in &module.functions {
             let id = program.functions.len();
@@ -244,6 +261,7 @@ impl Compiler {
             program.functions.push(FunctionChunk {
                 name: func.name.name.clone(),
                 params: func.params.len(),
+                captures: 0,
                 locals: 0,
                 needs,
                 chunk: Chunk::default(),
@@ -258,8 +276,6 @@ impl Compiler {
             program.functions[id].locals = locals;
         }
 
-        self.propagate_transitive_needs(&mut program);
-
         self.scopes.clear();
         self.next_local = 0;
         self.push_scope();
@@ -268,6 +284,12 @@ impl Compiler {
         }
         program.main.push(Op::Halt, None);
         program.main_locals = self.next_local;
+
+        for chunk in self.closure_chunks.drain(..) {
+            program.functions.push(chunk);
+        }
+
+        self.propagate_transitive_needs(&mut program);
 
         Ok(program)
     }
@@ -731,11 +753,8 @@ impl Compiler {
                     chunk.push(Op::Add, expr_span(expr));
                 }
             }
-            Expr::Closure { .. } => {
-                return Err(compile_error(
-                    "closures not yet implemented".to_string(),
-                    expr_span(expr),
-                ));
+            Expr::Closure { span, params, body } => {
+                self.compile_closure_expr(*span, params, body, chunk)?;
             }
             Expr::Call { callee, args } => {
                 if let Expr::Member { base, name } = callee.as_ref() {
@@ -974,10 +993,12 @@ impl Compiler {
                     self.add_transitive_needs(&ident.name);
                     return Ok(());
                 }
-                return Err(compile_error(
-                    "invalid call target".to_string(),
-                    expr_span(callee),
-                ));
+                self.compile_expr(callee, chunk)?;
+                for arg in args {
+                    self.compile_expr(arg, chunk)?;
+                }
+                chunk.push(Op::CallValue(args.len()), expr_span(callee));
+                return Ok(());
             }
             Expr::Try(expr) => {
                 self.compile_expr(expr, chunk)?;
@@ -1159,6 +1180,283 @@ impl Compiler {
             patch_jump(&mut chunk.code, jump_index, end);
         }
         Ok(())
+    }
+
+    fn compile_closure_expr(
+        &mut self,
+        span: Span,
+        params: &[at_syntax::Ident],
+        body: &Expr,
+        chunk: &mut Chunk,
+    ) -> Result<(), VmError> {
+        let captures = self.collect_closure_captures(params, body);
+        for capture in &captures {
+            let slot = self.resolve_local(capture).ok_or_else(|| {
+                compile_error(format!("unknown identifier: {}", capture), Some(span))
+            })?;
+            chunk.push(Op::LoadLocal(slot), Some(span));
+        }
+
+        let func_id = self.compile_closure_chunk(span, params, body, &captures)?;
+        chunk.push(Op::Closure(func_id, captures.len()), Some(span));
+        Ok(())
+    }
+
+    fn compile_closure_chunk(
+        &mut self,
+        span: Span,
+        params: &[at_syntax::Ident],
+        body: &Expr,
+        captures: &[String],
+    ) -> Result<usize, VmError> {
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_next_local = self.next_local;
+        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let saved_current_function = self.current_function.take();
+
+        self.scopes = Vec::new();
+        self.next_local = 0;
+        self.loop_stack = Vec::new();
+        self.push_scope();
+
+        for name in captures {
+            self.bind_local_checked(name, span)?;
+        }
+        for param in params {
+            self.bind_local_checked(&param.name, param.span)?;
+        }
+
+        let mut closure_chunk = Chunk::default();
+        self.compile_expr(body, &mut closure_chunk)?;
+        closure_chunk.push(Op::Return, expr_span(body));
+        let locals = self.next_local;
+
+        self.scopes = saved_scopes;
+        self.next_local = saved_next_local;
+        self.loop_stack = saved_loop_stack;
+        self.current_function = saved_current_function;
+
+        let closure_name = format!("__closure_{}", self.synthetic_id);
+        self.synthetic_id += 1;
+        let func_id = self.base_function_count + self.closure_chunks.len();
+        self.closure_chunks.push(FunctionChunk {
+            name: closure_name,
+            params: params.len(),
+            captures: captures.len(),
+            locals,
+            needs: Vec::new(),
+            chunk: closure_chunk,
+        });
+
+        Ok(func_id)
+    }
+
+    fn collect_closure_captures(&self, params: &[at_syntax::Ident], body: &Expr) -> Vec<String> {
+        let mut bound = Vec::new();
+        let mut initial = HashSet::new();
+        for param in params {
+            initial.insert(param.name.clone());
+        }
+        bound.push(initial);
+        let mut captures = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_free_vars_expr(body, &mut bound, &mut captures, &mut seen);
+        captures
+    }
+
+    fn collect_free_vars_expr(
+        &self,
+        expr: &Expr,
+        bound: &mut Vec<HashSet<String>>,
+        captures: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::Int(_, _) | Expr::Float(_, _) | Expr::String(_, _) | Expr::Bool(_, _) => {}
+            Expr::Range { start, end, .. } => {
+                self.collect_free_vars_expr(start, bound, captures, seen);
+                self.collect_free_vars_expr(end, bound, captures, seen);
+            }
+            Expr::Ident(ident) => {
+                if self.is_bound(bound, &ident.name) {
+                    return;
+                }
+                if self.resolve_local(&ident.name).is_some() && seen.insert(ident.name.clone()) {
+                    captures.push(ident.name.clone());
+                }
+            }
+            Expr::Unary { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
+            Expr::Binary { left, right, .. } => {
+                self.collect_free_vars_expr(left, bound, captures, seen);
+                self.collect_free_vars_expr(right, bound, captures, seen);
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_free_vars_expr(condition, bound, captures, seen);
+                self.collect_free_vars_expr(then_branch, bound, captures, seen);
+                if let Some(else_expr) = else_branch {
+                    self.collect_free_vars_expr(else_expr, bound, captures, seen);
+                }
+            }
+            Expr::Member { base, .. } => {
+                self.collect_free_vars_expr(base, bound, captures, seen);
+            }
+            Expr::Call { callee, args } => {
+                self.collect_free_vars_expr(callee, bound, captures, seen);
+                for arg in args {
+                    self.collect_free_vars_expr(arg, bound, captures, seen);
+                }
+            }
+            Expr::Try(expr) => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
+            Expr::Match { value, arms, .. } => {
+                self.collect_free_vars_expr(value, bound, captures, seen);
+                for arm in arms {
+                    self.push_bound_scope(bound);
+                    self.bind_pattern_names(&arm.pattern, bound);
+                    if let Some(guard) = &arm.guard {
+                        self.collect_free_vars_expr(guard, bound, captures, seen);
+                    }
+                    self.collect_free_vars_expr(&arm.body, bound, captures, seen);
+                    self.pop_bound_scope(bound);
+                }
+            }
+            Expr::Block { stmts, tail, .. } => {
+                self.push_bound_scope(bound);
+                for stmt in stmts {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                if let Some(expr) = tail {
+                    self.collect_free_vars_expr(expr, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
+            }
+            Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+                for item in items {
+                    self.collect_free_vars_expr(item, bound, captures, seen);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.collect_free_vars_expr(base, bound, captures, seen);
+                self.collect_free_vars_expr(index, bound, captures, seen);
+            }
+            Expr::InterpolatedString { parts, .. } => {
+                for part in parts {
+                    if let at_syntax::InterpPart::Expr(expr) = part {
+                        self.collect_free_vars_expr(expr, bound, captures, seen);
+                    }
+                }
+            }
+            Expr::Closure { .. } => {}
+        }
+    }
+
+    fn collect_free_vars_stmt(
+        &self,
+        stmt: &Stmt,
+        bound: &mut Vec<HashSet<String>>,
+        captures: &mut Vec<String>,
+        seen: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Stmt::Import { .. } => {}
+            Stmt::Let { name, value, .. } | Stmt::Using { name, value, .. } => {
+                self.collect_free_vars_expr(value, bound, captures, seen);
+                if let Some(scope) = bound.last_mut() {
+                    scope.insert(name.name.clone());
+                }
+            }
+            Stmt::Set { value, .. } => {
+                self.collect_free_vars_expr(value, bound, captures, seen);
+            }
+            Stmt::SetMember { base, value, .. } => {
+                self.collect_free_vars_expr(base, bound, captures, seen);
+                self.collect_free_vars_expr(value, bound, captures, seen);
+            }
+            Stmt::SetIndex { base, index, value } => {
+                self.collect_free_vars_expr(base, bound, captures, seen);
+                self.collect_free_vars_expr(index, bound, captures, seen);
+                self.collect_free_vars_expr(value, bound, captures, seen);
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                self.collect_free_vars_expr(condition, bound, captures, seen);
+                self.push_bound_scope(bound);
+                for stmt in body {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
+            }
+            Stmt::For {
+                item, iter, body, ..
+            } => {
+                self.collect_free_vars_expr(iter, bound, captures, seen);
+                self.push_bound_scope(bound);
+                if let Some(scope) = bound.last_mut() {
+                    scope.insert(item.name.clone());
+                }
+                for stmt in body {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Expr(expr) => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.collect_free_vars_expr(expr, bound, captures, seen);
+                }
+            }
+            Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+                self.push_bound_scope(bound);
+                for stmt in stmts {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
+            }
+        }
+    }
+
+    fn bind_pattern_names(
+        &self,
+        pattern: &at_syntax::MatchPattern,
+        bound: &mut Vec<HashSet<String>>,
+    ) {
+        let name = match pattern {
+            at_syntax::MatchPattern::ResultOk(ident)
+            | at_syntax::MatchPattern::ResultErr(ident)
+            | at_syntax::MatchPattern::OptionSome(ident) => Some(&ident.name),
+            at_syntax::MatchPattern::Int(_)
+            | at_syntax::MatchPattern::OptionNone
+            | at_syntax::MatchPattern::Wildcard => None,
+        };
+        if let Some(name) = name {
+            if let Some(scope) = bound.last_mut() {
+                scope.insert(name.clone());
+            }
+        }
+    }
+
+    fn push_bound_scope(&self, bound: &mut Vec<HashSet<String>>) {
+        bound.push(HashSet::new());
+    }
+
+    fn pop_bound_scope(&self, bound: &mut Vec<HashSet<String>>) {
+        bound.pop();
+    }
+
+    fn is_bound(&self, bound: &[HashSet<String>], name: &str) -> bool {
+        bound.iter().rev().any(|scope| scope.contains(name))
     }
 
     fn push_scope(&mut self) {
@@ -1427,6 +1725,22 @@ impl Vm {
                 Op::GrantCapability(name) => {
                     self.frames[frame_index].capabilities.insert(name.clone());
                 }
+                Op::Closure(func_id, capture_count) => {
+                    let mut captures = Vec::with_capacity(*capture_count);
+                    for _ in 0..*capture_count {
+                        captures.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    captures.reverse();
+                    self.stack.push(Value::Closure(Rc::new(ClosureValue {
+                        func_id: *func_id,
+                        captures,
+                    })));
+                }
                 Op::Call(func_id, arg_count) => {
                     let func = match program.functions.get(*func_id) {
                         Some(func) => func,
@@ -1462,7 +1776,7 @@ impl Vm {
                             ));
                         }
                     }
-                    let mut locals = self.take_locals(func.locals.max(*arg_count));
+                    let mut locals = self.take_locals(func.locals.max(*arg_count + func.captures));
                     let mut index = *arg_count;
                     while index > 0 {
                         index -= 1;
@@ -1478,6 +1792,76 @@ impl Vm {
                     advance = false;
                     self.frames.push(Frame {
                         chunk_id: *func_id,
+                        ip: 0,
+                        locals,
+                        capabilities,
+                    });
+                }
+                Op::CallValue(arg_count) => {
+                    let mut args = Vec::with_capacity(*arg_count);
+                    let mut index = *arg_count;
+                    while index > 0 {
+                        index -= 1;
+                        args.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    args.reverse();
+
+                    let callee = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let closure = match callee {
+                        Value::Closure(value) => value,
+                        _ => {
+                            return Err(runtime_error_at(
+                                "call expects closure".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    let func = match program.functions.get(closure.func_id) {
+                        Some(func) => func,
+                        None => {
+                            return Err(runtime_error_at(
+                                format!("invalid function id: {}", closure.func_id),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    if *arg_count != func.params {
+                        return Err(runtime_error_at(
+                            format!(
+                                "wrong arity: expected {} args, got {}",
+                                func.params, arg_count
+                            ),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    if let Some(max) = self.max_frames {
+                        if self.frames.len() >= max {
+                            return Err(runtime_error_at(
+                                format!("stack overflow: maximum call depth {} exceeded", max),
+                                span_at(chunk, frame_ip),
+                            ));
+                        }
+                    }
+                    let required_locals = func.params + func.captures;
+                    let mut locals = self.take_locals(func.locals.max(required_locals));
+                    for (idx, value) in closure.captures.iter().cloned().enumerate() {
+                        locals[idx] = value;
+                    }
+                    for (idx, value) in args.into_iter().enumerate() {
+                        locals[func.captures + idx] = value;
+                    }
+                    let capabilities = self.frames[frame_index].capabilities.clone();
+                    self.frames[frame_index].ip = frame_ip + 1;
+                    advance = false;
+                    self.frames.push(Frame {
+                        chunk_id: closure.func_id,
                         ip: 0,
                         locals,
                         capabilities,
