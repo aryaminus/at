@@ -26,6 +26,35 @@ impl CommentState {
             self.index += 1;
         }
     }
+
+    fn emit_inline_between(&mut self, out: &mut String, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        let mut emitted_any = false;
+        while self.index < self.comments.len() {
+            let comment = &self.comments[self.index];
+            if comment.span.start < start {
+                self.index += 1;
+                continue;
+            }
+            if comment.span.start >= end {
+                break;
+            }
+            if out.ends_with('\n') {
+                out.pop();
+            }
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push_str(comment.text.trim_end());
+            emitted_any = true;
+            self.index += 1;
+        }
+        if emitted_any {
+            out.push('\n');
+        }
+    }
 }
 
 pub fn format_module(module: &Module) -> String {
@@ -201,6 +230,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             out.push_str(" = ");
             format_expr_with_indent(value, out, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::Using { name, ty, value } => {
@@ -213,6 +245,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             out.push_str(" = ");
             format_expr_with_indent(value, out, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::Set { name, value } => {
@@ -221,6 +256,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push_str(&name.name);
             out.push_str(" = ");
             format_expr_with_indent(value, out, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::SetMember { base, field, value } => {
@@ -231,6 +269,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push_str(&field.name);
             out.push_str(" = ");
             format_expr_with_indent(value, out, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::SetIndex { base, index, value } => {
@@ -242,6 +283,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push(']');
             out.push_str(" = ");
             format_expr_with_indent(value, out, indent, comment_state);
+            if let Some(value_span) = expr_span(value) {
+                comment_state.emit_inline_between(out, value_span, value_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::While {
@@ -285,6 +329,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
         Stmt::Expr(expr) => {
             indent_to(out, indent);
             format_expr_with_indent(expr, out, indent, comment_state);
+            if let Some(expr_span) = expr_span(expr) {
+                comment_state.emit_inline_between(out, expr_span, expr_span + 1);
+            }
             out.push_str(";\n");
         }
         Stmt::Return(expr) => {
@@ -293,6 +340,9 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             if let Some(expr) = expr {
                 out.push(' ');
                 format_expr_with_indent(expr, out, indent, comment_state);
+                if let Some(expr_span) = expr_span(expr) {
+                    comment_state.emit_inline_between(out, expr_span, expr_span + 1);
+                }
             }
             out.push_str(";\n");
         }
