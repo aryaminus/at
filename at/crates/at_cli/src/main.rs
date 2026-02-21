@@ -20,7 +20,7 @@ fn print_usage() {
     eprintln!("  at <file.at>                    Run a file");
     eprintln!("  at run <file.at>                Run a file");
     eprintln!("  at repl                         Start interactive REPL");
-    eprintln!("  at fmt <file.at>                Format a file");
+    eprintln!("  at fmt [--write] <file.at>      Format a file");
     eprintln!("  at test <file.at>               Run tests in a file");
     eprintln!("  at check <file.at>              Type-check a file");
     eprintln!("  at lint <file.at>               Lint a file");
@@ -251,10 +251,20 @@ fn main() {
 
     if args[1] == "fmt" {
         if args.len() < 3 {
-            eprintln!("usage: at fmt <file.at>");
+            eprintln!("usage: at fmt [--write] <file.at>");
             std::process::exit(1);
         }
-        let path = &args[2];
+        let mut path_index = 2;
+        let mut write = false;
+        if args.get(2).map(|arg| arg.as_str()) == Some("--write") {
+            write = true;
+            path_index = 3;
+        }
+        if args.len() <= path_index {
+            eprintln!("usage: at fmt [--write] <file.at>");
+            std::process::exit(1);
+        }
+        let path = &args[path_index];
         let module = match load_module(path) {
             Ok(module) => module.module,
             Err(err) => {
@@ -262,7 +272,15 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        print!("{}", format_module(&module));
+        let formatted = format_module(&module);
+        if write {
+            if let Err(err) = std::fs::write(path, formatted) {
+                eprintln!("failed to write {path}: {err}");
+                std::process::exit(1);
+            }
+        } else {
+            print!("{}", formatted);
+        }
         return;
     }
 
