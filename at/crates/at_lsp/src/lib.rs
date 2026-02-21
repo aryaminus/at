@@ -12,12 +12,13 @@ use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
     DocumentHighlightKind, DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location,
-    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
-    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
-    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeKind, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location, MarkupContent,
+    MarkupKind, ParameterInformation, ParameterLabel, Position, Range, SemanticToken,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use sha2::{Digest, Sha256};
@@ -39,6 +40,7 @@ pub fn run_stdio() -> Result<(), String> {
         }),
         document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         document_highlight_provider: Some(lsp_types::OneOf::Left(true)),
+        folding_range_provider: Some(lsp_types::FoldingRangeProviderCapability::Simple(true)),
         semantic_tokens_provider: Some(
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 SemanticTokensOptions {
@@ -301,6 +303,19 @@ fn handle_request(
                     request.id.clone(),
                     serde_json::to_value(highlights).unwrap(),
                 )
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/foldingRange" => {
+            let params: FoldingRangeParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let ranges = provide_folding_ranges(text, module.as_ref());
+                Response::new_ok(request.id.clone(), serde_json::to_value(ranges).unwrap())
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -689,6 +704,53 @@ fn provide_document_highlights(
         }
     }
     Some(highlights)
+}
+
+fn provide_folding_ranges(text: &str, module: Option<&Module>) -> Option<Vec<FoldingRange>> {
+    let owned_module;
+    let module = if let Some(module) = module {
+        module
+    } else {
+        owned_module = parse_module(text).ok()?;
+        &owned_module
+    };
+    let mut ranges = Vec::new();
+    for func in &module.functions {
+        let range = span_to_range(text, func.name.span);
+        if range.start.line < range.end.line {
+            ranges.push(FoldingRange {
+                start_line: range.start.line,
+                start_character: Some(range.start.character),
+                end_line: range.end.line,
+                end_character: Some(range.end.character),
+                kind: Some(FoldingRangeKind::Region),
+                collapsed_text: None,
+            });
+        }
+    }
+    for stmt in &module.stmts {
+        if let at_syntax::Stmt::Block(stmts) = stmt {
+            if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
+                let start = stmt_span(first);
+                let end = stmt_span(last);
+                let range = Range {
+                    start: offset_to_position(text, start.start),
+                    end: offset_to_position(text, end.end),
+                };
+                if range.start.line < range.end.line {
+                    ranges.push(FoldingRange {
+                        start_line: range.start.line,
+                        start_character: Some(range.start.character),
+                        end_line: range.end.line,
+                        end_character: Some(range.end.character),
+                        kind: Some(FoldingRangeKind::Region),
+                        collapsed_text: None,
+                    });
+                }
+            }
+        }
+    }
+    Some(ranges)
 }
 
 fn provide_definition(
@@ -1387,6 +1449,96 @@ fn span_to_range(text: &str, span: Span) -> Range {
     let start = offset_to_position(text, span.start);
     let end = offset_to_position(text, span.end);
     Range { start, end }
+}
+
+fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
+    match expr {
+        at_syntax::Expr::Int(_, span)
+        | at_syntax::Expr::Float(_, span)
+        | at_syntax::Expr::String(_, span)
+        | at_syntax::Expr::Bool(_, span) => Some(*span),
+        at_syntax::Expr::Ident(ident) => Some(ident.span),
+        at_syntax::Expr::Unary { expr, .. } => expr_span(expr),
+        at_syntax::Expr::Binary { left, right, .. } => {
+            let start = expr_span(left)?.start;
+            let end = expr_span(right)?.end;
+            Some(Span { start, end })
+        }
+        at_syntax::Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let start = expr_span(condition)?.start;
+            let end = if let Some(else_branch) = else_branch {
+                expr_span(else_branch)?.end
+            } else {
+                expr_span(then_branch)?.end
+            };
+            Some(Span { start, end })
+        }
+        at_syntax::Expr::Member { base, name } => {
+            let start = expr_span(base)?.start;
+            let end = name.span.end;
+            Some(Span { start, end })
+        }
+        at_syntax::Expr::Call { callee, args } => {
+            let start = expr_span(callee)?.start;
+            let end = if let Some(last) = args.last() {
+                expr_span(last)?.end
+            } else {
+                start
+            };
+            Some(Span { start, end })
+        }
+        at_syntax::Expr::Try(expr) => expr_span(expr),
+        at_syntax::Expr::Match { match_span, .. } => Some(*match_span),
+        at_syntax::Expr::Block { block_span, .. } => Some(*block_span),
+        at_syntax::Expr::Array { array_span, .. } => Some(*array_span),
+        at_syntax::Expr::Index { index_span, .. } => Some(*index_span),
+        at_syntax::Expr::Tuple { tuple_span, .. } => Some(*tuple_span),
+        at_syntax::Expr::Range { range_span, .. } => Some(*range_span),
+        at_syntax::Expr::InterpolatedString { span, .. } => Some(*span),
+        at_syntax::Expr::Closure { span, .. } => Some(*span),
+        at_syntax::Expr::StructLiteral { span, .. } => Some(*span),
+        at_syntax::Expr::EnumLiteral { span, .. } => Some(*span),
+    }
+}
+
+fn stmt_span(stmt: &at_syntax::Stmt) -> Span {
+    match stmt {
+        at_syntax::Stmt::Import { alias, .. } => alias.span,
+        at_syntax::Stmt::TypeAlias { name, .. } => name.span,
+        at_syntax::Stmt::Enum { name, .. } => name.span,
+        at_syntax::Stmt::Struct { name, .. } => name.span,
+        at_syntax::Stmt::Let { name, .. } => name.span,
+        at_syntax::Stmt::Using { name, .. } => name.span,
+        at_syntax::Stmt::Set { name, .. } => name.span,
+        at_syntax::Stmt::SetMember { field, .. } => field.span,
+        at_syntax::Stmt::SetIndex { base, .. } => {
+            expr_span(base).unwrap_or(Span { start: 0, end: 0 })
+        }
+        at_syntax::Stmt::While { while_span, .. } => *while_span,
+        at_syntax::Stmt::For { for_span, .. } => *for_span,
+        at_syntax::Stmt::Break { break_span } => *break_span,
+        at_syntax::Stmt::Continue { continue_span } => *continue_span,
+        at_syntax::Stmt::Expr(expr) => expr_span(expr).unwrap_or(Span { start: 0, end: 0 }),
+        at_syntax::Stmt::Return(expr) => expr
+            .as_ref()
+            .and_then(expr_span)
+            .unwrap_or(Span { start: 0, end: 0 }),
+        at_syntax::Stmt::Block(stmts) => {
+            if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
+                let start = stmt_span(first).start;
+                let end = stmt_span(last).end;
+                Span { start, end }
+            } else {
+                Span { start: 0, end: 0 }
+            }
+        }
+        at_syntax::Stmt::Test { .. } => Span { start: 0, end: 0 },
+    }
 }
 
 fn offset_to_position(text: &str, offset: usize) -> Position {
