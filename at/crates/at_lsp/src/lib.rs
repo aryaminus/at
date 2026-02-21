@@ -10,12 +10,13 @@ use at_vm::Compiler;
 use lsp_server::{Connection, Message, Notification, Response};
 use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
-    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintParams, Location, MarkupContent, MarkupKind, ParameterInformation,
-    ParameterLabel, Position, Range, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, SignatureInformation, TextDocumentContentChangeEvent,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams,
+    Location, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    SignatureInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 use sha2::{Digest, Sha256};
 
@@ -34,6 +35,7 @@ pub fn run_stdio() -> Result<(), String> {
             retrigger_characters: None,
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
         }),
+        document_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         ..ServerCapabilities::default()
     };
 
@@ -247,6 +249,19 @@ fn handle_request(
             };
             Ok(Some(response))
         }
+        "textDocument/documentSymbol" => {
+            let params: DocumentSymbolParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let symbols = provide_document_symbols(text, module.as_ref());
+                Response::new_ok(request.id.clone(), serde_json::to_value(symbols).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
         _ => Ok(None),
     }
 }
@@ -369,6 +384,102 @@ fn provide_signature_help(
         active_signature: Some(0),
         active_parameter: Some(active_param as u32),
     })
+}
+
+fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<DocumentSymbolResponse> {
+    let owned_module;
+    let module = if let Some(module) = module {
+        module
+    } else {
+        owned_module = parse_module(text).ok()?;
+        &owned_module
+    };
+    let mut symbols = Vec::new();
+    for func in &module.functions {
+        let range = span_to_range(text, func.name.span);
+        let mut name = String::new();
+        name.push_str("fn ");
+        name.push_str(&func.name.name);
+        let symbol = DocumentSymbol {
+            name,
+            detail: None,
+            kind: SymbolKind::FUNCTION,
+            range,
+            selection_range: range,
+            children: None,
+            tags: None,
+            deprecated: None,
+        };
+        symbols.push(symbol);
+    }
+
+    for stmt in &module.stmts {
+        match stmt {
+            at_syntax::Stmt::Struct { name, .. } => {
+                let range = span_to_range(text, name.span);
+                symbols.push(DocumentSymbol {
+                    name: name.name.clone(),
+                    detail: None,
+                    kind: SymbolKind::STRUCT,
+                    range,
+                    selection_range: range,
+                    children: None,
+                    tags: None,
+                    deprecated: None,
+                });
+            }
+            at_syntax::Stmt::Enum { name, .. } => {
+                let range = span_to_range(text, name.span);
+                symbols.push(DocumentSymbol {
+                    name: name.name.clone(),
+                    detail: None,
+                    kind: SymbolKind::ENUM,
+                    range,
+                    selection_range: range,
+                    children: None,
+                    tags: None,
+                    deprecated: None,
+                });
+            }
+            at_syntax::Stmt::TypeAlias { name, .. } => {
+                let range = span_to_range(text, name.span);
+                symbols.push(DocumentSymbol {
+                    name: name.name.clone(),
+                    detail: None,
+                    kind: SymbolKind::TYPE_PARAMETER,
+                    range,
+                    selection_range: range,
+                    children: None,
+                    tags: None,
+                    deprecated: None,
+                });
+            }
+            at_syntax::Stmt::Test { name, .. } => {
+                let range = Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                };
+                symbols.push(DocumentSymbol {
+                    name: format!("test {}", name),
+                    detail: None,
+                    kind: SymbolKind::METHOD,
+                    range,
+                    selection_range: range,
+                    children: None,
+                    tags: None,
+                    deprecated: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    Some(DocumentSymbolResponse::Nested(symbols))
 }
 
 fn provide_definition(
