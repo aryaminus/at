@@ -12,6 +12,7 @@ enum SimpleType {
     Option,
     Result,
     Unit,
+    Function(usize),
     Custom(String),
     Unknown,
 }
@@ -558,11 +559,13 @@ impl TypeChecker {
                 SimpleType::String
             }
             Expr::Closure { params, body, .. } => {
+                self.push_scope();
                 for param in params {
                     self.bind_local(param, SimpleType::Unknown);
                 }
                 self.check_expr(body);
-                SimpleType::Unknown
+                self.pop_scope();
+                SimpleType::Function(params.len())
             }
         }
     }
@@ -1117,11 +1120,30 @@ impl TypeChecker {
             return SimpleType::Unknown;
         }
 
-        self.push_error("invalid call target".to_string(), expr_span(callee));
+        let callee_ty = self.check_expr(callee);
         for arg in args {
             self.check_expr(arg);
         }
-        SimpleType::Unknown
+        match callee_ty {
+            SimpleType::Function(params) => {
+                if params != args.len() {
+                    self.push_error(
+                        format!(
+                            "wrong arity for closure: expected {} args, got {}",
+                            params,
+                            args.len()
+                        ),
+                        expr_span(callee),
+                    );
+                }
+                SimpleType::Unknown
+            }
+            SimpleType::Unknown => SimpleType::Unknown,
+            _ => {
+                self.push_error("invalid call target".to_string(), expr_span(callee));
+                SimpleType::Unknown
+            }
+        }
     }
 
     fn check_call_args(&mut self, name: &str, sig: &FuncSig, args: &[Expr], span: Option<Span>) {
@@ -1851,7 +1873,7 @@ impl TypeChecker {
                 "unit" => SimpleType::Unit,
                 other => SimpleType::Custom(other.to_string()),
             },
-            TypeRef::Function { .. } => SimpleType::Unknown,
+            TypeRef::Function { params, .. } => SimpleType::Function(params.len()),
         }
     }
 
@@ -1934,6 +1956,7 @@ fn format_type(ty: &SimpleType) -> String {
         SimpleType::Result => "result".to_string(),
         SimpleType::Unit => "unit".to_string(),
         SimpleType::Float => "float".to_string(),
+        SimpleType::Function(params) => format!("fn({params})"),
         SimpleType::Custom(name) => name.clone(),
         SimpleType::Unknown => "unknown".to_string(),
     }
