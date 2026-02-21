@@ -389,6 +389,7 @@ impl Compiler {
     fn compile_stmt(&mut self, stmt: &Stmt, chunk: &mut Chunk) -> Result<(), VmError> {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::TypeAlias { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } => {
                 self.compile_expr(value, chunk)?;
@@ -1640,6 +1641,7 @@ impl Compiler {
     ) {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::TypeAlias { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, value, .. } | Stmt::Using { name, value, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);

@@ -165,6 +165,10 @@ pub enum Stmt {
         path: String,
         alias: Ident,
     },
+    TypeAlias {
+        name: Ident,
+        ty: TypeRef,
+    },
     Struct {
         name: Ident,
         fields: Vec<StructField>,

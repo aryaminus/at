@@ -20,6 +20,7 @@ pub enum TokenKind {
     Else,
     Set,
     Struct,
+    Type,
     Break,
     Continue,
     Return,
@@ -213,6 +214,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Continue
                 | TokenKind::If
                 | TokenKind::Struct
+                | TokenKind::Type
                 | TokenKind::Eof => {
                     break;
                 }
@@ -240,6 +242,7 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match &self.current.kind {
             TokenKind::Import => self.parse_import_stmt(),
+            TokenKind::Type => self.parse_type_alias_stmt(),
             TokenKind::Struct => self.parse_struct_stmt(),
             TokenKind::Let => self.parse_let_stmt(),
             TokenKind::Using => self.parse_using_stmt(),
@@ -350,6 +353,15 @@ impl<'a> Parser<'a> {
         let alias = self.expect_ident()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Import { path, alias })
+    }
+
+    fn parse_type_alias_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Equals)?;
+        let ty = self.parse_type_ref()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::TypeAlias { name, ty })
     }
 
     fn parse_struct_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -1145,6 +1157,7 @@ impl<'a> Parser<'a> {
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
             match &self.current.kind {
                 TokenKind::Import
+                | TokenKind::Type
                 | TokenKind::Let
                 | TokenKind::Using
                 | TokenKind::Set
@@ -2024,6 +2037,7 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Else,
             "set" => TokenKind::Set,
             "struct" => TokenKind::Struct,
+            "type" => TokenKind::Type,
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,

@@ -62,6 +62,7 @@ struct TypeChecker {
     functions: HashMap<String, FuncSig>,
     function_needs: HashMap<String, Vec<String>>,
     structs: HashMap<String, Vec<StructField>>,
+    type_aliases: HashMap<String, TypeRef>,
     locals: Vec<HashMap<String, SimpleType>>,
     option_inner: Vec<HashMap<String, SimpleType>>,
     result_ok: Vec<HashMap<String, SimpleType>>,
@@ -86,6 +87,7 @@ impl TypeChecker {
             functions: HashMap::new(),
             function_needs: HashMap::new(),
             structs: HashMap::new(),
+            type_aliases: HashMap::new(),
             locals: Vec::new(),
             option_inner: Vec::new(),
             result_ok: Vec::new(),
@@ -141,6 +143,7 @@ impl TypeChecker {
 
     fn check_module(&mut self, module: &Module) {
         self.check_duplicate_import_aliases(module);
+        self.load_type_aliases(module);
         self.load_structs(module);
         for func in &module.functions {
             self.check_function(func);
@@ -244,9 +247,26 @@ impl TypeChecker {
         }
     }
 
+    fn load_type_aliases(&mut self, module: &Module) {
+        self.type_aliases.clear();
+        for stmt in &module.stmts {
+            if let Stmt::TypeAlias { name, ty } = stmt {
+                if self.type_aliases.contains_key(&name.name) {
+                    self.push_error(
+                        format!("duplicate type alias: {}", name.name),
+                        Some(name.span),
+                    );
+                    continue;
+                }
+                self.type_aliases.insert(name.name.clone(), ty.clone());
+            }
+        }
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Import { .. } => {}
+            Stmt::TypeAlias { .. } => {}
             Stmt::Struct { .. } => {}
             Stmt::Let { name, ty, value } => {
                 self.last_option_inner = None;
@@ -1958,17 +1978,22 @@ impl TypeChecker {
     fn type_from_ref(&mut self, ty: &TypeRef) -> SimpleType {
         self.validate_type_ref(ty);
         match ty {
-            TypeRef::Named { name, .. } => match name.name.as_str() {
-                "int" => SimpleType::Int,
-                "float" => SimpleType::Float,
-                "bool" => SimpleType::Bool,
-                "string" => SimpleType::String,
-                "array" => SimpleType::Array,
-                "option" => SimpleType::Option,
-                "result" => SimpleType::Result,
-                "unit" => SimpleType::Unit,
-                other => SimpleType::Custom(other.to_string()),
-            },
+            TypeRef::Named { name, .. } => {
+                if let Some(alias) = self.resolve_alias(name) {
+                    return self.type_from_ref(&alias);
+                }
+                match name.name.as_str() {
+                    "int" => SimpleType::Int,
+                    "float" => SimpleType::Float,
+                    "bool" => SimpleType::Bool,
+                    "string" => SimpleType::String,
+                    "array" => SimpleType::Array,
+                    "option" => SimpleType::Option,
+                    "result" => SimpleType::Result,
+                    "unit" => SimpleType::Unit,
+                    other => SimpleType::Custom(other.to_string()),
+                }
+            }
             TypeRef::Function { params, .. } => SimpleType::Function(params.len()),
         }
     }
@@ -2002,7 +2027,11 @@ impl TypeChecker {
                 }
                 "int" | "float" | "bool" | "string" | "unit" => {}
                 other => {
-                    if !self.structs.contains_key(other) {
+                    if self.type_aliases.contains_key(other) {
+                        if let Some(alias) = self.resolve_alias(name) {
+                            self.validate_type_ref(&alias);
+                        }
+                    } else if !self.structs.contains_key(other) {
                         self.push_error(format!("unknown type: {}", other), Some(name.span));
                     }
                 }
@@ -2016,6 +2045,25 @@ impl TypeChecker {
                 self.validate_type_ref(return_ty);
             }
         }
+    }
+
+    fn resolve_alias(&mut self, name: &Ident) -> Option<TypeRef> {
+        let mut current = name.name.clone();
+        let mut seen = HashSet::new();
+        while let Some(alias) = self.type_aliases.get(&current).cloned() {
+            if !seen.insert(current.clone()) {
+                self.push_error(format!("cyclic type alias: {}", name.name), Some(name.span));
+                return None;
+            }
+            match alias {
+                TypeRef::Named { name, args } if args.is_empty() => {
+                    current = name.name;
+                    continue;
+                }
+                other => return Some(other),
+            }
+        }
+        None
     }
 
     fn push_error(&mut self, message: String, span: Option<Span>) {

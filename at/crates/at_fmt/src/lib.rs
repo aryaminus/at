@@ -68,6 +68,14 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize) {
             out.push_str(&alias.name);
             out.push_str(";\n");
         }
+        Stmt::TypeAlias { name, ty } => {
+            indent_to(out, indent);
+            out.push_str("type ");
+            out.push_str(&name.name);
+            out.push_str(" = ");
+            format_type_ref(ty, out);
+            out.push_str(";\n");
+        }
         Stmt::Struct { name, fields } => {
             indent_to(out, indent);
             out.push_str("struct ");
@@ -581,7 +589,7 @@ fn infer_needs(func: &Function, import_aliases: &HashSet<String>) -> Vec<String>
 
 fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_needs_expr(value, needs, import_aliases);
         }

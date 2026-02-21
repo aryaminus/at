@@ -395,7 +395,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
 
 fn lint_unused_match_bindings_stmt(stmt: &Stmt, errors: &mut Vec<LintError>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             lint_unused_match_bindings_expr(value, errors);
         }
@@ -660,7 +660,7 @@ fn collect_local_defs_stmt(
 
 fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_local_uses_expr(value, used);
         }
@@ -811,7 +811,7 @@ fn collect_alias_usage(module: &Module, used: &mut HashSet<String>) {
 
 fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_alias_usage_expr(value, used);
         }
@@ -962,7 +962,7 @@ fn collect_called_functions(module: &Module, used: &mut HashSet<String>) {
 
 fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Import { .. } | Stmt::Struct { .. } => {}
+        Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } => {}
         Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
             collect_called_functions_expr(value, used);
         }
