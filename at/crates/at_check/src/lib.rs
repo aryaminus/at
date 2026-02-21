@@ -1678,36 +1678,67 @@ impl TypeChecker {
             }
             "append" => {
                 self.check_arity(name, args, 2, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("append expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
-                if args.len() == 2 {
-                    self.check_expr(&args[1]);
+                if let Some(value) = args.get(1) {
+                    let value_ty = self.check_expr(value);
+                    if let Some(inner) = array_inner.as_ref() {
+                        if !matches!(value_ty, SimpleType::Unknown) {
+                            self.check_compatible(
+                                inner,
+                                &value_ty,
+                                "append value type mismatch",
+                                expr_span(value),
+                            );
+                        }
+                    }
                 }
-                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
+                Some(SimpleType::Array(Box::new(
+                    array_inner.unwrap_or(SimpleType::Unknown),
+                )))
             }
             "contains" => {
                 self.check_arity(name, args, 2, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("contains expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
-                if args.len() == 2 {
-                    self.check_expr(&args[1]);
+                if let Some(value) = args.get(1) {
+                    let value_ty = self.check_expr(value);
+                    if let Some(inner) = array_inner.as_ref() {
+                        if !matches!(value_ty, SimpleType::Unknown) {
+                            self.check_compatible(
+                                inner,
+                                &value_ty,
+                                "contains value type mismatch",
+                                expr_span(value),
+                            );
+                        }
+                    }
                 }
                 Some(SimpleType::Bool)
             }
             "slice" => {
                 self.check_arity(name, args, 3, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("slice expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
                 if args.len() >= 2 {
@@ -1728,49 +1759,188 @@ impl TypeChecker {
                         );
                     }
                 }
-                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
+                Some(SimpleType::Array(Box::new(
+                    array_inner.unwrap_or(SimpleType::Unknown),
+                )))
             }
             "map" => {
                 self.check_arity(name, args, 2, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("map expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
-                if args.len() == 2 {
-                    self.check_expr(&args[1]);
+                let mut mapped_ty = SimpleType::Unknown;
+                if let Some(mapper) = args.get(1) {
+                    let mapper_ty = self.check_expr(mapper);
+                    match mapper_ty {
+                        SimpleType::Function(params, return_ty) => {
+                            if params.len() != 1 {
+                                self.push_error(
+                                    format!(
+                                        "map expects function with 1 argument, got {}",
+                                        params.len()
+                                    ),
+                                    expr_span(mapper),
+                                );
+                            } else if let Some(inner) = array_inner.as_ref() {
+                                let param_ty = &params[0];
+                                if !matches!(param_ty, SimpleType::Unknown) {
+                                    self.check_compatible(
+                                        param_ty,
+                                        inner,
+                                        "map function parameter mismatch",
+                                        expr_span(mapper),
+                                    );
+                                }
+                            }
+                            mapped_ty = (*return_ty).clone();
+                        }
+                        SimpleType::Unknown => {}
+                        _ => {
+                            self.push_error("map expects function".to_string(), expr_span(mapper));
+                        }
+                    }
                 }
-                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
+                Some(SimpleType::Array(Box::new(mapped_ty)))
             }
             "filter" => {
                 self.check_arity(name, args, 2, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("filter expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
-                if args.len() == 2 {
-                    self.check_expr(&args[1]);
+                if let Some(predicate) = args.get(1) {
+                    let predicate_ty = self.check_expr(predicate);
+                    match predicate_ty {
+                        SimpleType::Function(params, return_ty) => {
+                            if params.len() != 1 {
+                                self.push_error(
+                                    format!(
+                                        "filter expects function with 1 argument, got {}",
+                                        params.len()
+                                    ),
+                                    expr_span(predicate),
+                                );
+                            } else if let Some(inner) = array_inner.as_ref() {
+                                let param_ty = &params[0];
+                                if !matches!(param_ty, SimpleType::Unknown) {
+                                    self.check_compatible(
+                                        param_ty,
+                                        inner,
+                                        "filter function parameter mismatch",
+                                        expr_span(predicate),
+                                    );
+                                }
+                            }
+                            if !matches!(*return_ty, SimpleType::Unknown)
+                                && *return_ty != SimpleType::Bool
+                            {
+                                self.push_error(
+                                    "filter expects bool predicate".to_string(),
+                                    expr_span(predicate),
+                                );
+                            }
+                        }
+                        SimpleType::Unknown => {}
+                        _ => {
+                            self.push_error(
+                                "filter expects function".to_string(),
+                                expr_span(predicate),
+                            );
+                        }
+                    }
                 }
-                Some(SimpleType::Array(Box::new(SimpleType::Unknown)))
+                Some(SimpleType::Array(Box::new(
+                    array_inner.unwrap_or(SimpleType::Unknown),
+                )))
             }
             "reduce" => {
                 self.check_arity(name, args, 3, span);
+                let mut array_inner = None;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
                     if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
                         self.push_error("reduce expects array".to_string(), expr_span(arg));
+                    } else if let SimpleType::Array(inner) = arg_ty {
+                        array_inner = Some((*inner).clone());
                     }
                 }
-                if args.len() >= 2 {
-                    self.check_expr(&args[1]);
+                let mut acc_ty = SimpleType::Unknown;
+                if let Some(init) = args.get(1) {
+                    acc_ty = self.check_expr(init);
                 }
-                if args.len() >= 3 {
-                    self.check_expr(&args[2]);
+                if let Some(reducer) = args.get(2) {
+                    let reducer_ty = self.check_expr(reducer);
+                    match reducer_ty {
+                        SimpleType::Function(params, return_ty) => {
+                            if params.len() != 2 {
+                                self.push_error(
+                                    format!(
+                                        "reduce expects function with 2 arguments, got {}",
+                                        params.len()
+                                    ),
+                                    expr_span(reducer),
+                                );
+                            } else {
+                                let acc_param = &params[0];
+                                if !matches!(acc_param, SimpleType::Unknown)
+                                    && !matches!(acc_ty, SimpleType::Unknown)
+                                {
+                                    self.check_compatible(
+                                        acc_param,
+                                        &acc_ty,
+                                        "reduce accumulator parameter mismatch",
+                                        expr_span(reducer),
+                                    );
+                                }
+                                if let Some(inner) = array_inner.as_ref() {
+                                    let item_param = &params[1];
+                                    if !matches!(item_param, SimpleType::Unknown) {
+                                        self.check_compatible(
+                                            item_param,
+                                            inner,
+                                            "reduce item parameter mismatch",
+                                            expr_span(reducer),
+                                        );
+                                    }
+                                }
+                                if !matches!(*return_ty, SimpleType::Unknown)
+                                    && !matches!(acc_ty, SimpleType::Unknown)
+                                {
+                                    self.check_compatible(
+                                        &acc_ty,
+                                        &return_ty,
+                                        "reduce return type mismatch",
+                                        expr_span(reducer),
+                                    );
+                                }
+                                if matches!(acc_ty, SimpleType::Unknown)
+                                    && !matches!(*return_ty, SimpleType::Unknown)
+                                {
+                                    acc_ty = (*return_ty).clone();
+                                }
+                            }
+                        }
+                        SimpleType::Unknown => {}
+                        _ => {
+                            self.push_error(
+                                "reduce expects function".to_string(),
+                                expr_span(reducer),
+                            );
+                        }
+                    }
                 }
-                Some(SimpleType::Unknown)
+                Some(acc_ty)
             }
             "print" => {
                 self.check_arity(name, args, 1, span);
