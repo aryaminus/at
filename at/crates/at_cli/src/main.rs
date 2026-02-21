@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -756,18 +755,29 @@ fn parse_runs(args: &[String]) -> Option<u32> {
 
 fn run_repl() {
     let mut buffer = String::new();
-    let stdin = io::stdin();
+    let mut rl = match rustyline::DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(_) => {
+            eprintln!("failed to start line editor");
+            return;
+        }
+    };
+    let history_path = std::env::var("HOME")
+        .ok()
+        .map(|home| std::path::PathBuf::from(home).join(".at_history"));
+    if let Some(path) = history_path.as_ref() {
+        let _ = rl.load_history(path);
+    }
+
     loop {
-        if buffer.is_empty() {
-            print!("> ");
-        } else {
-            print!("... ");
-        }
-        let _ = io::stdout().flush();
-        let mut line = String::new();
-        if stdin.read_line(&mut line).is_err() {
-            break;
-        }
+        let prompt = if buffer.is_empty() { "> " } else { "... " };
+        let line = match rl.readline(prompt) {
+            Ok(line) => line,
+            Err(rustyline::error::ReadlineError::Interrupted)
+            | Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(_) => break,
+        };
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -780,6 +790,7 @@ fn run_repl() {
             println!("ok");
             continue;
         }
+        let _ = rl.add_history_entry(trimmed);
         buffer.push_str(trimmed);
         buffer.push('\n');
 
@@ -794,6 +805,7 @@ fn run_repl() {
                     Ok(program) => program,
                     Err(err) => {
                         eprintln!("{}", format_compile_error(&err, Some(&buffer), None));
+                        buffer.clear();
                         continue;
                     }
                 };
@@ -810,6 +822,10 @@ fn run_repl() {
         }
 
         buffer.clear();
+    }
+
+    if let Some(path) = history_path.as_ref() {
+        let _ = rl.append_history(path);
     }
 }
 
