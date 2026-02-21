@@ -617,6 +617,9 @@ fn format_expr_prec_indent(
                 }
                 out.push_str(" => ");
                 format_expr_prec_indent(&arm.body, out, 0, indent + 4, comment_state);
+                if let Some(body_end) = expr_end(&arm.body) {
+                    comment_state.emit_inline_between(out, body_end, body_end + 1);
+                }
                 out.push_str(",\n");
             }
             indent_to(out, indent);
