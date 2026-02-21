@@ -31,6 +31,21 @@ pub struct TypeError {
     pub span: Option<Span>,
 }
 
+#[derive(Clone, Debug)]
+struct OptionNarrow {
+    ident: Ident,
+    inner: SimpleType,
+    then_branch: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ResultNarrow {
+    ident: Ident,
+    ok: SimpleType,
+    err: SimpleType,
+    then_branch: bool,
+}
+
 pub fn typecheck_module(module: &Module) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new();
     checker.load_functions(module);
@@ -1035,8 +1050,12 @@ impl TypeChecker {
         then_branch: &Expr,
         else_branch: Option<&Expr>,
     ) -> SimpleType {
-        let option_narrow = self.extract_option_narrow(condition);
-        let result_narrow = self.extract_result_narrow(condition);
+        let option_narrow = self
+            .extract_option_narrow(condition, true)
+            .or_else(|| self.extract_option_narrow(condition, false));
+        let result_narrow = self
+            .extract_result_narrow(condition, true)
+            .or_else(|| self.extract_result_narrow(condition, false));
         let cond_ty = self.check_expr(condition);
         if cond_ty != SimpleType::Bool
             && cond_ty != SimpleType::Int
@@ -1051,17 +1070,21 @@ impl TypeChecker {
         self.last_result_ok = None;
         self.last_result_err = None;
         self.push_scope();
-        if let Some((ident, inner)) = option_narrow.clone() {
-            if let Some(scope) = self.option_inner.last_mut() {
-                scope.insert(ident.name.clone(), inner);
+        if let Some(narrow) = option_narrow.clone() {
+            if narrow.then_branch {
+                if let Some(scope) = self.option_inner.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), narrow.inner);
+                }
             }
         }
-        if let Some((ident, ok, err)) = result_narrow.clone() {
-            if let Some(scope) = self.result_ok.last_mut() {
-                scope.insert(ident.name.clone(), ok);
-            }
-            if let Some(scope) = self.result_err.last_mut() {
-                scope.insert(ident.name.clone(), err);
+        if let Some(narrow) = result_narrow.clone() {
+            if narrow.then_branch {
+                if let Some(scope) = self.result_ok.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), narrow.ok);
+                }
+                if let Some(scope) = self.result_err.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), narrow.err);
+                }
             }
         }
         let then_ty = self.check_expr(then_branch);
@@ -1074,20 +1097,30 @@ impl TypeChecker {
         self.last_result_ok = None;
         self.last_result_err = None;
         self.push_scope();
-        if let Some((ident, inner)) = option_narrow.clone() {
-            let inner_value = self.lookup_option_inner(&ident.name).unwrap_or(inner);
-            if let Some(scope) = self.option_inner.last_mut() {
-                scope.insert(ident.name.clone(), inner_value);
+        if let Some(narrow) = option_narrow.clone() {
+            if !narrow.then_branch {
+                let inner_value = self
+                    .lookup_option_inner(&narrow.ident.name)
+                    .unwrap_or(narrow.inner);
+                if let Some(scope) = self.option_inner.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), inner_value);
+                }
             }
         }
-        if let Some((ident, ok, err)) = result_narrow.clone() {
-            let ok_value = self.lookup_result_ok(&ident.name).unwrap_or(ok);
-            let err_value = self.lookup_result_err(&ident.name).unwrap_or(err);
-            if let Some(scope) = self.result_ok.last_mut() {
-                scope.insert(ident.name.clone(), ok_value);
-            }
-            if let Some(scope) = self.result_err.last_mut() {
-                scope.insert(ident.name.clone(), err_value);
+        if let Some(narrow) = result_narrow.clone() {
+            if !narrow.then_branch {
+                let ok_value = self
+                    .lookup_result_ok(&narrow.ident.name)
+                    .unwrap_or(narrow.ok);
+                let err_value = self
+                    .lookup_result_err(&narrow.ident.name)
+                    .unwrap_or(narrow.err);
+                if let Some(scope) = self.result_ok.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), ok_value);
+                }
+                if let Some(scope) = self.result_err.last_mut() {
+                    scope.insert(narrow.ident.name.clone(), err_value);
+                }
             }
         }
         let else_ty = if let Some(else_expr) = else_branch {
@@ -1188,63 +1221,80 @@ impl TypeChecker {
         }
     }
 
-    fn extract_option_narrow(&mut self, condition: &Expr) -> Option<(Ident, SimpleType)> {
-        match condition {
-            Expr::Call { callee, args } => {
-                if let Expr::Ident(ident) = callee.as_ref() {
-                    if ident.name == "is_some" {
-                        if let Some(arg) = args.first() {
-                            if let Expr::Ident(arg_ident) = arg {
-                                if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
-                                    return Some((arg_ident.clone(), inner));
-                                }
-                                if let Some(ty) = self.resolve_local(arg_ident) {
-                                    if let SimpleType::Option(inner) = ty {
-                                        return Some((arg_ident.clone(), (*inner).clone()));
-                                    }
-                                }
+    fn extract_option_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<OptionNarrow> {
+        let (target_name, then_branch) = match (for_then, condition) {
+            (true, Expr::Call { .. }) => ("is_some", true),
+            (false, Expr::Call { .. }) => ("is_none", false),
+            _ => return None,
+        };
+        let Expr::Call { callee, args } = condition else {
+            return None;
+        };
+        if let Expr::Ident(ident) = callee.as_ref() {
+            if ident.name == target_name {
+                if let Some(arg) = args.first() {
+                    if let Expr::Ident(arg_ident) = arg {
+                        if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
+                            return Some(OptionNarrow {
+                                ident: arg_ident.clone(),
+                                inner,
+                                then_branch,
+                            });
+                        }
+                        if let Some(ty) = self.resolve_local(arg_ident) {
+                            if let SimpleType::Option(inner) = ty {
+                                return Some(OptionNarrow {
+                                    ident: arg_ident.clone(),
+                                    inner: (*inner).clone(),
+                                    then_branch,
+                                });
                             }
                         }
                     }
                 }
-                None
             }
-            _ => None,
         }
+        None
     }
 
-    fn extract_result_narrow(
-        &mut self,
-        condition: &Expr,
-    ) -> Option<(Ident, SimpleType, SimpleType)> {
-        match condition {
-            Expr::Call { callee, args } => {
-                if let Expr::Ident(ident) = callee.as_ref() {
-                    if ident.name == "is_ok" {
-                        if let Some(arg) = args.first() {
-                            if let Expr::Ident(arg_ident) = arg {
-                                let ok = self.lookup_result_ok(&arg_ident.name);
-                                let err = self.lookup_result_err(&arg_ident.name);
-                                if let (Some(ok), Some(err)) = (ok, err) {
-                                    return Some((arg_ident.clone(), ok, err));
-                                }
-                                if let Some(ty) = self.resolve_local(arg_ident) {
-                                    if let SimpleType::Result(ok, err) = ty {
-                                        return Some((
-                                            arg_ident.clone(),
-                                            (*ok).clone(),
-                                            (*err).clone(),
-                                        ));
-                                    }
-                                }
+    fn extract_result_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<ResultNarrow> {
+        let (target_name, then_branch) = match (for_then, condition) {
+            (true, Expr::Call { .. }) => ("is_ok", true),
+            (false, Expr::Call { .. }) => ("is_err", false),
+            _ => return None,
+        };
+        let Expr::Call { callee, args } = condition else {
+            return None;
+        };
+        if let Expr::Ident(ident) = callee.as_ref() {
+            if ident.name == target_name {
+                if let Some(arg) = args.first() {
+                    if let Expr::Ident(arg_ident) = arg {
+                        let ok = self.lookup_result_ok(&arg_ident.name);
+                        let err = self.lookup_result_err(&arg_ident.name);
+                        if let (Some(ok), Some(err)) = (ok, err) {
+                            return Some(ResultNarrow {
+                                ident: arg_ident.clone(),
+                                ok,
+                                err,
+                                then_branch,
+                            });
+                        }
+                        if let Some(ty) = self.resolve_local(arg_ident) {
+                            if let SimpleType::Result(ok, err) = ty {
+                                return Some(ResultNarrow {
+                                    ident: arg_ident.clone(),
+                                    ok: (*ok).clone(),
+                                    err: (*err).clone(),
+                                    then_branch,
+                                });
                             }
                         }
                     }
                 }
-                None
             }
-            _ => None,
         }
+        None
     }
 
     fn merge_inner(
