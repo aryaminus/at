@@ -767,13 +767,11 @@ fn format_expr_prec_indent(
                 comment_state.emit_inline_between(out, body_span, body_span + 1);
             }
         }
-        Expr::Group { expr, .. } => {
+        Expr::Group { expr, span } => {
             out.push('(');
             format_expr_prec_indent(expr, out, 0, indent, comment_state);
             out.push(')');
-            if let Some(group_end) = expr_end(expr) {
-                comment_state.emit_inline_between(out, group_end, group_end + 1);
-            }
+            comment_state.emit_inline_between(out, span.end, span.end + 1);
         }
     }
 }
