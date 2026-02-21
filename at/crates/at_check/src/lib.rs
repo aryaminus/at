@@ -1222,49 +1222,63 @@ impl TypeChecker {
     }
 
     fn extract_option_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<OptionNarrow> {
-        let (target_name, then_branch, call_expr) = match (for_then, condition) {
-            (true, Expr::Call { .. }) => ("is_some", true, condition),
-            (
-                true,
-                Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                    ..
-                },
-            ) => ("is_some", false, expr.as_ref()),
-            (false, Expr::Call { .. }) => ("is_none", false, condition),
-            (
-                false,
-                Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                    ..
-                },
-            ) => ("is_none", true, expr.as_ref()),
-            _ => return None,
-        };
+        if let Expr::Binary {
+            op, left, right, ..
+        } = condition
+        {
+            if for_then && *op == BinaryOp::And {
+                return self
+                    .extract_option_narrow(left, true)
+                    .or_else(|| self.extract_option_narrow(right, true));
+            }
+            if !for_then && *op == BinaryOp::Or {
+                return self
+                    .extract_option_narrow(left, false)
+                    .or_else(|| self.extract_option_narrow(right, false));
+            }
+        }
+
+        let mut call_expr = condition;
+        let mut is_some = None;
+        if let Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+            ..
+        } = condition
+        {
+            call_expr = expr.as_ref();
+            is_some = Some(false);
+        }
+
         let Expr::Call { callee, args } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
-            if ident.name == target_name {
-                if let Some(arg) = args.first() {
-                    if let Expr::Ident(arg_ident) = arg {
-                        if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
+            let mut is_some_call = match ident.name.as_str() {
+                "is_some" => Some(true),
+                "is_none" => Some(false),
+                _ => None,
+            }?;
+            if let Some(negated_is_some) = is_some {
+                is_some_call = negated_is_some;
+            }
+            let then_branch = if is_some_call { for_then } else { !for_then };
+            if let Some(arg) = args.first() {
+                if let Expr::Ident(arg_ident) = arg {
+                    if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
+                        return Some(OptionNarrow {
+                            ident: arg_ident.clone(),
+                            inner,
+                            then_branch,
+                        });
+                    }
+                    if let Some(ty) = self.resolve_local(arg_ident) {
+                        if let SimpleType::Option(inner) = ty {
                             return Some(OptionNarrow {
                                 ident: arg_ident.clone(),
-                                inner,
+                                inner: (*inner).clone(),
                                 then_branch,
                             });
-                        }
-                        if let Some(ty) = self.resolve_local(arg_ident) {
-                            if let SimpleType::Option(inner) = ty {
-                                return Some(OptionNarrow {
-                                    ident: arg_ident.clone(),
-                                    inner: (*inner).clone(),
-                                    then_branch,
-                                });
-                            }
                         }
                     }
                 }
@@ -1274,53 +1288,67 @@ impl TypeChecker {
     }
 
     fn extract_result_narrow(&mut self, condition: &Expr, for_then: bool) -> Option<ResultNarrow> {
-        let (target_name, then_branch, call_expr) = match (for_then, condition) {
-            (true, Expr::Call { .. }) => ("is_ok", true, condition),
-            (
-                true,
-                Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                    ..
-                },
-            ) => ("is_ok", false, expr.as_ref()),
-            (false, Expr::Call { .. }) => ("is_err", false, condition),
-            (
-                false,
-                Expr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                    ..
-                },
-            ) => ("is_err", true, expr.as_ref()),
-            _ => return None,
-        };
+        if let Expr::Binary {
+            op, left, right, ..
+        } = condition
+        {
+            if for_then && *op == BinaryOp::And {
+                return self
+                    .extract_result_narrow(left, true)
+                    .or_else(|| self.extract_result_narrow(right, true));
+            }
+            if !for_then && *op == BinaryOp::Or {
+                return self
+                    .extract_result_narrow(left, false)
+                    .or_else(|| self.extract_result_narrow(right, false));
+            }
+        }
+
+        let mut call_expr = condition;
+        let mut is_ok = None;
+        if let Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+            ..
+        } = condition
+        {
+            call_expr = expr.as_ref();
+            is_ok = Some(false);
+        }
+
         let Expr::Call { callee, args } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
-            if ident.name == target_name {
-                if let Some(arg) = args.first() {
-                    if let Expr::Ident(arg_ident) = arg {
-                        let ok = self.lookup_result_ok(&arg_ident.name);
-                        let err = self.lookup_result_err(&arg_ident.name);
-                        if let (Some(ok), Some(err)) = (ok, err) {
+            let mut is_ok_call = match ident.name.as_str() {
+                "is_ok" => Some(true),
+                "is_err" => Some(false),
+                _ => None,
+            }?;
+            if let Some(negated_is_ok) = is_ok {
+                is_ok_call = negated_is_ok;
+            }
+            let then_branch = if is_ok_call { for_then } else { !for_then };
+            if let Some(arg) = args.first() {
+                if let Expr::Ident(arg_ident) = arg {
+                    let ok = self.lookup_result_ok(&arg_ident.name);
+                    let err = self.lookup_result_err(&arg_ident.name);
+                    if let (Some(ok), Some(err)) = (ok, err) {
+                        return Some(ResultNarrow {
+                            ident: arg_ident.clone(),
+                            ok,
+                            err,
+                            then_branch,
+                        });
+                    }
+                    if let Some(ty) = self.resolve_local(arg_ident) {
+                        if let SimpleType::Result(ok, err) = ty {
                             return Some(ResultNarrow {
                                 ident: arg_ident.clone(),
-                                ok,
-                                err,
+                                ok: (*ok).clone(),
+                                err: (*err).clone(),
                                 then_branch,
                             });
-                        }
-                        if let Some(ty) = self.resolve_local(arg_ident) {
-                            if let SimpleType::Result(ok, err) = ty {
-                                return Some(ResultNarrow {
-                                    ident: arg_ident.clone(),
-                                    ok: (*ok).clone(),
-                                    err: (*err).clone(),
-                                    then_branch,
-                                });
-                            }
                         }
                     }
                 }
