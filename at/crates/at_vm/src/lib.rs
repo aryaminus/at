@@ -319,20 +319,49 @@ impl Compiler {
         let mut all_segments = path;
         all_segments.extend(segments);
 
+        let mut temp_slots = Vec::with_capacity(all_segments.len());
+        for _ in 0..all_segments.len() {
+            let temp_name = self.next_synthetic_name("set_base");
+            let temp_slot = self.bind_local_checked(&temp_name, root_ident.span)?;
+            temp_slots.push(temp_slot);
+        }
+        let mut index_slots: Vec<Option<usize>> = vec![None; all_segments.len()];
+        let updated_slot = {
+            let temp_name = self.next_synthetic_name("set_value");
+            self.bind_local_checked(&temp_name, root_ident.span)?
+        };
+
         chunk.push(Op::LoadLocal(slot), Some(root_ident.span));
-        for segment in all_segments
+        chunk.push(Op::StoreLocal(temp_slots[0]), Some(root_ident.span));
+
+        for (idx, segment) in all_segments
             .iter()
+            .enumerate()
             .take(all_segments.len().saturating_sub(1))
         {
             match segment {
                 SetSegment::Member(name) => {
+                    chunk.push(Op::LoadLocal(temp_slots[idx]), Some(root_ident.span));
                     chunk.push(Op::GetMember(name.name.clone()), Some(name.span));
                 }
                 SetSegment::Index { expr, span } => {
-                    self.compile_expr(expr, chunk)?;
+                    let index_slot = match index_slots[idx] {
+                        Some(slot) => slot,
+                        None => {
+                            let temp_name = self.next_synthetic_name("set_index");
+                            let temp_slot = self.bind_local_checked(&temp_name, root_ident.span)?;
+                            self.compile_expr(expr, chunk)?;
+                            chunk.push(Op::StoreLocal(temp_slot), *span);
+                            index_slots[idx] = Some(temp_slot);
+                            temp_slot
+                        }
+                    };
+                    chunk.push(Op::LoadLocal(temp_slots[idx]), Some(root_ident.span));
+                    chunk.push(Op::LoadLocal(index_slot), *span);
                     chunk.push(Op::Index, *span);
                 }
             }
+            chunk.push(Op::StoreLocal(temp_slots[idx + 1]), Some(root_ident.span));
         }
 
         let last_segment = all_segments.last().ok_or_else(|| {
@@ -342,18 +371,57 @@ impl Compiler {
             )
         })?;
 
+        let last_idx = all_segments.len() - 1;
         match last_segment {
             SetSegment::Member(name) => {
+                chunk.push(Op::LoadLocal(temp_slots[last_idx]), Some(root_ident.span));
                 self.compile_expr(value, chunk)?;
                 chunk.push(Op::StoreMember(name.name.clone()), Some(name.span));
             }
             SetSegment::Index { expr, span } => {
-                self.compile_expr(expr, chunk)?;
+                let index_slot = match index_slots[last_idx] {
+                    Some(slot) => slot,
+                    None => {
+                        let temp_name = self.next_synthetic_name("set_index");
+                        let temp_slot = self.bind_local_checked(&temp_name, root_ident.span)?;
+                        self.compile_expr(expr, chunk)?;
+                        chunk.push(Op::StoreLocal(temp_slot), *span);
+                        index_slots[last_idx] = Some(temp_slot);
+                        temp_slot
+                    }
+                };
+                chunk.push(Op::LoadLocal(temp_slots[last_idx]), Some(root_ident.span));
+                chunk.push(Op::LoadLocal(index_slot), *span);
                 self.compile_expr(value, chunk)?;
                 chunk.push(Op::StoreIndex, *span);
             }
         }
 
+        chunk.push(Op::StoreLocal(updated_slot), Some(root_ident.span));
+
+        for (idx, segment) in all_segments.iter().enumerate().take(last_idx).rev() {
+            chunk.push(Op::LoadLocal(temp_slots[idx]), Some(root_ident.span));
+            match segment {
+                SetSegment::Member(name) => {
+                    chunk.push(Op::LoadLocal(updated_slot), Some(root_ident.span));
+                    chunk.push(Op::StoreMember(name.name.clone()), Some(name.span));
+                }
+                SetSegment::Index { span, .. } => {
+                    let index_slot = match index_slots[idx] {
+                        Some(slot) => slot,
+                        None => {
+                            return Err(compile_error("set index slot missing".to_string(), *span))
+                        }
+                    };
+                    chunk.push(Op::LoadLocal(index_slot), *span);
+                    chunk.push(Op::LoadLocal(updated_slot), Some(root_ident.span));
+                    chunk.push(Op::StoreIndex, *span);
+                }
+            }
+            chunk.push(Op::StoreLocal(updated_slot), Some(root_ident.span));
+        }
+
+        chunk.push(Op::LoadLocal(updated_slot), Some(root_ident.span));
         chunk.push(Op::StoreLocal(slot), Some(root_ident.span));
         Ok(())
     }
