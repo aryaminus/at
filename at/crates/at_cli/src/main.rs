@@ -1609,6 +1609,38 @@ mod tests {
     }
 
     #[test]
+    fn integration_run_set_nested() {
+        let temp_dir = std::env::temp_dir().join("at_test_run_set_nested");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(
+            &file,
+            "struct Root { items: array<array<int> > }\nlet store = Root { items: [[1]] };\nset store.items[0][0] = 2;\nprint(store.items[0][0]);",
+        )
+        .expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("run at binary");
+
+        assert!(
+            output.status.success(),
+            "run failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("2"),
+            "expected '2' in output, got: {}",
+            stdout
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
     fn integration_run_syntax_error() {
         let temp_dir = std::env::temp_dir().join("at_test_run_syntax_error");
         fs::create_dir_all(&temp_dir).ok();
