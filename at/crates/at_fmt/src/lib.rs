@@ -169,6 +169,47 @@ fn expr_span(expr: &Expr) -> Option<usize> {
     }
 }
 
+fn expr_end(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Int(_, span) | Expr::Float(_, span) | Expr::String(_, span) | Expr::Bool(_, span) => {
+            Some(span.end)
+        }
+        Expr::Ident(ident) => Some(ident.span.end),
+        Expr::Unary { expr, .. } => expr_end(expr),
+        Expr::Binary { right, .. } => expr_end(right),
+        Expr::If {
+            else_branch,
+            then_branch,
+            ..
+        } => {
+            if let Some(else_branch) = else_branch {
+                expr_end(else_branch)
+            } else {
+                expr_end(then_branch)
+            }
+        }
+        Expr::Member { name, .. } => Some(name.span.end),
+        Expr::Call { callee, args } => {
+            if let Some(last) = args.last() {
+                expr_end(last)
+            } else {
+                expr_end(callee)
+            }
+        }
+        Expr::Try(expr) => expr_end(expr),
+        Expr::Match { match_span, .. } => Some(match_span.end),
+        Expr::Block { block_span, .. } => Some(block_span.end),
+        Expr::Array { array_span, .. } => Some(array_span.end),
+        Expr::Index { index_span, .. } => Some(index_span.end),
+        Expr::Tuple { tuple_span, .. } => Some(tuple_span.end),
+        Expr::Range { range_span, .. } => Some(range_span.end),
+        Expr::InterpolatedString { span, .. } => Some(span.end),
+        Expr::Closure { span, .. } => Some(span.end),
+        Expr::StructLiteral { span, .. } => Some(span.end),
+        Expr::EnumLiteral { span, .. } => Some(span.end),
+    }
+}
+
 fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut CommentState) {
     match stmt {
         Stmt::Import { path, alias } => {
@@ -540,8 +581,14 @@ fn format_expr_prec_indent(
                     out.push_str(", ");
                 }
                 format_expr_prec_indent(arg, out, 0, indent, comment_state);
+                if let Some(arg_span) = expr_end(arg) {
+                    comment_state.emit_inline_between(out, arg_span, arg_span + 1);
+                }
             }
             out.push(')');
+            if let Some(call_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, call_end, call_end + 1);
+            }
         }
         Expr::Try(expr) => {
             format_expr_prec_indent(expr, out, 0, indent, comment_state);
@@ -610,6 +657,9 @@ fn format_expr_prec_indent(
             out.push('[');
             format_expr_prec_indent(index, out, 0, indent, comment_state);
             out.push(']');
+            if let Some(index_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, index_end, index_end + 1);
+            }
         }
         Expr::Tuple { items, .. } => {
             out.push('(');
