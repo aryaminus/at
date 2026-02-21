@@ -339,6 +339,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Match { value, arms, .. } => {
             collect_used_capabilities_expr(value, used);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_used_capabilities_expr(guard, used);
+                }
                 collect_used_capabilities_expr(&arm.body, used);
             }
         }
@@ -437,6 +440,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
             lint_unused_match_bindings_expr(value, errors);
             for arm in arms {
                 let mut used = HashSet::new();
+                if let Some(guard) = &arm.guard {
+                    collect_local_uses_expr(guard, &mut used);
+                }
                 collect_local_uses_expr(&arm.body, &mut used);
                 for ident in match_pattern_idents(&arm.pattern) {
                     if should_ignore_name(&ident.name) {
@@ -448,6 +454,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, errors: &mut Vec<LintError>) {
                             Some(ident.span),
                         ));
                     }
+                }
+                if let Some(guard) = &arm.guard {
+                    lint_unused_match_bindings_expr(guard, errors);
                 }
                 lint_unused_match_bindings_expr(&arm.body, errors);
             }
@@ -727,6 +736,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Match { value, arms, .. } => {
             collect_local_uses_expr(value, used);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_local_uses_expr(guard, used);
+                }
                 collect_local_uses_expr(&arm.body, used);
             }
         }
@@ -870,6 +882,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Match { value, arms, .. } => {
             collect_alias_usage_expr(value, used);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_alias_usage_expr(guard, used);
+                }
                 collect_alias_usage_expr(&arm.body, used);
             }
         }
@@ -1009,6 +1024,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Match { value, arms, .. } => {
             collect_called_functions_expr(value, used);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_called_functions_expr(guard, used);
+                }
                 collect_called_functions_expr(&arm.body, used);
             }
         }

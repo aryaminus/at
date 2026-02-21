@@ -1015,48 +1015,109 @@ impl Compiler {
         self.compile_expr(value, chunk)?;
         let mut end_jumps = Vec::new();
 
-        let mut match_op_indices = Vec::new();
+        let mut match_op_indices: Vec<(usize, usize)> = Vec::new();
+        let mut arm_start_indices = Vec::new();
+        let mut guard_fail_jumps: Vec<(usize, usize)> = Vec::new();
         let mut wildcard_body_index: Option<usize> = None;
-        for arm in arms {
-            match &arm.pattern {
-                at_syntax::MatchPattern::Wildcard => {
-                    wildcard_body_index = Some(chunk.code.len());
+        for (arm_index, arm) in arms.iter().enumerate() {
+            let is_wildcard = matches!(arm.pattern, at_syntax::MatchPattern::Wildcard);
+            let arm_start = if is_wildcard {
+                let idx = chunk.code.len();
+                if arm.guard.is_none() {
+                    wildcard_body_index = Some(idx);
                     chunk.push(Op::Pop, Some(match_span));
                 }
-                _ => {
-                    let match_op_index = chunk.code.len();
-                    chunk.push(
-                        match arm.pattern {
-                            at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
-                            at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
-                            at_syntax::MatchPattern::OptionSome(_) => {
-                                Op::MatchOptionSome(usize::MAX)
-                            }
-                            at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
-                            at_syntax::MatchPattern::Wildcard => unreachable!(),
-                        },
-                        Some(match_span),
-                    );
-                    match_op_indices.push(match_op_index);
-                }
-            }
+                idx
+            } else {
+                let match_op_index = chunk.code.len();
+                chunk.push(
+                    match arm.pattern {
+                        at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
+                        at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
+                        at_syntax::MatchPattern::OptionSome(_) => Op::MatchOptionSome(usize::MAX),
+                        at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
+                        at_syntax::MatchPattern::Wildcard => unreachable!(),
+                    },
+                    Some(match_span),
+                );
+                match_op_indices.push((arm_index, match_op_index));
+                match_op_index
+            };
+            arm_start_indices.push(arm_start);
 
             self.push_scope();
+            let mut binding_slot: Option<usize> = None;
+            let mut binding_span: Option<Span> = None;
             match &arm.pattern {
                 at_syntax::MatchPattern::ResultOk(ident)
                 | at_syntax::MatchPattern::ResultErr(ident)
                 | at_syntax::MatchPattern::OptionSome(ident) => {
                     let slot = self.bind_local_checked(&ident.name, ident.span)?;
                     chunk.push(Op::StoreLocal(slot), Some(ident.span));
+                    binding_slot = Some(slot);
+                    binding_span = Some(ident.span);
                 }
                 at_syntax::MatchPattern::OptionNone => {}
                 at_syntax::MatchPattern::Wildcard => {}
+            }
+
+            let mut guard_jump_index: Option<usize> = None;
+            if let Some(guard) = &arm.guard {
+                self.compile_expr(guard, chunk)?;
+                let jump_index = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), expr_span(guard));
+                guard_jump_index = Some(jump_index);
+            }
+
+            if is_wildcard && arm.guard.is_some() {
+                chunk.push(Op::Pop, Some(match_span));
             }
 
             self.compile_expr(&arm.body, chunk)?;
             let jump_index = chunk.code.len();
             chunk.push(Op::Jump(usize::MAX), None);
             end_jumps.push(jump_index);
+
+            if let Some(guard_jump_index) = guard_jump_index {
+                let guard_fail_index = chunk.code.len();
+                patch_jump(&mut chunk.code, guard_jump_index, guard_fail_index);
+
+                match arm.pattern {
+                    at_syntax::MatchPattern::ResultOk(_) => {
+                        let slot = binding_slot.ok_or_else(|| {
+                            compile_error("missing match binding".to_string(), Some(match_span))
+                        })?;
+                        let span = binding_span.or(Some(match_span));
+                        chunk.push(Op::LoadLocal(slot), span);
+                        chunk.push(Op::Builtin(Builtin::ResultOk), span);
+                    }
+                    at_syntax::MatchPattern::ResultErr(_) => {
+                        let slot = binding_slot.ok_or_else(|| {
+                            compile_error("missing match binding".to_string(), Some(match_span))
+                        })?;
+                        let span = binding_span.or(Some(match_span));
+                        chunk.push(Op::LoadLocal(slot), span);
+                        chunk.push(Op::Builtin(Builtin::ResultErr), span);
+                    }
+                    at_syntax::MatchPattern::OptionSome(_) => {
+                        let slot = binding_slot.ok_or_else(|| {
+                            compile_error("missing match binding".to_string(), Some(match_span))
+                        })?;
+                        let span = binding_span.or(Some(match_span));
+                        chunk.push(Op::LoadLocal(slot), span);
+                        chunk.push(Op::Builtin(Builtin::OptionSome), span);
+                    }
+                    at_syntax::MatchPattern::OptionNone => {
+                        chunk.push(Op::Builtin(Builtin::OptionNone), Some(match_span));
+                    }
+                    at_syntax::MatchPattern::Wildcard => {}
+                }
+
+                let guard_fail_jump = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), None);
+                guard_fail_jumps.push((arm_index, guard_fail_jump));
+            }
+
             self.pop_scope();
         }
 
@@ -1068,13 +1129,22 @@ impl Compiler {
             idx
         };
 
-        for (idx, match_index) in match_op_indices.iter().enumerate() {
-            let target = if idx + 1 < match_op_indices.len() {
-                match_op_indices[idx + 1]
+        for (arm_index, match_index) in &match_op_indices {
+            let target = if *arm_index + 1 < arm_start_indices.len() {
+                arm_start_indices[*arm_index + 1]
             } else {
                 fail_index
             };
             patch_jump(&mut chunk.code, *match_index, target);
+        }
+
+        for (arm_index, jump_index) in guard_fail_jumps {
+            let target = if arm_index + 1 < arm_start_indices.len() {
+                arm_start_indices[arm_index + 1]
+            } else {
+                fail_index
+            };
+            patch_jump(&mut chunk.code, jump_index, target);
         }
 
         let end = chunk.code.len();

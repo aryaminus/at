@@ -959,6 +959,15 @@ impl TypeChecker {
                     has_wildcard = true;
                 }
             }
+            if let Some(guard) = &arm.guard {
+                let guard_ty = self.check_expr(guard);
+                if guard_ty != SimpleType::Bool && guard_ty != SimpleType::Unknown {
+                    self.push_error(
+                        format!("match guard expects bool, got {}", format_type(&guard_ty)),
+                        expr_span(guard),
+                    );
+                }
+            }
             self.last_result_ok = None;
             self.last_result_err = None;
             self.last_option_inner = None;

@@ -121,6 +121,7 @@ pub enum InterpPart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 

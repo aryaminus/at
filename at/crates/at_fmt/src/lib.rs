@@ -334,6 +334,10 @@ fn format_expr_prec_indent(expr: &Expr, out: &mut String, parent_prec: u8, inden
             for arm in arms {
                 indent_to(out, indent + 4);
                 format_match_pattern(&arm.pattern, out);
+                if let Some(guard) = &arm.guard {
+                    out.push_str(" if ");
+                    format_expr_prec_indent(guard, out, 0, indent + 4);
+                }
                 out.push_str(" => ");
                 format_expr_prec_indent(&arm.body, out, 0, indent + 4);
                 out.push_str(",\n");
@@ -627,6 +631,9 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
         Expr::Match { value, arms, .. } => {
             collect_needs_expr(value, needs, import_aliases);
             for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_needs_expr(guard, needs, import_aliases);
+                }
                 collect_needs_expr(&arm.body, needs, import_aliases);
             }
         }
