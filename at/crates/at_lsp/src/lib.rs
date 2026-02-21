@@ -12,9 +12,10 @@ use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintParams, Location, MarkupContent, MarkupKind, Position, Range,
-    ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    InlayHintKind, InlayHintParams, Location, MarkupContent, MarkupKind, ParameterInformation,
+    ParameterLabel, Position, Range, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, SignatureInformation, TextDocumentContentChangeEvent,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use sha2::{Digest, Sha256};
 
@@ -28,6 +29,11 @@ pub fn run_stdio() -> Result<(), String> {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+        }),
         ..ServerCapabilities::default()
     };
 
@@ -224,6 +230,23 @@ fn handle_request(
             };
             Ok(Some(response))
         }
+        "textDocument/signatureHelp" => {
+            let params: SignatureHelpParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params
+                .text_document_position_params
+                .text_document
+                .uri
+                .clone();
+            let response = if let Some(text) = docs.get(&url) {
+                let module = get_cached_module(text, &url, doc_cache);
+                let help = provide_signature_help(text, module.as_ref(), module_cache, &params);
+                Response::new_ok(request.id.clone(), serde_json::to_value(help).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
         _ => Ok(None),
     }
 }
@@ -298,6 +321,53 @@ fn provide_hover(
             value: format!("import \"{}\" as {}", info.path, name),
         }),
         range: Some(span_to_range(text, info.span)),
+    })
+}
+
+fn provide_signature_help(
+    text: &str,
+    module: Option<&Module>,
+    module_cache: &mut HashMap<String, CachedModule>,
+    params: &SignatureHelpParams,
+) -> Option<SignatureHelp> {
+    let position = params.text_document_position_params.position;
+    let offset = position_to_offset(text, position);
+    let (func_name, qualifier, active_param) = find_call_at_offset(text, offset)?;
+    let signature = if let Some(qualifier) = qualifier {
+        let imports = module.map(collect_imports_from_module)?;
+        resolve_imported_function(
+            &imports,
+            module_cache,
+            &params.text_document_position_params.text_document.uri,
+            &qualifier,
+            &func_name,
+        )
+        .map(|info| info.signature)
+    } else {
+        let functions = module
+            .map(collect_functions_with_inferred)
+            .or_else(|| collect_functions(text))?;
+        functions.get(&func_name).map(|info| info.signature.clone())
+    }?;
+
+    let params_list = extract_signature_params(&signature);
+    let parameters: Vec<ParameterInformation> = params_list
+        .iter()
+        .map(|param| ParameterInformation {
+            label: ParameterLabel::Simple(param.clone()),
+            documentation: None,
+        })
+        .collect();
+    let sig_info = SignatureInformation {
+        label: signature,
+        documentation: None,
+        parameters: Some(parameters),
+        active_parameter: None,
+    };
+    Some(SignatureHelp {
+        signatures: vec![sig_info],
+        active_signature: Some(0),
+        active_parameter: Some(active_param as u32),
     })
 }
 
@@ -1076,6 +1146,62 @@ fn ident_at_offset_with_qualifier(text: &str, offset: usize) -> Option<(String, 
         return Some((name, Some(qualifier)));
     }
     Some((name, None))
+}
+
+fn find_call_at_offset(text: &str, offset: usize) -> Option<(String, Option<String>, usize)> {
+    let mut cursor = offset;
+    let mut depth = 0i32;
+    let mut saw_paren = false;
+    let mut arg_index = 0usize;
+    while cursor > 0 {
+        let prev = text[..cursor].chars().next_back()?;
+        if prev == ')' {
+            depth += 1;
+        } else if prev == '(' {
+            if depth == 0 {
+                saw_paren = true;
+                break;
+            }
+            depth -= 1;
+        } else if prev == ',' && depth == 0 {
+            arg_index += 1;
+        }
+        cursor -= prev.len_utf8();
+    }
+
+    if !saw_paren {
+        return None;
+    }
+
+    let mut name_end = cursor;
+    while name_end > 0 {
+        let prev = text[..name_end].chars().next_back()?;
+        if prev.is_whitespace() {
+            name_end -= prev.len_utf8();
+            continue;
+        }
+        break;
+    }
+
+    let (name, qualifier) = ident_at_offset_with_qualifier(text, name_end)?;
+    Some((name, qualifier, arg_index))
+}
+
+fn extract_signature_params(signature: &str) -> Vec<String> {
+    let start = signature.find('(').map(|idx| idx + 1).unwrap_or(0);
+    let end = signature.rfind(')').unwrap_or(signature.len());
+    let inner = if start <= end {
+        &signature[start..end]
+    } else {
+        ""
+    };
+    if inner.trim().is_empty() {
+        return Vec::new();
+    }
+    inner
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .collect()
 }
 
 fn split_qualified_ident(text: &str, offset: usize) -> Option<(String, String)> {
