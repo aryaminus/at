@@ -624,6 +624,9 @@ fn format_expr_prec_indent(
             if wrap {
                 out.push(')');
             }
+            if let Some(match_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, match_end, match_end + 1);
+            }
         }
         Expr::Block { stmts, tail, .. } => {
             out.push_str("{\n");
@@ -673,6 +676,9 @@ fn format_expr_prec_indent(
                 }
             }
             out.push(')');
+            if let Some(tuple_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, tuple_end, tuple_end + 1);
+            }
         }
         Expr::Range {
             start,
