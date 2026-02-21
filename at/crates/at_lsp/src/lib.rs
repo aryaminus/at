@@ -215,7 +215,13 @@ fn handle_request(
             let url = params.text_document_position.text_document.uri.clone();
             let response = if let Some(text) = docs.get(&url) {
                 let module = get_cached_module(text, &url, doc_cache);
-                let completion = provide_completion(text, module.as_ref(), &url, module_cache);
+                let completion = provide_completion(
+                    text,
+                    module.as_ref(),
+                    &url,
+                    module_cache,
+                    params.text_document_position.position,
+                );
                 Response::new_ok(
                     request.id.clone(),
                     serde_json::to_value(completion).unwrap(),
@@ -868,7 +874,9 @@ fn provide_completion(
     module: Option<&Module>,
     url: &Uri,
     module_cache: &mut HashMap<String, CachedModule>,
+    position: Position,
 ) -> CompletionResponse {
+    let prefix = completion_prefix_at(text, position);
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let functions = module
@@ -876,6 +884,9 @@ fn provide_completion(
         .or_else(|| collect_functions(text));
     if let Some(functions) = functions {
         for (name, info) in functions {
+            if !prefix_matches(&prefix, &name) {
+                continue;
+            }
             if seen.insert(name.clone()) {
                 items.push(CompletionItem {
                     label: name,
@@ -891,7 +902,7 @@ fn provide_completion(
         .or_else(|| collect_imports(text));
     if let Some(imports) = imports {
         for (alias, info) in imports {
-            if seen.insert(alias.clone()) {
+            if prefix_matches(&prefix, &alias) && seen.insert(alias.clone()) {
                 items.push(CompletionItem {
                     label: alias.clone(),
                     kind: Some(CompletionItemKind::MODULE),
@@ -902,6 +913,9 @@ fn provide_completion(
             if let Some(module) = load_module_cached(&info.path, url, module_cache) {
                 for (name, signature) in module.functions {
                     let label = format!("{alias}.{name}");
+                    if !prefix_matches(&prefix, &label) {
+                        continue;
+                    }
                     if seen.insert(label.clone()) {
                         items.push(CompletionItem {
                             label,
@@ -915,6 +929,9 @@ fn provide_completion(
         }
     }
     for builtin in builtin_completions() {
+        if !prefix_matches(&prefix, &builtin.label) {
+            continue;
+        }
         if seen.insert(builtin.label.clone()) {
             items.push(builtin);
         }
@@ -1328,6 +1345,29 @@ fn builtin_completions() -> Vec<CompletionItem> {
         });
     }
     items
+}
+
+fn completion_prefix_at(text: &str, position: Position) -> String {
+    let mut offset = position_to_offset(text, position);
+    if offset > text.len() {
+        offset = text.len();
+    }
+    let mut start = offset;
+    while start > 0 {
+        let prev = text[..start].chars().next_back().unwrap();
+        if !is_ident_continue(prev) {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+    text[start..offset].to_string()
+}
+
+fn prefix_matches(prefix: &str, candidate: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    candidate.starts_with(prefix)
 }
 
 fn merge_changes(
