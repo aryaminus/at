@@ -707,6 +707,9 @@ fn format_expr_prec_indent(
                 }
             }
             out.push('"');
+            if let Some(string_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, string_end, string_end + 1);
+            }
         }
         Expr::StructLiteral { name, fields, .. } => {
             out.push_str(&name.name);
@@ -723,6 +726,9 @@ fn format_expr_prec_indent(
                 }
             }
             out.push_str(" }");
+            if let Some(struct_end) = expr_end(expr) {
+                comment_state.emit_inline_between(out, struct_end, struct_end + 1);
+            }
         }
         Expr::EnumLiteral {
             name,
