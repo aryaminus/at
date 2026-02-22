@@ -126,6 +126,10 @@ curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-unkno
 sudo mv at-x86_64-unknown-linux-gnu /usr/local/bin/at
 ```
 
+### Publishing
+
+Releases are automated on merges to `main`. A version bump commit and `vX.Y.Z` tag are created by CI.
+
 ### Homebrew
 
 ```bash

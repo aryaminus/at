@@ -15,10 +15,8 @@
 
 ## Release steps
 
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
+- Merge changes to `main`.
+- CI will bump the version, commit, and tag automatically.
 
 ## What the CI does
 
