@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use at_lint;
@@ -1257,7 +1258,8 @@ fn resolve_remote_import(url: &str) -> Option<String> {
     if let Some(cached) = resolve_legacy_cached_path(&root, url) {
         return Some(cached);
     }
-    fetch_and_cache_remote(&root, url)
+    enqueue_remote_fetch(root, url.to_string());
+    None
 }
 
 fn resolve_legacy_cached_path(root: &std::path::Path, url: &str) -> Option<String> {
@@ -1282,6 +1284,28 @@ fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Option<String> {
     let path = cache_dir.join(format!("{hash}.at"));
     std::fs::write(&path, contents).ok()?;
     Some(path.to_string_lossy().to_string())
+}
+
+fn enqueue_remote_fetch(root: std::path::PathBuf, url: String) {
+    let inflight = remote_fetch_inflight();
+    {
+        let mut guard = inflight.lock().unwrap();
+        if guard.contains(&url) {
+            return;
+        }
+        guard.insert(url.clone());
+    }
+    std::thread::spawn(move || {
+        let _ = fetch_and_cache_remote(&root, &url);
+        let inflight = remote_fetch_inflight();
+        let mut guard = inflight.lock().unwrap();
+        guard.remove(&url);
+    });
+}
+
+fn remote_fetch_inflight() -> &'static Mutex<HashSet<String>> {
+    static INFLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn hash_contents(contents: &str) -> String {
