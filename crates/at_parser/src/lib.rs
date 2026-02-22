@@ -203,7 +203,7 @@ impl<'a> Parser<'a> {
         let mut errors = Vec::new();
         while self.current.kind != TokenKind::Eof {
             match self.current.kind {
-                TokenKind::Fn => match self.parse_function(false) {
+                TokenKind::Fn | TokenKind::Async => match self.parse_function(false) {
                     Ok(func) => functions.push(func),
                     Err(err) => {
                         errors.push(err);
@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
         let mut stmts = Vec::new();
         while self.current.kind != TokenKind::Eof {
             match self.current.kind {
-                TokenKind::Fn => functions.push(self.parse_function(false)?),
+                TokenKind::Fn | TokenKind::Async => functions.push(self.parse_function(false)?),
                 TokenKind::Pub => stmts.push(self.parse_stmt()?),
                 TokenKind::Tool => functions.push(self.parse_tool_function()?),
                 _ => stmts.push(self.parse_stmt()?),
@@ -3225,6 +3225,12 @@ fn f(a: int, b: int,) {
     return result;
 }
 "#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_async_fn_and_await() {
+        let source = "async fn fetch() {\n    return await load();\n}\n";
         assert!(parse_module(source).is_ok());
     }
 
