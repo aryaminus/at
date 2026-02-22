@@ -406,7 +406,20 @@ impl<'a> Parser<'a> {
 
     fn parse_tool_function(&mut self) -> Result<Function, ParseError> {
         self.advance();
+        let is_async = if self.current.kind == TokenKind::Async {
+            self.advance();
+            true
+        } else {
+            false
+        };
         self.expect(TokenKind::Fn)?;
+        if is_async {
+            return Err(ParseError::UnexpectedToken {
+                expected: "async tool fn is not supported".to_string(),
+                found: TokenKind::Async,
+                span: self.current.span,
+            });
+        }
         self.parse_function(true)
     }
 
@@ -424,13 +437,6 @@ impl<'a> Parser<'a> {
         if self.current.kind == TokenKind::Fn {
             self.advance();
         }
-        if is_async && is_tool {
-            return Err(ParseError::UnexpectedToken {
-                expected: "async tool fn is not supported".to_string(),
-                found: TokenKind::Tool,
-                span: self.current.span,
-            });
-        }
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LParen)?;
@@ -442,13 +448,6 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if is_async && self.current.kind == TokenKind::Needs {
-            return Err(ParseError::UnexpectedToken {
-                expected: "async fn cannot declare needs".to_string(),
-                found: self.current.kind.clone(),
-                span: self.current.span,
-            });
-        }
         let needs = if self.current.kind == TokenKind::Needs {
             self.advance();
             self.expect(TokenKind::LBrace)?;

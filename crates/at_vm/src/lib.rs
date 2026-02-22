@@ -25,6 +25,7 @@ pub enum Value {
     Option(Option<Rc<Value>>),
     Result(Result<Rc<Value>, Rc<Value>>),
     Closure(Rc<ClosureValue>),
+    Future(Rc<FutureValue>),
     Unit,
 }
 
@@ -32,6 +33,14 @@ pub enum Value {
 pub struct ClosureValue {
     func_id: usize,
     captures: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FutureValue {
+    func_id: usize,
+    captures: Vec<Value>,
+    args: Vec<Value>,
+    capabilities: HashSet<String>,
 }
 
 pub fn format_value(value: &Value) -> String {
@@ -42,6 +51,7 @@ pub fn format_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Unit => "unit".to_string(),
         Value::Closure(_) => "<closure>".to_string(),
+        Value::Future(_) => "<future>".to_string(),
         Value::Array(items) => format!(
             "[{}]",
             items
@@ -98,6 +108,7 @@ pub enum Op {
     StoreLocal(usize),
     GrantCapability(String),
     Call(usize, usize),
+    CallAsync(usize, usize),
     Builtin(Builtin),
     Assert,
     Try,
@@ -121,6 +132,7 @@ pub enum Op {
     },
     Closure(usize, usize),
     CallValue(usize),
+    Await,
     Range(bool),
     Map(usize),
     MapSpread(usize),
@@ -234,6 +246,7 @@ pub struct FunctionChunk {
     pub captures: usize,
     pub locals: usize,
     pub needs: Vec<String>,
+    pub is_async: bool,
     pub chunk: Chunk,
 }
 
@@ -305,6 +318,7 @@ pub struct Compiler {
     functions: HashMap<String, usize>,
     function_arity: HashMap<String, usize>,
     function_needs: HashMap<String, Vec<String>>,
+    function_async: HashMap<String, bool>,
     structs: HashSet<String>,
     enums: HashSet<String>,
     current_function: Option<String>,
@@ -482,6 +496,7 @@ impl Compiler {
             functions: HashMap::new(),
             function_arity: HashMap::new(),
             function_needs: HashMap::new(),
+            function_async: HashMap::new(),
             structs: HashSet::new(),
             enums: HashSet::new(),
             current_function: None,
@@ -498,6 +513,7 @@ impl Compiler {
         self.functions.clear();
         self.function_arity.clear();
         self.function_needs.clear();
+        self.function_async.clear();
         self.structs.clear();
         self.enums.clear();
         self.const_scopes.clear();
@@ -528,6 +544,8 @@ impl Compiler {
             self.functions.insert(func.name.name.clone(), id);
             self.function_arity
                 .insert(func.name.name.clone(), func.params.len());
+            self.function_async
+                .insert(func.name.name.clone(), func.is_async);
             let needs: Vec<String> = func.needs.iter().map(|ident| ident.name.clone()).collect();
             self.function_needs
                 .insert(func.name.name.clone(), needs.clone());
@@ -537,6 +555,7 @@ impl Compiler {
                 captures: 0,
                 locals: 0,
                 needs,
+                is_async: func.is_async,
                 chunk: Chunk::default(),
             });
         }
@@ -1251,7 +1270,17 @@ impl Compiler {
                         for arg in args {
                             self.compile_expr(arg, chunk)?;
                         }
-                        chunk.push(Op::Call(func_id, args.len()), Some(name.span));
+                        let op = if self
+                            .function_async
+                            .get(&func_name)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            Op::CallAsync(func_id, args.len())
+                        } else {
+                            Op::Call(func_id, args.len())
+                        };
+                        chunk.push(op, Some(name.span));
                         self.add_transitive_needs(&func_name);
                         return Ok(());
                     }
@@ -1482,7 +1511,17 @@ impl Compiler {
                     for arg in args {
                         self.compile_expr(arg, chunk)?;
                     }
-                    chunk.push(Op::Call(func_id, args.len()), Some(ident.span));
+                    let op = if self
+                        .function_async
+                        .get(&ident.name)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        Op::CallAsync(func_id, args.len())
+                    } else {
+                        Op::Call(func_id, args.len())
+                    };
+                    chunk.push(op, Some(ident.span));
                     self.add_transitive_needs(&ident.name);
                     return Ok(());
                 }
@@ -1499,6 +1538,7 @@ impl Compiler {
             }
             Expr::Await { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
+                chunk.push(Op::Await, expr_span(expr));
             }
             Expr::TryCatch {
                 try_block,
@@ -2144,6 +2184,7 @@ impl Compiler {
             captures: captures.len(),
             locals,
             needs: Vec::new(),
+            is_async: false,
             chunk: closure_chunk,
         });
 
@@ -2608,6 +2649,61 @@ pub struct Vm {
 }
 
 impl Vm {
+    fn run_future(&mut self, program: &Program, future: &FutureValue) -> Result<Value, VmError> {
+        let func = program.functions.get(future.func_id).ok_or_else(|| {
+            self.runtime_error(
+                format!("invalid function id: {}", future.func_id),
+                None,
+                program,
+            )
+        })?;
+        if !func.is_async {
+            return Err(self.runtime_error(
+                "await expects async function".to_string(),
+                None,
+                program,
+            ));
+        }
+        if let Some(max) = self.max_frames {
+            if self.frames.len() >= max {
+                return Err(self.runtime_error(
+                    format!("stack overflow: maximum call depth {} exceeded", max),
+                    None,
+                    program,
+                ));
+            }
+        }
+        let required_locals = func.params + func.captures;
+        let mut locals = self.take_locals(func.locals.max(required_locals));
+        for (idx, value) in future.captures.iter().cloned().enumerate() {
+            locals[idx] = value;
+        }
+        for (idx, value) in future.args.iter().cloned().enumerate() {
+            locals[func.captures + idx] = value;
+        }
+        let capabilities = future.capabilities.clone();
+        let saved_stack = std::mem::take(&mut self.stack);
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_instruction_count = self.instruction_count;
+
+        self.stack = Vec::new();
+        self.frames = Vec::new();
+        self.instruction_count = 0;
+        self.frames.push(Frame {
+            chunk_id: future.func_id,
+            ip: 0,
+            locals,
+            capabilities,
+        });
+        let result = self
+            .run_with_existing_frames(program)?
+            .unwrap_or(Value::Unit);
+
+        self.stack = saved_stack;
+        self.frames = saved_frames;
+        self.instruction_count = saved_instruction_count;
+        Ok(result)
+    }
     fn runtime_error(&self, message: String, span: Option<Span>, program: &Program) -> VmError {
         VmError::Runtime {
             message,
@@ -2727,7 +2823,10 @@ impl Vm {
             locals,
             capabilities,
         });
+        self.run_with_existing_frames(program)
+    }
 
+    fn run_with_existing_frames(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
         loop {
             // Check execution limit
             if let Some(max) = self.max_instructions {
@@ -2901,6 +3000,17 @@ impl Vm {
                     })?;
                     let closure = match callee {
                         Value::Closure(value) => value,
+                        Value::Future(future) => {
+                            if *arg_count != 0 {
+                                return Err(runtime_error_at(
+                                    "wrong arity: expected 0 args for future".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let result = self.run_future(program, &future)?;
+                            self.stack.push(result);
+                            continue;
+                        }
                         _ => {
                             return Err(runtime_error_at(
                                 "call expects closure".to_string(),
@@ -2951,6 +3061,42 @@ impl Vm {
                         locals,
                         capabilities,
                     });
+                }
+                Op::CallAsync(func_id, arg_count) => {
+                    let mut args = Vec::with_capacity(*arg_count);
+                    let mut index = *arg_count;
+                    while index > 0 {
+                        index -= 1;
+                        args.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    args.reverse();
+                    let func = program.functions.get(*func_id).ok_or_else(|| {
+                        runtime_error_at(
+                            format!("invalid function id: {func_id}"),
+                            span_at(chunk, frame_ip),
+                        )
+                    })?;
+                    if *arg_count != func.params {
+                        return Err(runtime_error_at(
+                            format!(
+                                "wrong arity: expected {} args, got {}",
+                                func.params, arg_count
+                            ),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let future = FutureValue {
+                        func_id: *func_id,
+                        captures: Vec::new(),
+                        args,
+                        capabilities: self.frames[frame_index].capabilities.clone(),
+                    };
+                    self.stack.push(Value::Future(Rc::new(future)));
                 }
                 Op::Builtin(builtin) => {
                     let result = match builtin {
@@ -3320,6 +3466,24 @@ impl Vm {
                         _ => {
                             return Err(self.runtime_error(
                                 "? expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
+                Op::Await => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Future(future) => {
+                            let result = self.run_future(program, &future)?;
+                            self.stack.push(result);
+                        }
+                        other => {
+                            return Err(self.runtime_error(
+                                format!("await expects future, got {}", format_value(&other)),
                                 self.current_span(program),
                                 program,
                             ))

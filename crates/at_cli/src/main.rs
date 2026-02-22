@@ -2581,6 +2581,7 @@ fn value_to_json(value: Value) -> JsonValue {
             JsonValue::Array(items.iter().cloned().map(value_to_json).collect::<Vec<_>>())
         }
         Value::Closure(_) => JsonValue::String("<closure>".to_string()),
+        Value::Future(_) => JsonValue::String("<future>".to_string()),
         Value::Option(Some(inner)) => value_to_json((*inner).clone()),
         Value::Option(None) => JsonValue::Null,
         Value::Result(Ok(inner)) => json!({

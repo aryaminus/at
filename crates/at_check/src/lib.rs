@@ -27,6 +27,7 @@ enum SimpleType {
 struct FuncSig {
     params: Vec<SimpleType>,
     return_ty: SimpleType,
+    is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -164,8 +165,14 @@ impl TypeChecker {
                 .as_ref()
                 .map(|ty| self.type_from_ref(ty))
                 .unwrap_or(SimpleType::Unknown);
-            self.functions
-                .insert(func.name.name.clone(), FuncSig { params, return_ty });
+            self.functions.insert(
+                func.name.name.clone(),
+                FuncSig {
+                    params,
+                    return_ty,
+                    is_async: func.is_async,
+                },
+            );
         }
     }
 
@@ -195,12 +202,6 @@ impl TypeChecker {
         self.result_err.clear();
         self.capabilities.clear();
         self.push_scope();
-        if func.is_async && !func.needs.is_empty() {
-            self.push_error(
-                "async fn cannot declare needs".to_string(),
-                Some(func.name.span),
-            );
-        }
         for need in &func.needs {
             self.insert_capability(&need.name);
         }
@@ -2283,9 +2284,15 @@ impl TypeChecker {
                 return result;
             }
             if let Some(sig) = self.functions.get(&ident.name).cloned() {
-                self.check_function_needs(&ident.name, Some(ident.span));
+                if !sig.is_async {
+                    self.check_function_needs(&ident.name, Some(ident.span));
+                }
                 self.check_call_args(&ident.name, &sig, args, Some(ident.span));
-                return sig.return_ty;
+                return if sig.is_async {
+                    SimpleType::Unknown
+                } else {
+                    sig.return_ty
+                };
             }
             self.push_error(
                 format!("unknown function: {}", ident.name),
@@ -2318,9 +2325,15 @@ impl TypeChecker {
                 }
                 let func_name = format!("{}.{}", base_ident.name, name.name);
                 if let Some(sig) = self.functions.get(&func_name).cloned() {
-                    self.check_function_needs(&func_name, Some(name.span));
+                    if !sig.is_async {
+                        self.check_function_needs(&func_name, Some(name.span));
+                    }
                     self.check_call_args(&func_name, &sig, args, Some(name.span));
-                    return sig.return_ty;
+                    return if sig.is_async {
+                        SimpleType::Unknown
+                    } else {
+                        sig.return_ty
+                    };
                 }
                 self.push_error(format!("unknown function: {func_name}"), Some(name.span));
                 for arg in args {
