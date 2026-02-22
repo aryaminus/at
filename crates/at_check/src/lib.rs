@@ -84,6 +84,7 @@ struct TypeChecker {
     type_aliases: HashMap<String, TypeRef>,
     enums: HashMap<String, (Vec<Ident>, Vec<EnumVariant>)>,
     locals: Vec<HashMap<String, SimpleType>>,
+    consts: Vec<HashSet<String>>,
     option_inner: Vec<HashMap<String, SimpleType>>,
     result_ok: Vec<HashMap<String, SimpleType>>,
     result_err: Vec<HashMap<String, SimpleType>>,
@@ -110,6 +111,7 @@ impl TypeChecker {
             type_aliases: HashMap::new(),
             enums: HashMap::new(),
             locals: Vec::new(),
+            consts: Vec::new(),
             option_inner: Vec::new(),
             result_ok: Vec::new(),
             result_err: Vec::new(),
@@ -347,6 +349,32 @@ impl TypeChecker {
             Stmt::TypeAlias { .. } => {}
             Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
+            Stmt::Const {
+                name, ty, value, ..
+            } => {
+                self.last_option_inner = None;
+                self.last_result_ok = None;
+                self.last_result_err = None;
+                if self.is_local_in_current_scope(&name.name) {
+                    self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
+                }
+                let value_ty = self.check_expr(value);
+                let declared = ty.as_ref().map(|ty| self.type_from_ref(ty));
+                if let Some(expected) = declared.clone() {
+                    self.check_compatible(
+                        &expected,
+                        &value_ty,
+                        &format!("type mismatch for {}", name.name),
+                        Some(name.span),
+                    );
+                    self.bind_local(name, expected);
+                } else {
+                    self.bind_or_refine_local(name, value_ty.clone());
+                    self.infer_inner_from_expr(value, &value_ty);
+                    self.bind_inner_types(name, &value_ty);
+                }
+                self.bind_const(name);
+            }
             Stmt::Let {
                 name, ty, value, ..
             } => {
@@ -402,6 +430,12 @@ impl TypeChecker {
                 self.last_option_inner = None;
                 self.last_result_ok = None;
                 self.last_result_err = None;
+                if self.is_const(name) {
+                    self.push_error(
+                        format!("cannot assign to const {}", name.name),
+                        Some(name.span),
+                    );
+                }
                 let existing = self.resolve_local(name);
                 if existing.is_none() {
                     self.push_error(
@@ -445,12 +479,28 @@ impl TypeChecker {
                 }
             }
             Stmt::SetMember { base, value, .. } => {
+                if let Expr::Ident(ident) = base {
+                    if self.is_const(ident) {
+                        self.push_error(
+                            format!("cannot assign to const {}", ident.name),
+                            Some(ident.span),
+                        );
+                    }
+                }
                 let _ = self.check_expr(base);
                 self.check_expr(value);
             }
             Stmt::SetIndex {
                 base, index, value, ..
             } => {
+                if let Expr::Ident(ident) = base {
+                    if self.is_const(ident) {
+                        self.push_error(
+                            format!("cannot assign to const {}", ident.name),
+                            Some(ident.span),
+                        );
+                    }
+                }
                 let base_ty = self.check_expr(base);
                 let index_ty = self.check_expr(index);
                 let value_ty = self.check_expr(value);
@@ -530,6 +580,26 @@ impl TypeChecker {
                 }
                 self.pop_scope();
                 self.loop_depth -= 1;
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.check_expr(condition);
+                self.push_scope();
+                for stmt in then_branch {
+                    self.check_stmt(stmt);
+                }
+                self.pop_scope();
+                if let Some(else_branch) = else_branch {
+                    self.push_scope();
+                    for stmt in else_branch {
+                        self.check_stmt(stmt);
+                    }
+                    self.pop_scope();
+                }
             }
             Stmt::For {
                 for_span,
@@ -670,6 +740,57 @@ impl TypeChecker {
                 right,
                 ..
             } => self.check_binary(left, *op, *op_span, right),
+            Expr::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let cond_ty = self.check_expr(condition);
+                if cond_ty != SimpleType::Bool
+                    && cond_ty != SimpleType::Int
+                    && cond_ty != SimpleType::Unknown
+                {
+                    self.push_error(
+                        format!("ternary expects bool or int, got {}", format_type(&cond_ty)),
+                        expr_span(condition),
+                    );
+                }
+                let then_ty = self.check_expr(then_branch);
+                let else_ty = self.check_expr(else_branch);
+                if self.types_compatible(&then_ty, &else_ty) {
+                    then_ty
+                } else if self.types_compatible(&else_ty, &then_ty) {
+                    else_ty
+                } else if then_ty == SimpleType::Unknown {
+                    else_ty
+                } else if else_ty == SimpleType::Unknown {
+                    then_ty
+                } else {
+                    self.push_error(
+                        format!(
+                            "ternary branch mismatch: {} vs {}",
+                            format_type(&then_ty),
+                            format_type(&else_ty)
+                        ),
+                        expr_span(then_branch),
+                    );
+                    SimpleType::Unknown
+                }
+            }
+            Expr::ChainedComparison { items, .. } => {
+                for item in items {
+                    let ty = self.check_expr(item);
+                    if ty != SimpleType::Int && ty != SimpleType::Float && ty != SimpleType::Unknown
+                    {
+                        self.push_error(
+                            format!("comparison expects number, got {}", format_type(&ty)),
+                            expr_span(item),
+                        );
+                    }
+                }
+                SimpleType::Bool
+            }
             Expr::Unary {
                 op, op_span, expr, ..
             } => self.check_unary(*op, *op_span, expr),
@@ -1742,6 +1863,34 @@ impl TypeChecker {
                         self.push_error("match expects int value".to_string(), Some(match_span));
                     }
                 }
+                at_syntax::MatchPattern::Bool(_, _) => {
+                    if value_ty != SimpleType::Bool && value_ty != SimpleType::Unknown {
+                        self.push_error("match expects bool value".to_string(), Some(match_span));
+                    }
+                }
+                at_syntax::MatchPattern::String(_, _) => {
+                    if value_ty != SimpleType::String && value_ty != SimpleType::Unknown {
+                        self.push_error("match expects string value".to_string(), Some(match_span));
+                    }
+                }
+                at_syntax::MatchPattern::Tuple { items, .. } => {
+                    if let SimpleType::Tuple(inner_items) = &value_ty {
+                        if inner_items.len() != items.len() {
+                            self.push_error(
+                                "match expects tuple with matching length".to_string(),
+                                Some(match_span),
+                            );
+                        } else {
+                            for (item, inner_ty) in items.iter().zip(inner_items.iter()) {
+                                if let at_syntax::MatchPattern::Binding { name, .. } = item {
+                                    self.bind_local(name, inner_ty.clone());
+                                }
+                            }
+                        }
+                    } else if value_ty != SimpleType::Unknown {
+                        self.push_error("match expects tuple value".to_string(), Some(match_span));
+                    }
+                }
                 at_syntax::MatchPattern::Struct { name, fields, .. } => {
                     let struct_fields = self.structs.get(&name.name).cloned();
                     if struct_fields.is_none() {
@@ -1888,6 +2037,18 @@ impl TypeChecker {
                     if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
                     {
                         self.push_error("match expects option value".to_string(), Some(match_span));
+                    }
+                }
+                at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+                    self.bind_local(name, value_ty.clone());
+                    if let at_syntax::MatchPattern::Tuple { items, .. } = pattern.as_ref() {
+                        if let SimpleType::Tuple(inner_items) = &value_ty {
+                            for (item, inner_ty) in items.iter().zip(inner_items.iter()) {
+                                if let at_syntax::MatchPattern::Binding { name, .. } = item {
+                                    self.bind_local(name, inner_ty.clone());
+                                }
+                            }
+                        }
                     }
                 }
                 at_syntax::MatchPattern::Wildcard(_) => {
@@ -2639,6 +2800,7 @@ impl TypeChecker {
 
     fn push_scope(&mut self) {
         self.locals.push(HashMap::new());
+        self.consts.push(HashSet::new());
         self.option_inner.push(HashMap::new());
         self.result_ok.push(HashMap::new());
         self.result_err.push(HashMap::new());
@@ -2647,6 +2809,7 @@ impl TypeChecker {
 
     fn pop_scope(&mut self) {
         self.locals.pop();
+        self.consts.pop();
         self.option_inner.pop();
         self.result_ok.pop();
         self.result_err.pop();
@@ -2684,6 +2847,19 @@ impl TypeChecker {
         if let Some(scope) = self.locals.last_mut() {
             scope.insert(name.name.clone(), ty);
         }
+    }
+
+    fn bind_const(&mut self, name: &Ident) {
+        if let Some(scope) = self.consts.last_mut() {
+            scope.insert(name.name.clone());
+        }
+    }
+
+    fn is_const(&self, name: &Ident) -> bool {
+        self.consts
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(&name.name))
     }
 
     fn bind_inner_types(&mut self, name: &Ident, ty: &SimpleType) {
@@ -3144,6 +3320,8 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Ident(ident) => Some(ident.span),
         Expr::Unary { op_span, .. } => Some(*op_span),
         Expr::Binary { op_span, .. } => Some(*op_span),
+        Expr::Ternary { span, .. } => Some(*span),
+        Expr::ChainedComparison { span, .. } => Some(*span),
         Expr::If { if_span, .. } => Some(*if_span),
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
@@ -3752,6 +3930,21 @@ fn f() {
         assert!(errors
             .iter()
             .any(|err| err.message.contains("result ok inner mismatch for x")));
+    }
+
+    #[test]
+    fn errors_on_set_const() {
+        let source = r#"
+fn f() {
+    const value = 1;
+    set value = 2;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("cannot assign to const")));
     }
 
     #[test]

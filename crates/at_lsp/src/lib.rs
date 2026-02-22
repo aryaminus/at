@@ -1639,6 +1639,8 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             let end = expr_span(right)?.end;
             Some(Span::new(start, end))
         }
+        at_syntax::Expr::Ternary { span, .. } => Some(*span),
+        at_syntax::Expr::ChainedComparison { span, .. } => Some(*span),
         at_syntax::Expr::If {
             condition,
             then_branch,
@@ -1692,12 +1694,13 @@ fn stmt_span(stmt: &at_syntax::Stmt) -> Span {
         at_syntax::Stmt::TypeAlias { name, .. } => name.span,
         at_syntax::Stmt::Enum { name, .. } => name.span,
         at_syntax::Stmt::Struct { name, .. } => name.span,
-        at_syntax::Stmt::Let { name, .. } => name.span,
+        at_syntax::Stmt::Const { name, .. } | at_syntax::Stmt::Let { name, .. } => name.span,
         at_syntax::Stmt::Using { name, .. } => name.span,
         at_syntax::Stmt::Set { name, .. } => name.span,
         at_syntax::Stmt::SetMember { field, .. } => field.span,
         at_syntax::Stmt::SetIndex { base, .. } => expr_span(base).unwrap_or(Span::new(0, 0)),
         at_syntax::Stmt::While { while_span, .. } => *while_span,
+        at_syntax::Stmt::If { if_span, .. } => *if_span,
         at_syntax::Stmt::For { for_span, .. } => *for_span,
         at_syntax::Stmt::Break { break_span, .. } => *break_span,
         at_syntax::Stmt::Continue { continue_span, .. } => *continue_span,

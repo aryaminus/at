@@ -1,7 +1,7 @@
 // Comprehensive example demonstrating all at language features
 
 // Basic arithmetic
-fn basic_math() -> int {
+pub fn basic_math() -> int {
     let a = 10;
     let b = 3;
     
@@ -49,7 +49,7 @@ fn basic_math() -> int {
 }
 
 // Float arithmetic
-fn float_math() -> float {
+pub fn float_math() -> float {
     let pi = 3.14159;
     let r = 5.0;
     let area = pi * r * r;
@@ -61,7 +61,7 @@ fn float_math() -> float {
 }
 
 // Strings and concatenation
-fn string_ops() -> string {
+pub fn string_ops() -> string {
     let greeting = "Hello";
     let target = "World";
     let message = greeting + ", " + target + "!";
@@ -76,8 +76,14 @@ fn string_ops() -> string {
     return message;
 }
 
+// Ternary operator
+pub fn ternary_demo(n: int) -> string {
+    let label = n > 0 ? "positive" : "non-positive";
+    return label;
+}
+
 // Logical operators
-fn logical_ops() -> bool {
+pub fn logical_ops() -> bool {
     let a = true;
     let b = false;
     
@@ -102,8 +108,13 @@ fn logical_ops() -> bool {
     return combined;
 }
 
+// Chained comparisons
+pub fn chained_comparisons(a: int, b: int, c: int) -> bool {
+    return a < b < c;
+}
+
 // Closures and higher-order functions
-fn closure_demo() -> int {
+pub fn closure_demo() -> int {
     let values = [1, 2, 3, 4];
     let doubled = map(values, |x| x * 2);
     let sum = reduce(doubled, 0, |acc, x| acc + x);
@@ -111,7 +122,7 @@ fn closure_demo() -> int {
 }
 
 // Control flow: if expressions
-fn control_flow(n: int) -> string {
+pub fn control_flow(n: int) -> string {
     // If as expression
     let sign = if n < 0 {
         "negative"
@@ -127,7 +138,7 @@ fn control_flow(n: int) -> string {
 }
 
 // While loop with break and continue
-fn loop_demo() -> int {
+pub fn loop_demo() -> int {
     let i = 0;
     let sum = 0;
     
@@ -154,8 +165,16 @@ fn loop_demo() -> int {
     return sum;
 }
 
+// If statement form
+pub fn if_statement_demo(flag: bool) -> string {
+    if flag {
+        return "yes";
+    }
+    return "no";
+}
+
 // For loop with arrays
-fn for_loop_demo() -> int {
+pub fn for_loop_demo() -> int {
     let numbers = [1, 2, 3, 4, 5];
     let sum = 0;
     
@@ -167,7 +186,7 @@ fn for_loop_demo() -> int {
 }
 
 // Arrays and operations
-fn array_ops() -> int {
+pub fn array_ops() -> int {
     let arr = [10, 20, 30];
     
     // Length
@@ -198,8 +217,12 @@ fn array_ops() -> int {
     return first;
 }
 
+// Consts
+const max_retries: int = 3;
+
 // Map literals and casts
-fn map_literals_and_casts() {
+pub fn map_literals_and_casts() {
+    const limit = max_retries;
     let grades = map { "taylor": 3, "casey": 5 };
     let taylor = grades["taylor"];
     print("Taylor grade: ");
@@ -217,13 +240,13 @@ fn map_literals_and_casts() {
 }
 
 // Try/catch/finally with result
-fn try_catch_demo() -> int {
+pub fn try_catch_demo() -> int {
     let result = try { ok(21) } catch { 0 } finally { print("cleanup"); };
     return result * 2;
 }
 
 // Union type usage
-fn union_demo(value: int | string) -> int {
+pub fn union_demo(value: int | string) -> int {
     if value is int {
         return value;
     }
@@ -231,7 +254,7 @@ fn union_demo(value: int | string) -> int {
 }
 
 // Pattern matching with result
-fn safe_divide(a: int, b: int) -> result<int, string> {
+pub fn safe_divide(a: int, b: int) -> result<int, string> {
     return if b == 0 {
         err("division by zero")
     } else {
@@ -239,7 +262,7 @@ fn safe_divide(a: int, b: int) -> result<int, string> {
     };
 }
 
-fn match_result(a: int, b: int) -> string {
+pub fn match_result(a: int, b: int) -> string {
     let result = safe_divide(a, b);
 
     let message = match result {
@@ -251,7 +274,7 @@ fn match_result(a: int, b: int) -> string {
 }
 
 // Pattern matching with option
-fn find_in_array(arr: array<int>, target: int) -> option<int> {
+pub fn find_in_array(arr: array<int>, target: int) -> option<int> {
     let i = 0;
     while i < len(arr) {
         if arr[i] == target {
@@ -264,7 +287,7 @@ fn find_in_array(arr: array<int>, target: int) -> option<int> {
     return none();
 }
 
-fn match_option(arr: array<int>, target: int) -> string {
+pub fn match_option(arr: array<int>, target: int) -> string {
     let found = find_in_array(arr, target);
 
     let result = match found {
@@ -275,8 +298,17 @@ fn match_option(arr: array<int>, target: int) -> string {
     return result;
 }
 
+// Match patterns: tuple, literals, binding
+pub fn match_patterns(value: (int, bool)) -> string {
+    return match value {
+        (x, true) => "true: " + x,
+        (x, false) => "false: " + x,
+        _ @ (a, b) => "pair: " + a,
+    };
+}
+
 // Try operator
-fn try_demo() -> result<int, string> {
+pub fn try_demo() -> result<int, string> {
     let a = safe_divide(10, 2)?;
     let b = safe_divide(a, 2)?;
     let c = safe_divide(b, 1)?;
@@ -284,17 +316,17 @@ fn try_demo() -> result<int, string> {
 }
 
 // Structs and enums
-struct Point {
+pub struct Point {
     x: int,
     y: int,
 }
 
-enum Status {
+pub enum Status {
     Ok(int),
     Err(string),
 }
 
-fn struct_enum_demo() -> string {
+pub fn struct_enum_demo() -> string {
     let origin = Point { x: 0, y: 0 };
     let status = Status::Ok(origin.x + origin.y);
     return match status {
@@ -304,7 +336,7 @@ fn struct_enum_demo() -> string {
 }
 
 // Functions with needs
-fn get_timestamp() -> int needs { time } {
+pub fn get_timestamp() -> int needs { time } {
     return time.now();
 }
 
@@ -329,6 +361,18 @@ test "logical operators" {
     assert(result);
 }
 
+test "ternary operator" {
+    let pos = ternary_demo(3);
+    let non_pos = ternary_demo(0);
+    assert_eq(pos, "positive");
+    assert_eq(non_pos, "non-positive");
+}
+
+test "chained comparisons" {
+    assert(chained_comparisons(1, 2, 3));
+    assert(!chained_comparisons(3, 2, 1));
+}
+
 test "control flow" {
     let neg = control_flow(-5);
     let zero = control_flow(0);
@@ -337,6 +381,11 @@ test "control flow" {
     assert_eq(neg, "negative");
     assert_eq(zero, "zero");
     assert_eq(pos, "positive");
+}
+
+test "if statement" {
+    assert_eq(if_statement_demo(true), "yes");
+    assert_eq(if_statement_demo(false), "no");
 }
 
 test "loops" {
@@ -350,6 +399,11 @@ test "loops" {
 test "array operations" {
     let first = array_ops();
     assert_eq(first, 10);
+}
+
+test "consts" {
+    let retries = max_retries;
+    assert_eq(retries, 3);
 }
 
 test "result matching" {
@@ -403,6 +457,10 @@ fn main() {
     print(control_flow(-5));
     print(control_flow(0));
     print(control_flow(5));
+
+    print("\n=== If Statement ===");
+    print(if_statement_demo(true));
+    print(if_statement_demo(false));
     
     print("\n=== Loop Demo ===");
     print(loop_demo());

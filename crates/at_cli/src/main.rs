@@ -1183,6 +1183,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
                     merged_aliases.push((alias_name, import_path.display().to_string()));
                     merged_aliases.extend(imported.import_aliases);
                     merged_functions.extend(imported.module.functions);
+                    merged_stmts.extend(imported.module.stmts);
                     continue;
                 }
                 if path.starts_with("http://") || path.starts_with("https://") {
@@ -1194,6 +1195,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
                     merged_aliases.push((alias_name, import_path.display().to_string()));
                     merged_aliases.extend(imported.import_aliases);
                     merged_functions.extend(imported.module.functions);
+                    merged_stmts.extend(imported.module.stmts);
                     continue;
                 }
                 let import_path = base_dir.join(path);
@@ -1204,6 +1206,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
                 merged_aliases.push((alias_name, import_path.display().to_string()));
                 merged_aliases.extend(imported.import_aliases);
                 merged_functions.extend(imported.module.functions);
+                merged_stmts.extend(imported.module.stmts);
             }
             other => merged_stmts.push(other),
         }
@@ -1223,7 +1226,21 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
 
 fn prefix_module(module: &mut Module, alias: &str) {
     for func in &mut module.functions {
-        func.name.name = format!("{}.{}", alias, func.name.name);
+        if func.is_pub {
+            func.name.name = format!("{}.{}", alias, func.name.name);
+        }
+    }
+    for stmt in &mut module.stmts {
+        match stmt {
+            Stmt::Struct { name, is_pub, .. }
+            | Stmt::Enum { name, is_pub, .. }
+            | Stmt::TypeAlias { name, is_pub, .. } => {
+                if *is_pub {
+                    name.name = format!("{}.{}", alias, name.name);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

@@ -30,6 +30,8 @@ pub enum TokenKind {
     Continue,
     Return,
     Let,
+    Const,
+    Pub,
     Ident(String),
     True,
     False,
@@ -66,6 +68,7 @@ pub enum TokenKind {
     Colon,
     ColonColon,
     Question,
+    At,
     LParen,
     RParen,
     LBracket,
@@ -203,6 +206,13 @@ impl<'a> Parser<'a> {
                         self.recover_to_function_end();
                     }
                 },
+                TokenKind::Pub => match self.parse_stmt() {
+                    Ok(stmt) => stmts.push(stmt),
+                    Err(err) => {
+                        errors.push(err);
+                        self.recover_to_stmt_boundary();
+                    }
+                },
                 TokenKind::Tool => match self.parse_tool_function() {
                     Ok(func) => functions.push(func),
                     Err(err) => {
@@ -236,6 +246,7 @@ impl<'a> Parser<'a> {
         while self.current.kind != TokenKind::Eof {
             match self.current.kind {
                 TokenKind::Fn => functions.push(self.parse_function(false)?),
+                TokenKind::Pub => stmts.push(self.parse_stmt()?),
                 TokenKind::Tool => functions.push(self.parse_tool_function()?),
                 _ => stmts.push(self.parse_stmt()?),
             }
@@ -263,9 +274,11 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 TokenKind::Fn
+                | TokenKind::Pub
                 | TokenKind::Tool
                 | TokenKind::Import
                 | TokenKind::Let
+                | TokenKind::Const
                 | TokenKind::Using
                 | TokenKind::Set
                 | TokenKind::Return
@@ -304,11 +317,13 @@ impl<'a> Parser<'a> {
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match &self.current.kind {
+            TokenKind::Pub => self.parse_pub_stmt(),
             TokenKind::Import => self.parse_import_stmt(),
             TokenKind::Type => self.parse_type_alias_stmt(),
             TokenKind::Enum => self.parse_enum_stmt(),
             TokenKind::Struct => self.parse_struct_stmt(),
             TokenKind::Let => self.parse_let_stmt(),
+            TokenKind::Const => self.parse_const_stmt(),
             TokenKind::Using => self.parse_using_stmt(),
             TokenKind::Set => self.parse_set_stmt(),
             TokenKind::Return => self.parse_return_stmt(),
@@ -319,14 +334,8 @@ impl<'a> Parser<'a> {
             TokenKind::Continue => self.parse_continue_stmt(),
             TokenKind::LBrace => self.parse_block_stmt(),
             TokenKind::If => {
-                let expr = self.parse_if_expr()?;
-                if self.current.kind == TokenKind::Semicolon {
-                    self.advance();
-                }
-                Ok(Stmt::Expr {
-                    id: self.alloc_id(),
-                    expr,
-                })
+                let stmt = self.parse_if_stmt()?;
+                Ok(stmt)
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -339,6 +348,56 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let if_span = self.current.span;
+        self.advance();
+        let condition = self.parse_expr()?;
+        let then_branch = self.parse_block_stmt_list()?;
+        let else_branch = if self.current.kind == TokenKind::Else {
+            self.advance();
+            if self.current.kind == TokenKind::If {
+                let nested = self.parse_if_stmt()?;
+                Some(vec![nested])
+            } else {
+                Some(self.parse_block_stmt_list()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::If {
+            id: self.alloc_id(),
+            if_span,
+            condition,
+            then_branch,
+            else_branch,
+        })
+    }
+
+    fn parse_block_stmt_list(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.expect(TokenKind::LBrace)?;
+        let mut stmts = Vec::new();
+        while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
+            stmts.push(self.parse_stmt()?);
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(stmts)
+    }
+
+    fn parse_pub_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        match self.current.kind {
+            TokenKind::Struct => self.parse_struct_stmt_with_pub(true),
+            TokenKind::Enum => self.parse_enum_stmt_with_pub(true),
+            TokenKind::Type => self.parse_type_alias_stmt_with_pub(true),
+            TokenKind::Import => self.parse_import_stmt_with_pub(true),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "declaration after pub".to_string(),
+                found: self.current.kind.clone(),
+                span: self.current.span,
+            }),
+        }
+    }
+
     fn parse_tool_function(&mut self) -> Result<Function, ParseError> {
         self.advance();
         self.expect(TokenKind::Fn)?;
@@ -346,6 +405,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self, is_tool: bool) -> Result<Function, ParseError> {
+        let mut is_pub = false;
+        if self.current.kind == TokenKind::Pub {
+            is_pub = true;
+            self.advance();
+        }
         if self.current.kind == TokenKind::Fn {
             self.advance();
         }
@@ -378,6 +442,7 @@ impl<'a> Parser<'a> {
         Ok(Function {
             id: self.alloc_id(),
             name,
+            is_pub,
             type_params,
             params,
             return_ty,
@@ -407,7 +472,31 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_const_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let ident = self.expect_ident()?;
+        let ty = if self.current.kind == TokenKind::Colon {
+            self.advance();
+            Some(self.parse_type_ref()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::Equals)?;
+        let value = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Const {
+            id: self.alloc_id(),
+            name: ident,
+            ty,
+            value,
+        })
+    }
+
     fn parse_import_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_import_stmt_with_pub(false)
+    }
+
+    fn parse_import_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         self.advance();
         let path = match &self.current.kind {
             TokenKind::String(value) => {
@@ -430,10 +519,15 @@ impl<'a> Parser<'a> {
             id: self.alloc_id(),
             path,
             alias,
+            is_pub,
         })
     }
 
     fn parse_type_alias_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_type_alias_stmt_with_pub(false)
+    }
+
+    fn parse_type_alias_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         self.advance();
         let name = self.expect_ident()?;
         self.expect(TokenKind::Equals)?;
@@ -443,10 +537,15 @@ impl<'a> Parser<'a> {
             id: self.alloc_id(),
             name,
             ty,
+            is_pub,
         })
     }
 
     fn parse_enum_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_enum_stmt_with_pub(false)
+    }
+
+    fn parse_enum_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         self.advance();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
@@ -483,10 +582,15 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             variants,
+            is_pub,
         })
     }
 
     fn parse_struct_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.parse_struct_stmt_with_pub(false)
+    }
+
+    fn parse_struct_stmt_with_pub(&mut self, is_pub: bool) -> Result<Stmt, ParseError> {
         self.advance();
         let name = self.expect_ident()?;
         let type_params = self.parse_type_params()?;
@@ -517,6 +621,7 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             fields,
+            is_pub,
         })
     }
 
@@ -866,7 +971,27 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        self.parse_ternary()
+    }
+
+    fn parse_ternary(&mut self) -> Result<Expr, ParseError> {
+        let condition = self.parse_or()?;
+        if self.current.kind != TokenKind::Question {
+            return Ok(condition);
+        }
+        let start = expr_span_start(&condition).unwrap_or(self.current.span.start);
+        self.advance();
+        let then_branch = self.parse_expr()?;
+        self.expect(TokenKind::Colon)?;
+        let else_branch = self.parse_ternary()?;
+        let end = expr_span_end(&else_branch).unwrap_or(self.current.span.end);
+        Ok(Expr::Ternary {
+            span: Span::new(start, end),
+            id: self.alloc_id(),
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        })
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
@@ -931,7 +1056,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_bitwise_or()?;
+        let expr = self.parse_bitwise_or()?;
+        let mut items = vec![expr];
+        let mut ops = Vec::new();
         loop {
             let (op, span) = match self.current.kind {
                 TokenKind::Less => (at_syntax::BinaryOp::Lt, self.current.span),
@@ -942,15 +1069,21 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let right = self.parse_bitwise_or()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                op_span: span,
-                id: self.alloc_id(),
-                right: Box::new(right),
-            };
+            ops.push((op, span));
+            items.push(right);
         }
-        Ok(expr)
+        if ops.is_empty() {
+            Ok(items.remove(0))
+        } else {
+            let start = expr_span_start(&items[0]).unwrap_or(self.current.span.start);
+            let end = expr_span_end(items.last().unwrap()).unwrap_or(self.current.span.end);
+            Ok(Expr::ChainedComparison {
+                span: Span::new(start, end),
+                id: self.alloc_id(),
+                items,
+                ops,
+            })
+        }
     }
 
     fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
@@ -1161,6 +1294,9 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.current.kind == TokenKind::Question {
+                if self.question_starts_ternary() {
+                    break;
+                }
                 self.advance();
                 expr = Expr::Try(Box::new(expr), self.alloc_id());
                 continue;
@@ -1561,6 +1697,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Import
                 | TokenKind::Type
                 | TokenKind::Let
+                | TokenKind::Const
                 | TokenKind::Using
                 | TokenKind::Set
                 | TokenKind::Struct
@@ -1570,7 +1707,8 @@ impl<'a> Parser<'a> {
                 | TokenKind::For
                 | TokenKind::Break
                 | TokenKind::Continue
-                | TokenKind::LBrace => {
+                | TokenKind::LBrace
+                | TokenKind::If => {
                     stmts.push(self.parse_stmt()?);
                 }
                 _ => {
@@ -1691,10 +1829,23 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(MatchPattern::Wildcard(self.alloc_id()));
         }
+        if self.current.kind == TokenKind::True {
+            self.advance();
+            return Ok(MatchPattern::Bool(true, self.alloc_id()));
+        }
+        if self.current.kind == TokenKind::False {
+            self.advance();
+            return Ok(MatchPattern::Bool(false, self.alloc_id()));
+        }
         if let TokenKind::Int(value) = self.current.kind {
             let value = value;
             self.advance();
             return Ok(MatchPattern::Int(value, self.alloc_id()));
+        }
+        if let TokenKind::String(value) = &self.current.kind {
+            let value = value.clone();
+            self.advance();
+            return Ok(MatchPattern::String(value, self.alloc_id()));
         }
         if self.current.kind == TokenKind::Minus {
             let span = self.current.span;
@@ -1714,7 +1865,55 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        if self.current.kind == TokenKind::LParen {
+            self.advance();
+            let first = self.parse_match_pattern()?;
+            if self.current.kind != TokenKind::Comma {
+                self.expect(TokenKind::RParen)?;
+                return Ok(first);
+            }
+            let mut items = Vec::new();
+            items.push(first);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                if self.current.kind == TokenKind::RParen {
+                    break;
+                }
+                items.push(self.parse_match_pattern()?);
+            }
+            self.expect(TokenKind::RParen)?;
+            for item in &items {
+                let ok = matches!(
+                    item,
+                    MatchPattern::Wildcard(_)
+                        | MatchPattern::Binding { .. }
+                        | MatchPattern::Int(_, _)
+                        | MatchPattern::Bool(_, _)
+                        | MatchPattern::String(_, _)
+                );
+                if !ok {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "tuple pattern".to_string(),
+                        found: self.current.kind.clone(),
+                        span: self.current.span,
+                    });
+                }
+            }
+            return Ok(MatchPattern::Tuple {
+                id: self.alloc_id(),
+                items,
+            });
+        }
         let head = self.expect_ident()?;
+        if self.current.kind == TokenKind::At {
+            self.advance();
+            let pattern = self.parse_match_pattern()?;
+            return Ok(MatchPattern::Binding {
+                id: self.alloc_id(),
+                name: head,
+                pattern: Box::new(pattern),
+            });
+        }
         if self.current.kind == TokenKind::ColonColon {
             self.advance();
             let variant = self.expect_ident()?;
@@ -1793,10 +1992,10 @@ impl<'a> Parser<'a> {
                         fields,
                     })
                 } else {
-                    Err(ParseError::UnexpectedToken {
-                        expected: "match pattern".to_string(),
-                        found: TokenKind::Ident(head.name),
-                        span: head.span,
+                    Ok(MatchPattern::Binding {
+                        id: self.alloc_id(),
+                        name: head,
+                        pattern: Box::new(MatchPattern::Wildcard(self.alloc_id())),
                     })
                 }
             }
@@ -1952,6 +2151,31 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.current.kind == TokenKind::LBracket {
+            let start_span = self.current.span;
+            self.advance();
+            let inner = self.parse_type_ref()?;
+            if self.current.kind != TokenKind::RBracket {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "]".to_string(),
+                    found: self.current.kind.clone(),
+                    span: self.current.span,
+                });
+            }
+            let end_span = self.current.span;
+            self.advance();
+            let array_name = Ident {
+                name: "array".to_string(),
+                span: Span::new(start_span.start, end_span.end),
+                id: self.alloc_id(),
+            };
+            let ty = TypeRef::Named {
+                name: array_name,
+                args: vec![inner],
+            };
+            return Ok(self.apply_type_postfix(ty));
+        }
+
         let name = self.expect_ident()?;
         let args = if self.current.kind == TokenKind::Less {
             self.advance();
@@ -1975,7 +2199,47 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        Ok(TypeRef::Named { name, args })
+        let ty = TypeRef::Named { name, args };
+        Ok(self.apply_type_postfix(ty))
+    }
+
+    fn apply_type_postfix(&mut self, mut ty: TypeRef) -> TypeRef {
+        loop {
+            if self.current.kind == TokenKind::Question {
+                let span = self.current.span;
+                self.advance();
+                let name = Ident {
+                    name: "option".to_string(),
+                    span,
+                    id: self.alloc_id(),
+                };
+                ty = TypeRef::Named {
+                    name,
+                    args: vec![ty],
+                };
+                continue;
+            }
+            if self.current.kind == TokenKind::LBracket {
+                let start_span = self.current.span;
+                self.advance();
+                if self.current.kind == TokenKind::RBracket {
+                    let end_span = self.current.span;
+                    self.advance();
+                    let name = Ident {
+                        name: "array".to_string(),
+                        span: Span::new(start_span.start, end_span.end),
+                        id: self.alloc_id(),
+                    };
+                    ty = TypeRef::Named {
+                        name,
+                        args: vec![ty],
+                    };
+                    continue;
+                }
+            }
+            break;
+        }
+        ty
     }
 
     fn consume_type_greater(&mut self) -> Result<(), ParseError> {
@@ -2059,8 +2323,72 @@ impl<'a> Parser<'a> {
         let id = self.alloc_id();
         self.comments.push(Comment { span, text, id });
     }
+
+    fn question_starts_ternary(&self) -> bool {
+        let mut lexer = self.lexer.clone();
+        let mut pending_token = self.pending_token.clone();
+        let mut depth_paren = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_brace = 0usize;
+
+        let next_token = |lexer: &mut Lexer<'_>, pending: &mut Option<Token>| -> Token {
+            if let Some(token) = pending.take() {
+                return token;
+            }
+            loop {
+                let token = lexer.next_token();
+                if token.kind.is_comment() {
+                    continue;
+                }
+                return token;
+            }
+        };
+
+        let mut token = next_token(&mut lexer, &mut pending_token);
+        loop {
+            match token.kind {
+                TokenKind::LParen => depth_paren += 1,
+                TokenKind::RParen => {
+                    if depth_paren > 0 {
+                        depth_paren -= 1;
+                    } else if depth_bracket == 0 && depth_brace == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::LBracket => depth_bracket += 1,
+                TokenKind::RBracket => {
+                    if depth_bracket > 0 {
+                        depth_bracket -= 1;
+                    } else if depth_paren == 0 && depth_brace == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::LBrace => depth_brace += 1,
+                TokenKind::RBrace => {
+                    if depth_brace > 0 {
+                        depth_brace -= 1;
+                    } else if depth_paren == 0 && depth_bracket == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Colon => {
+                    if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 {
+                        return true;
+                    }
+                }
+                TokenKind::Semicolon | TokenKind::Comma | TokenKind::Eof => {
+                    if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            token = next_token(&mut lexer, &mut pending_token);
+        }
+    }
 }
 
+#[derive(Clone)]
 struct Lexer<'a> {
     source: &'a str,
     chars: std::str::Chars<'a>,
@@ -2299,9 +2627,17 @@ impl<'a> Lexer<'a> {
             }
             Some('?') => {
                 self.bump();
-                Token {
-                    kind: TokenKind::Question,
-                    span: Span::new(start, self.index),
+                if self.current == Some('.') {
+                    self.bump();
+                    Token {
+                        kind: TokenKind::Dot,
+                        span: Span::new(start, self.index),
+                    }
+                } else {
+                    Token {
+                        kind: TokenKind::Question,
+                        span: Span::new(start, self.index),
+                    }
                 }
             }
             Some('(') => {
@@ -2372,6 +2708,13 @@ impl<'a> Lexer<'a> {
                         kind: TokenKind::Equals,
                         span: Span::new(start, self.index),
                     }
+                }
+            }
+            Some('@') => {
+                self.bump();
+                Token {
+                    kind: TokenKind::At,
+                    span: Span::new(start, self.index),
                 }
             }
             Some(';') => {
@@ -2605,6 +2948,8 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,
             "let" => TokenKind::Let,
+            "const" => TokenKind::Const,
+            "pub" => TokenKind::Pub,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             _ => TokenKind::Ident(value),
@@ -2689,6 +3034,75 @@ impl<'a> Lexer<'a> {
             self.index += ch.len_utf8();
         }
         self.current = self.chars.next();
+    }
+}
+
+fn expr_span_start(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Int(_, span, _)
+        | Expr::Float(_, span, _)
+        | Expr::String(_, span, _)
+        | Expr::Bool(_, span, _) => Some(span.start),
+        Expr::Ident(ident) => Some(ident.span.start),
+        Expr::Unary { op_span, .. } => Some(op_span.start),
+        Expr::Binary { left, .. } => expr_span_start(left),
+        Expr::Ternary { span, .. } => Some(span.start),
+        Expr::ChainedComparison { span, .. } => Some(span.start),
+        Expr::If { if_span, .. } => Some(if_span.start),
+        Expr::Member { base, .. } => expr_span_start(base),
+        Expr::Call { callee, .. } => expr_span_start(callee),
+        Expr::Try(expr, _) => expr_span_start(expr),
+        Expr::TryCatch { try_span, .. } => Some(try_span.start),
+        Expr::Match { match_span, .. } => Some(match_span.start),
+        Expr::Block { block_span, .. } => Some(block_span.start),
+        Expr::Array { array_span, .. } => Some(array_span.start),
+        Expr::Index { index_span, .. } => Some(index_span.start),
+        Expr::Tuple { tuple_span, .. } => Some(tuple_span.start),
+        Expr::Range { range_span, .. } => Some(range_span.start),
+        Expr::InterpolatedString { span, .. } => Some(span.start),
+        Expr::Closure { span, .. } => Some(span.start),
+        Expr::StructLiteral { span, .. } => Some(span.start),
+        Expr::EnumLiteral { span, .. } => Some(span.start),
+        Expr::MapLiteral { span, .. } => Some(span.start),
+        Expr::As { span, .. } => Some(span.start),
+        Expr::Is { span, .. } => Some(span.start),
+        Expr::Group { span, .. } => Some(span.start),
+    }
+}
+
+fn expr_span_end(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Int(_, span, _)
+        | Expr::Float(_, span, _)
+        | Expr::String(_, span, _)
+        | Expr::Bool(_, span, _) => Some(span.end),
+        Expr::Ident(ident) => Some(ident.span.end),
+        Expr::Unary { op_span, .. } => Some(op_span.end),
+        Expr::Binary { right, .. } => expr_span_end(right),
+        Expr::Ternary { span, .. } => Some(span.end),
+        Expr::ChainedComparison { span, .. } => Some(span.end),
+        Expr::If { if_span, .. } => Some(if_span.end),
+        Expr::Member { name, .. } => Some(name.span.end),
+        Expr::Call { callee, args, .. } => args
+            .last()
+            .and_then(expr_span_end)
+            .or_else(|| expr_span_end(callee)),
+        Expr::Try(expr, _) => expr_span_end(expr),
+        Expr::TryCatch { try_span, .. } => Some(try_span.end),
+        Expr::Match { match_span, .. } => Some(match_span.end),
+        Expr::Block { block_span, .. } => Some(block_span.end),
+        Expr::Array { array_span, .. } => Some(array_span.end),
+        Expr::Index { index_span, .. } => Some(index_span.end),
+        Expr::Tuple { tuple_span, .. } => Some(tuple_span.end),
+        Expr::Range { range_span, .. } => Some(range_span.end),
+        Expr::InterpolatedString { span, .. } => Some(span.end),
+        Expr::Closure { span, .. } => Some(span.end),
+        Expr::StructLiteral { span, .. } => Some(span.end),
+        Expr::EnumLiteral { span, .. } => Some(span.end),
+        Expr::MapLiteral { span, .. } => Some(span.end),
+        Expr::As { span, .. } => Some(span.end),
+        Expr::Is { span, .. } => Some(span.end),
+        Expr::Group { span, .. } => Some(span.end),
     }
 }
 
@@ -2965,6 +3379,20 @@ fn divide(a: int, b: int) -> result<int, string> {
     }
 
     #[test]
+    fn parses_const_stmt() {
+        let source = r#"
+const max_retries: int = 3;
+
+fn f() {
+    const label = "ok";
+    let retries = max_retries;
+    return label + retries;
+}
+"#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
     fn parses_option_type() {
         let source = r#"
 fn maybe_value() -> option<int> {
@@ -3004,6 +3432,16 @@ fn f() {
     }
 
     #[test]
+    fn parses_type_sugar() {
+        let source = r#"
+fn f(a: [int], b: string[], c: int?) {
+    let d: [string?] = ["ok"];
+}
+"#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
     fn parses_try_catch_and_union_types() {
         let source = r#"
 fn f() {
@@ -3013,6 +3451,33 @@ fn f() {
 }
 "#;
         assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_match_patterns() {
+        let source = r#"
+fn f(value: (int, bool)) {
+    match value {
+        (x, y) => print(x),
+        t @ (a, b) => print(a),
+        (_, _) => print(0),
+    };
+}
+"#;
+        let parsed = parse_module(source);
+        assert!(parsed.is_ok(), "{}", parsed.unwrap_err());
+    }
+
+    #[test]
+    fn parses_ternary_and_chained_comparison() {
+        let source = r#"
+fn f(a: int, b: int, c: int) {
+    let x = a < b < c;
+    let y = a ? b : c;
+}
+"#;
+        let parsed = parse_module(source);
+        assert!(parsed.is_ok(), "{}", parsed.unwrap_err());
     }
 
     #[test]

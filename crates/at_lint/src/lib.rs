@@ -518,7 +518,10 @@ fn lint_unnecessary_needs(module: &Module, config: &LintConfig, errors: &mut Vec
 
 fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
+        Stmt::Const { value, .. }
+        | Stmt::Let { value, .. }
+        | Stmt::Using { value, .. }
+        | Stmt::Expr { expr: value, .. } => {
             collect_used_capabilities_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -580,6 +583,21 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Binary { left, right, .. } => {
             collect_used_capabilities_expr(left, used);
             collect_used_capabilities_expr(right, used);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_used_capabilities_expr(condition, used);
+            collect_used_capabilities_expr(then_branch, used);
+            collect_used_capabilities_expr(else_branch, used);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                collect_used_capabilities_expr(item, used);
+            }
         }
         Expr::Unary { expr, .. } => {
             collect_used_capabilities_expr(expr, used);
@@ -687,7 +705,10 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
 fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mut Vec<LintError>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
+        Stmt::Const { value, .. }
+        | Stmt::Let { value, .. }
+        | Stmt::Using { value, .. }
+        | Stmt::Expr { expr: value, .. } => {
             lint_unused_match_bindings_expr(value, config, errors);
         }
         Stmt::Set { value, .. } => {
@@ -710,6 +731,22 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
             lint_unused_match_bindings_expr(condition, config, errors);
             for stmt in body {
                 lint_unused_match_bindings_stmt(stmt, config, errors);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_unused_match_bindings_expr(condition, config, errors);
+            for stmt in then_branch {
+                lint_unused_match_bindings_stmt(stmt, config, errors);
+            }
+            if let Some(else_branch) = else_branch {
+                for stmt in else_branch {
+                    lint_unused_match_bindings_stmt(stmt, config, errors);
+                }
             }
         }
         Stmt::For { iter, body, .. } => {
@@ -765,6 +802,21 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
         Expr::Binary { left, right, .. } => {
             lint_unused_match_bindings_expr(left, config, errors);
             lint_unused_match_bindings_expr(right, config, errors);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_unused_match_bindings_expr(condition, config, errors);
+            lint_unused_match_bindings_expr(then_branch, config, errors);
+            lint_unused_match_bindings_expr(else_branch, config, errors);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                lint_unused_match_bindings_expr(item, config, errors);
+            }
         }
         Expr::Unary { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
@@ -871,17 +923,27 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
 
 fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
     match pattern {
-        at_syntax::MatchPattern::Int(_, _) => Vec::new(),
+        at_syntax::MatchPattern::Int(_, _)
+        | at_syntax::MatchPattern::Bool(_, _)
+        | at_syntax::MatchPattern::String(_, _) => Vec::new(),
         at_syntax::MatchPattern::ResultOk(ident, _)
         | at_syntax::MatchPattern::ResultErr(ident, _)
         | at_syntax::MatchPattern::OptionSome(ident, _) => vec![ident.clone()],
         at_syntax::MatchPattern::OptionNone(_) => Vec::new(),
+        at_syntax::MatchPattern::Tuple { items, .. } => {
+            items.iter().flat_map(match_pattern_idents).collect()
+        }
         at_syntax::MatchPattern::Struct { fields, .. } => fields
             .iter()
             .filter_map(|field| field.binding.clone().or_else(|| Some(field.name.clone())))
             .collect(),
         at_syntax::MatchPattern::Enum { binding, .. } => {
             binding.clone().map_or_else(Vec::new, |ident| vec![ident])
+        }
+        at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+            let mut items = vec![name.clone()];
+            items.extend(match_pattern_idents(pattern));
+            items
         }
         at_syntax::MatchPattern::Wildcard(_) => Vec::new(),
     }
@@ -962,7 +1024,7 @@ fn collect_local_defs_stmt(
     errors: &mut Vec<LintError>,
 ) {
     match stmt {
-        Stmt::Let { name, .. } | Stmt::Using { name, .. } => {
+        Stmt::Const { name, .. } | Stmt::Let { name, .. } | Stmt::Using { name, .. } => {
             if should_ignore_name(&name.name) {
                 locals.push(name.clone());
                 return;
@@ -983,6 +1045,22 @@ fn collect_local_defs_stmt(
             let mut inner_seen = HashSet::new();
             for stmt in body {
                 collect_local_defs_stmt(stmt, locals, &mut inner_seen, config, errors);
+            }
+        }
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut inner_seen = HashSet::new();
+            for stmt in then_branch {
+                collect_local_defs_stmt(stmt, locals, &mut inner_seen, config, errors);
+            }
+            if let Some(else_branch) = else_branch {
+                let mut else_seen = HashSet::new();
+                for stmt in else_branch {
+                    collect_local_defs_stmt(stmt, locals, &mut else_seen, config, errors);
+                }
             }
         }
         Stmt::For { item, body, .. } => {
@@ -1008,7 +1086,10 @@ fn collect_local_defs_stmt(
 fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
+        Stmt::Const { value, .. }
+        | Stmt::Let { value, .. }
+        | Stmt::Using { value, .. }
+        | Stmt::Expr { expr: value, .. } => {
             collect_local_uses_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1031,6 +1112,22 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_local_uses_expr(condition, used);
             for stmt in body {
                 collect_local_uses_stmt(stmt, used);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_local_uses_expr(condition, used);
+            for stmt in then_branch {
+                collect_local_uses_stmt(stmt, used);
+            }
+            if let Some(else_branch) = else_branch {
+                for stmt in else_branch {
+                    collect_local_uses_stmt(stmt, used);
+                }
             }
         }
         Stmt::For { iter, body, .. } => {
@@ -1078,6 +1175,21 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Binary { left, right, .. } => {
             collect_local_uses_expr(left, used);
             collect_local_uses_expr(right, used);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_local_uses_expr(condition, used);
+            collect_local_uses_expr(then_branch, used);
+            collect_local_uses_expr(else_branch, used);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                collect_local_uses_expr(item, used);
+            }
         }
         Expr::If {
             condition,
@@ -1206,7 +1318,10 @@ fn collect_alias_usage(module: &Module, used: &mut HashSet<String>) {
 fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
+        Stmt::Const { value, .. }
+        | Stmt::Let { value, .. }
+        | Stmt::Using { value, .. }
+        | Stmt::Expr { expr: value, .. } => {
             collect_alias_usage_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1229,6 +1344,22 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_alias_usage_expr(condition, used);
             for stmt in body {
                 collect_alias_usage_stmt(stmt, used);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_alias_usage_expr(condition, used);
+            for stmt in then_branch {
+                collect_alias_usage_stmt(stmt, used);
+            }
+            if let Some(else_branch) = else_branch {
+                for stmt in else_branch {
+                    collect_alias_usage_stmt(stmt, used);
+                }
             }
         }
         Stmt::For { iter, body, .. } => {
@@ -1262,6 +1393,21 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Binary { left, right, .. } => {
             collect_alias_usage_expr(left, used);
             collect_alias_usage_expr(right, used);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_alias_usage_expr(condition, used);
+            collect_alias_usage_expr(then_branch, used);
+            collect_alias_usage_expr(else_branch, used);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                collect_alias_usage_expr(item, used);
+            }
         }
         Expr::If {
             condition,
@@ -1390,7 +1536,10 @@ fn collect_called_functions(module: &Module, used: &mut HashSet<String>) {
 fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
+        Stmt::Const { value, .. }
+        | Stmt::Let { value, .. }
+        | Stmt::Using { value, .. }
+        | Stmt::Expr { expr: value, .. } => {
             collect_called_functions_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1413,6 +1562,22 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_called_functions_expr(condition, used);
             for stmt in body {
                 collect_called_functions_stmt(stmt, used);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_called_functions_expr(condition, used);
+            for stmt in then_branch {
+                collect_called_functions_stmt(stmt, used);
+            }
+            if let Some(else_branch) = else_branch {
+                for stmt in else_branch {
+                    collect_called_functions_stmt(stmt, used);
+                }
             }
         }
         Stmt::For { iter, body, .. } => {
@@ -1449,6 +1614,21 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Binary { left, right, .. } => {
             collect_called_functions_expr(left, used);
             collect_called_functions_expr(right, used);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_called_functions_expr(condition, used);
+            collect_called_functions_expr(then_branch, used);
+            collect_called_functions_expr(else_branch, used);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                collect_called_functions_expr(item, used);
+            }
         }
         Expr::Unary { expr, .. } => {
             collect_called_functions_expr(expr, used);

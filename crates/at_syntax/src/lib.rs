@@ -68,6 +68,19 @@ pub enum Expr {
         id: NodeId,
         right: Box<Expr>,
     },
+    Ternary {
+        span: Span,
+        id: NodeId,
+        condition: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
+    ChainedComparison {
+        span: Span,
+        id: NodeId,
+        items: Vec<Expr>,
+        ops: Vec<(BinaryOp, Span)>,
+    },
     If {
         if_span: Span,
         id: NodeId,
@@ -242,10 +255,16 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MatchPattern {
     Int(i64, NodeId),
+    Bool(bool, NodeId),
+    String(String, NodeId),
     ResultOk(Ident, NodeId),
     ResultErr(Ident, NodeId),
     OptionSome(Ident, NodeId),
     OptionNone(NodeId),
+    Tuple {
+        id: NodeId,
+        items: Vec<MatchPattern>,
+    },
     Struct {
         id: NodeId,
         name: Ident,
@@ -256,6 +275,11 @@ pub enum MatchPattern {
         name: Ident,
         variant: Ident,
         binding: Option<Ident>,
+    },
+    Binding {
+        id: NodeId,
+        name: Ident,
+        pattern: Box<MatchPattern>,
     },
     Wildcard(NodeId),
 }
@@ -273,23 +297,33 @@ pub enum Stmt {
         id: NodeId,
         path: String,
         alias: Ident,
+        is_pub: bool,
     },
     TypeAlias {
         id: NodeId,
         name: Ident,
         ty: TypeRef,
+        is_pub: bool,
     },
     Enum {
         id: NodeId,
         name: Ident,
         type_params: Vec<Ident>,
         variants: Vec<EnumVariant>,
+        is_pub: bool,
     },
     Struct {
         id: NodeId,
         name: Ident,
         type_params: Vec<Ident>,
         fields: Vec<StructField>,
+        is_pub: bool,
+    },
+    Const {
+        id: NodeId,
+        name: Ident,
+        ty: Option<TypeRef>,
+        value: Expr,
     },
     Let {
         id: NodeId,
@@ -325,6 +359,13 @@ pub enum Stmt {
         while_span: Span,
         condition: Expr,
         body: Vec<Stmt>,
+    },
+    If {
+        id: NodeId,
+        if_span: Span,
+        condition: Expr,
+        then_branch: Vec<Stmt>,
+        else_branch: Option<Vec<Stmt>>,
     },
     For {
         id: NodeId,
@@ -364,6 +405,7 @@ pub enum Stmt {
 pub struct Function {
     pub id: NodeId,
     pub name: Ident,
+    pub is_pub: bool,
     pub type_params: Vec<Ident>,
     pub params: Vec<Param>,
     pub return_ty: Option<TypeRef>,

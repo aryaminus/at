@@ -149,6 +149,9 @@ pub enum Op {
         target: usize,
     },
     MatchInt(i64, usize),
+    MatchBool(bool, usize),
+    MatchString(String, usize),
+    MatchTuple(usize, usize),
     MatchFail,
     JumpIfFalse(usize),
     Jump(usize),
@@ -295,6 +298,7 @@ pub struct StackFrame {
 
 pub struct Compiler {
     scopes: Vec<HashMap<String, usize>>,
+    const_scopes: Vec<HashSet<String>>,
     next_local: usize,
     functions: HashMap<String, usize>,
     function_arity: HashMap<String, usize>,
@@ -471,6 +475,7 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             scopes: Vec::new(),
+            const_scopes: Vec::new(),
             next_local: 0,
             functions: HashMap::new(),
             function_arity: HashMap::new(),
@@ -493,6 +498,7 @@ impl Compiler {
         self.function_needs.clear();
         self.structs.clear();
         self.enums.clear();
+        self.const_scopes.clear();
         self.current_function = None;
         self.closure_chunks.clear();
         self.base_function_count = module.functions.len();
@@ -647,6 +653,12 @@ impl Compiler {
             Stmt::TypeAlias { .. } => {}
             Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
+            Stmt::Const { name, value, .. } => {
+                self.compile_expr(value, chunk)?;
+                let slot = self.bind_local_checked(&name.name, name.span)?;
+                self.bind_const(&name.name);
+                chunk.push(Op::StoreLocal(slot), Some(name.span));
+            }
             Stmt::Let { name, value, .. } => {
                 self.compile_expr(value, chunk)?;
                 let slot = self.bind_local_checked(&name.name, name.span)?;
@@ -659,6 +671,12 @@ impl Compiler {
                 chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
             }
             Stmt::Set { name, value, .. } => {
+                if self.is_const(&name.name) {
+                    return Err(compile_error(
+                        format!("cannot assign to const {}", name.name),
+                        Some(name.span),
+                    ));
+                }
                 self.compile_expr(value, chunk)?;
                 let slot = self.resolve_local(&name.name).ok_or_else(|| {
                     compile_error(
@@ -710,6 +728,35 @@ impl Compiler {
                         patch_jump(&mut chunk.code, jump, loop_start);
                     }
                 }
+            }
+            Stmt::If {
+                if_span,
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.compile_expr(condition, chunk)?;
+                let jump_if_false = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), Some(*if_span));
+                self.push_scope();
+                for stmt in then_branch {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                self.pop_scope();
+                let jump_to_end = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), Some(*if_span));
+                let else_start = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_if_false, else_start);
+                if let Some(else_branch) = else_branch {
+                    self.push_scope();
+                    for stmt in else_branch {
+                        self.compile_stmt(stmt, chunk)?;
+                    }
+                    self.pop_scope();
+                }
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_to_end, end);
             }
             Stmt::For {
                 for_span,
@@ -926,8 +973,7 @@ impl Compiler {
                 };
                 chunk.push(op, Some(*op_span));
             }
-            Expr::If {
-                if_span,
+            Expr::Ternary {
                 condition,
                 then_branch,
                 else_branch,
@@ -935,17 +981,72 @@ impl Compiler {
             } => {
                 self.compile_expr(condition, chunk)?;
                 let jump_if_false = chunk.code.len();
-                chunk.push(Op::JumpIfFalse(usize::MAX), Some(*if_span));
+                chunk.push(Op::JumpIfFalse(usize::MAX), expr_span(condition));
                 self.compile_expr(then_branch, chunk)?;
                 let jump_to_end = chunk.code.len();
-                chunk.push(Op::Jump(usize::MAX), Some(*if_span));
+                chunk.push(Op::Jump(usize::MAX), expr_span(then_branch));
                 let else_start = chunk.code.len();
                 patch_jump(&mut chunk.code, jump_if_false, else_start);
-                if let Some(else_expr) = else_branch {
-                    self.compile_expr(else_expr, chunk)?;
+                self.compile_expr(else_branch, chunk)?;
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_to_end, end);
+            }
+            Expr::ChainedComparison { items, ops, .. } => {
+                let mut false_jumps = Vec::with_capacity(ops.len());
+                for (idx, (op, op_span)) in ops.iter().enumerate() {
+                    let left = if idx == 0 { &items[0] } else { &items[idx] };
+                    let right = &items[idx + 1];
+                    self.compile_expr(left, chunk)?;
+                    self.compile_expr(right, chunk)?;
+                    let op = match op {
+                        at_syntax::BinaryOp::Lt => Op::Lt,
+                        at_syntax::BinaryOp::Lte => Op::Lte,
+                        at_syntax::BinaryOp::Gt => Op::Gt,
+                        at_syntax::BinaryOp::Gte => Op::Gte,
+                        _ => {
+                            return Err(compile_error(
+                                "invalid chained comparison".to_string(),
+                                Some(*op_span),
+                            ))
+                        }
+                    };
+                    chunk.push(op, Some(*op_span));
+                    let jump_if_false = chunk.code.len();
+                    chunk.push(Op::JumpIfFalse(usize::MAX), Some(*op_span));
+                    false_jumps.push(jump_if_false);
+                }
+                let true_index = chunk.add_const(Value::Bool(true));
+                chunk.push(Op::Const(true_index), expr_span(expr));
+                let jump_to_end = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), expr_span(expr));
+                let false_pos = chunk.code.len();
+                let false_index = chunk.add_const(Value::Bool(false));
+                chunk.push(Op::Const(false_index), expr_span(expr));
+                for jump in false_jumps {
+                    patch_jump(&mut chunk.code, jump, false_pos);
+                }
+                let end = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_to_end, end);
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.compile_expr(condition, chunk)?;
+                let jump_if_false = chunk.code.len();
+                chunk.push(Op::JumpIfFalse(usize::MAX), expr_span(condition));
+                self.compile_expr(then_branch, chunk)?;
+                let jump_to_end = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), expr_span(then_branch));
+                let else_start = chunk.code.len();
+                patch_jump(&mut chunk.code, jump_if_false, else_start);
+                if let Some(else_branch) = else_branch {
+                    self.compile_expr(else_branch, chunk)?;
                 } else {
                     let unit_index = chunk.add_const(Value::Unit);
-                    chunk.push(Op::Const(unit_index), Some(*if_span));
+                    chunk.push(Op::Const(unit_index), expr_span(expr));
                 }
                 let end = chunk.code.len();
                 patch_jump(&mut chunk.code, jump_to_end, end);
@@ -1429,12 +1530,21 @@ impl Compiler {
                 chunk.push(
                     match &arm.pattern {
                         at_syntax::MatchPattern::Int(value, _) => Op::MatchInt(*value, usize::MAX),
+                        at_syntax::MatchPattern::Bool(value, _) => {
+                            Op::MatchBool(*value, usize::MAX)
+                        }
+                        at_syntax::MatchPattern::String(value, _) => {
+                            Op::MatchString(value.clone(), usize::MAX)
+                        }
                         at_syntax::MatchPattern::ResultOk(_, _) => Op::MatchResultOk(usize::MAX),
                         at_syntax::MatchPattern::ResultErr(_, _) => Op::MatchResultErr(usize::MAX),
                         at_syntax::MatchPattern::OptionSome(_, _) => {
                             Op::MatchOptionSome(usize::MAX)
                         }
                         at_syntax::MatchPattern::OptionNone(_) => Op::MatchOptionNone(usize::MAX),
+                        at_syntax::MatchPattern::Tuple { items, .. } => {
+                            Op::MatchTuple(items.len(), usize::MAX)
+                        }
                         at_syntax::MatchPattern::Struct { fields, .. } => {
                             let names = fields
                                 .iter()
@@ -1453,6 +1563,30 @@ impl Compiler {
                             has_payload: binding.is_some(),
                             target: usize::MAX,
                         },
+                        at_syntax::MatchPattern::Binding { pattern, .. } => {
+                            match pattern.as_ref() {
+                                at_syntax::MatchPattern::Int(value, _) => {
+                                    Op::MatchInt(*value, usize::MAX)
+                                }
+                                at_syntax::MatchPattern::Bool(value, _) => {
+                                    Op::MatchBool(*value, usize::MAX)
+                                }
+                                at_syntax::MatchPattern::String(value, _) => {
+                                    Op::MatchString(value.clone(), usize::MAX)
+                                }
+                                at_syntax::MatchPattern::ResultOk(_, _)
+                                | at_syntax::MatchPattern::ResultErr(_, _)
+                                | at_syntax::MatchPattern::OptionSome(_, _)
+                                | at_syntax::MatchPattern::OptionNone(_)
+                                | at_syntax::MatchPattern::Struct { .. }
+                                | at_syntax::MatchPattern::Enum { .. }
+                                | at_syntax::MatchPattern::Wildcard(_)
+                                | at_syntax::MatchPattern::Binding { .. } => Op::MatchFail,
+                                at_syntax::MatchPattern::Tuple { items, .. } => {
+                                    Op::MatchTuple(items.len(), usize::MAX)
+                                }
+                            }
+                        }
                         at_syntax::MatchPattern::Wildcard(_) => unreachable!(),
                     },
                     Some(match_span),
@@ -1467,7 +1601,9 @@ impl Compiler {
             let mut binding_span: Option<Span> = None;
             let mut struct_guard_slot: Option<usize> = None;
             match &arm.pattern {
-                at_syntax::MatchPattern::Int(_, _) => {}
+                at_syntax::MatchPattern::Int(_, _)
+                | at_syntax::MatchPattern::Bool(_, _)
+                | at_syntax::MatchPattern::String(_, _) => {}
                 at_syntax::MatchPattern::ResultOk(ident, _)
                 | at_syntax::MatchPattern::ResultErr(ident, _)
                 | at_syntax::MatchPattern::OptionSome(ident, _) => {
@@ -1507,6 +1643,30 @@ impl Compiler {
                         chunk.push(Op::Pop, Some(match_span));
                     }
                 }
+                at_syntax::MatchPattern::Tuple { items, .. } => {
+                    let temp_name = self.next_synthetic_name("match_tuple");
+                    let temp_slot = self.bind_local_checked(&temp_name, match_span)?;
+                    chunk.push(Op::StoreLocal(temp_slot), Some(match_span));
+                    struct_guard_slot = Some(temp_slot);
+                    for _ in 0..items.len() {
+                        chunk.push(Op::Pop, Some(match_span));
+                    }
+                }
+                at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+                    let slot = self.bind_local_checked(&name.name, name.span)?;
+                    chunk.push(Op::StoreLocal(slot), Some(name.span));
+                    binding_slot = Some(slot);
+                    binding_span = Some(name.span);
+                    match pattern.as_ref() {
+                        at_syntax::MatchPattern::Int(_, _)
+                        | at_syntax::MatchPattern::Bool(_, _)
+                        | at_syntax::MatchPattern::String(_, _)
+                        | at_syntax::MatchPattern::Tuple { .. } => {}
+                        _ => {
+                            chunk.push(Op::Pop, Some(match_span));
+                        }
+                    }
+                }
                 at_syntax::MatchPattern::Wildcard(_) => {}
             }
 
@@ -1536,7 +1696,20 @@ impl Compiler {
                         let idx = chunk.add_const(Value::Int(*value));
                         chunk.push(Op::Const(idx), Some(match_span));
                     }
+                    at_syntax::MatchPattern::Bool(value, _) => {
+                        let idx = chunk.add_const(Value::Bool(*value));
+                        chunk.push(Op::Const(idx), Some(match_span));
+                    }
+                    at_syntax::MatchPattern::String(value, _) => {
+                        let idx = chunk.add_const(Value::String(Rc::new(value.clone())));
+                        chunk.push(Op::Const(idx), Some(match_span));
+                    }
                     at_syntax::MatchPattern::Struct { .. } => {
+                        if let Some(slot) = struct_guard_slot {
+                            chunk.push(Op::LoadLocal(slot), Some(match_span));
+                        }
+                    }
+                    at_syntax::MatchPattern::Tuple { .. } => {
                         if let Some(slot) = struct_guard_slot {
                             chunk.push(Op::LoadLocal(slot), Some(match_span));
                         }
@@ -1576,6 +1749,24 @@ impl Compiler {
                     }
                     at_syntax::MatchPattern::OptionNone(_) => {
                         chunk.push(Op::Builtin(Builtin::OptionNone), Some(match_span));
+                    }
+                    at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+                        let slot = binding_slot.ok_or_else(|| {
+                            compile_error("missing match binding".to_string(), Some(match_span))
+                        })?;
+                        let span = binding_span.or(Some(match_span)).unwrap_or(name.span);
+                        chunk.push(Op::LoadLocal(slot), Some(span));
+                        if let at_syntax::MatchPattern::Tuple { items, .. } = pattern.as_ref() {
+                            if let Some(slot) = struct_guard_slot {
+                                chunk.push(Op::LoadLocal(slot), Some(match_span));
+                            }
+                            for item in items.iter().rev() {
+                                if let at_syntax::MatchPattern::Binding { name, .. } = item {
+                                    let slot = self.bind_local_checked(&name.name, name.span)?;
+                                    chunk.push(Op::StoreLocal(slot), Some(name.span));
+                                }
+                            }
+                        }
                     }
                     at_syntax::MatchPattern::Wildcard(_) => {}
                 }
@@ -2032,6 +2223,21 @@ impl Compiler {
                     }
                 }
             }
+            Expr::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_free_vars_expr(condition, bound, captures, seen);
+                self.collect_free_vars_expr(then_branch, bound, captures, seen);
+                self.collect_free_vars_expr(else_branch, bound, captures, seen);
+            }
+            Expr::ChainedComparison { items, .. } => {
+                for item in items {
+                    self.collect_free_vars_expr(item, bound, captures, seen);
+                }
+            }
             Expr::EnumLiteral { payload, .. } => {
                 if let Some(expr) = payload {
                     self.collect_free_vars_expr(expr, bound, captures, seen);
@@ -2064,6 +2270,12 @@ impl Compiler {
                     scope.insert(name.name.clone());
                 }
             }
+            Stmt::Const { name, value, .. } => {
+                self.collect_free_vars_expr(value, bound, captures, seen);
+                if let Some(scope) = bound.last_mut() {
+                    scope.insert(name.name.clone());
+                }
+            }
             Stmt::Set { value, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
             }
@@ -2087,6 +2299,26 @@ impl Compiler {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
                 self.pop_bound_scope(bound);
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_free_vars_expr(condition, bound, captures, seen);
+                self.push_bound_scope(bound);
+                for stmt in then_branch {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
+                if let Some(else_branch) = else_branch {
+                    self.push_bound_scope(bound);
+                    for stmt in else_branch {
+                        self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                    }
+                    self.pop_bound_scope(bound);
+                }
             }
             Stmt::For {
                 item, iter, body, ..
@@ -2129,8 +2361,12 @@ impl Compiler {
             at_syntax::MatchPattern::ResultOk(ident, _)
             | at_syntax::MatchPattern::ResultErr(ident, _)
             | at_syntax::MatchPattern::OptionSome(ident, _) => Some(&ident.name),
+            at_syntax::MatchPattern::Binding { name, .. } => Some(&name.name),
             at_syntax::MatchPattern::Int(_, _)
+            | at_syntax::MatchPattern::Bool(_, _)
+            | at_syntax::MatchPattern::String(_, _)
             | at_syntax::MatchPattern::OptionNone(_)
+            | at_syntax::MatchPattern::Tuple { .. }
             | at_syntax::MatchPattern::Wildcard(_) => None,
             at_syntax::MatchPattern::Struct { .. } => None,
             at_syntax::MatchPattern::Enum { binding, .. } => binding.as_ref().map(|b| &b.name),
@@ -2159,6 +2395,17 @@ impl Compiler {
                     }
                 }
             }
+            at_syntax::MatchPattern::Tuple { items, .. } => {
+                for item in items {
+                    self.bind_pattern_names(item, bound);
+                }
+            }
+            at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+                if let Some(scope) = bound.last_mut() {
+                    scope.insert(name.name.clone());
+                }
+                self.bind_pattern_names(pattern, bound);
+            }
             _ => {}
         }
     }
@@ -2177,10 +2424,12 @@ impl Compiler {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.const_scopes.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.const_scopes.pop();
     }
 
     fn bind_local_checked(&mut self, name: &str, span: Span) -> Result<usize, VmError> {
@@ -2199,6 +2448,19 @@ impl Compiler {
         let slot = self.next_local;
         self.next_local += 1;
         Ok(slot)
+    }
+
+    fn bind_const(&mut self, name: &str) {
+        if let Some(scope) = self.const_scopes.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn is_const(&self, name: &str) -> bool {
+        self.const_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
     }
 
     fn next_synthetic_name(&mut self, prefix: &str) -> String {
@@ -3982,6 +4244,71 @@ impl Vm {
                 Op::Halt => {
                     return Ok(self.stack.pop());
                 }
+                Op::MatchTuple(expected, target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Tuple(items) => {
+                            if items.len() == *expected {
+                                self.stack.push(Value::Tuple(items));
+                            } else {
+                                self.stack.push(Value::Tuple(items));
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects tuple".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
+                Op::MatchBool(expected, target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Bool(actual) => {
+                            if actual != *expected {
+                                self.stack.push(Value::Bool(actual));
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects bool".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
+                Op::MatchString(expected, target) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::String(actual) => {
+                            if &*actual != expected {
+                                self.stack.push(Value::String(actual));
+                                self.frames[frame_index].ip = *target;
+                                advance = false;
+                            }
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "match expects string".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
             }
 
             if advance {
@@ -4098,6 +4425,8 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::MapLiteral { span, .. } => Some(*span),
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
+        Expr::Ternary { span, .. } => Some(*span),
+        Expr::ChainedComparison { span, .. } => Some(*span),
     }
 }
 
@@ -4150,6 +4479,9 @@ fn patch_jump(code: &mut [Op], index: usize, target: usize) {
         | Op::MatchOptionNone(ref mut slot)
         | Op::MatchStruct(_, ref mut slot)
         | Op::MatchInt(_, ref mut slot)
+        | Op::MatchBool(_, ref mut slot)
+        | Op::MatchString(_, ref mut slot)
+        | Op::MatchTuple(_, ref mut slot)
         | Op::MatchEnum {
             target: ref mut slot,
             ..

@@ -34,6 +34,7 @@ at repl
 - Generic types use angle brackets: `result<int, string>`
 - Arrays are immutable; operations return new arrays
 - `option` and `result` must use angle brackets with type arguments
+- Type sugar: `[T]` and `T[]` map to `array<T>`; `T?` maps to `option<T>`
 
 ## Values and Literals
 
@@ -87,6 +88,7 @@ String escape sequences:
 
 ```
 let x = 1;
+const max = 10;
 let y: int = 2;
 set x = x + 1;
 
@@ -96,6 +98,7 @@ using time = time.fixed("2026-01-01T00:00:00Z");
 ### Notes
 
 - `let` defines a new local variable (type optional)
+- `const` defines an immutable local value
 - `set` assigns to an existing local
 - `using` declares a capability binding for `needs`
 - Variables are block-scoped
@@ -112,6 +115,12 @@ if condition { then_expr } else { else_expr }
 `if` is an expression. `else` is optional when used as a statement.
 ```
 let result = if x < 0 { "neg" } else { if x == 0 { "zero" } else { "pos" } };
+```
+
+### Ternary Operator
+
+```
+let label = ready ? "ok" : "pending";
 ```
 
 ### While Loop
@@ -169,13 +178,17 @@ match option_value {
 - `some(ident)` — Match some option, bind value to ident
 - `none` — Match none option
 - `_` — Wildcard (matches anything, no binding)
+- `true` / `false` — Match boolean literals
+- `"text"` — Match string literals
+- `(a, b)` — Match tuple patterns
+- `name @ pattern` — Bind name to the entire matched value
 - `|` — Or-patterns (e.g. `ok(x) | err(x)`)
 - Guards with `if` (e.g. `some(x) if x > 0`)
 
 ## Functions
 
 ```
-fn add(a: int, b: int) -> int {
+pub fn add(a: int, b: int) -> int {
     return a + b;
 }
 
@@ -296,12 +309,12 @@ set scores["taylor"] = 4;
 ## Structs and Enums
 
 ```
-struct Point<T> {
+pub struct Point<T> {
     x: T,
     y: T,
 }
 
-enum Status<T> {
+pub enum Status<T> {
     Ok(T),
     Err(string),
 }
@@ -313,7 +326,7 @@ let good = Status::Ok(42);
 ## Imports
 
 ```
-import "./math.at" as math;
+pub import "./math.at" as math;
 import "https://example.com/lib.at" as remote;
 ```
 
@@ -350,6 +363,7 @@ term:     + -           (string + string for concatenation)
 - `<`, `<=`, `>`, `>=` — Comparison for int/float
 - `-` — Negation (unary) or subtraction (binary)
 - `!` — Logical NOT
+- `? :` — Ternary conditional
 
 ## Built-in Functions
 
@@ -453,7 +467,8 @@ Run tests with `at test file.at`.
 ```
 program      ::= { function | stmt }
 function     ::= "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
-stmt         ::= import | let | using | set | while | for | break | continue | return | test | expr ";"
+pub_item     ::= "pub" (function | struct | enum | type | import)
+stmt         ::= pub_item | import | const | let | using | set | if_stmt | while | for | break | continue | return | test | expr ";"
 import       ::= "import" string "as" ident ";"
 let          ::= "let" ident [":" type] "=" expr ";"
 using        ::= "using" ident [":" type] "=" expr ";"
@@ -466,7 +481,8 @@ return       ::= "return" [expr] ";"
 test         ::= "test" string block
 block        ::= "{" { stmt } [expr] "}"
 
-expr         ::= or
+expr         ::= ternary
+ternary      ::= or ["?" expr ":" ternary]
 or           ::= and { "||" and }
 and          ::= bit_or { "&&" bit_or }
 bit_or       ::= bit_xor { "|" bit_xor }
@@ -491,7 +507,10 @@ struct_lit   ::= ident "{" field_init { "," field_init } "}"
 enum_lit     ::= ident "::" ident [ "(" expr ")" ]
 if           ::= "if" expr block "else" (block | if)
 match        ::= "match" expr "{" { pattern "=>" expr "," } "}"
-pattern      ::= "ok" "(" ident ")" | "err" "(" ident ")" | "some" "(" ident ")" | "none" | "_" | pattern "|" pattern | pattern "if" expr
+pattern      ::= "ok" "(" ident ")" | "err" "(" ident ")" | "some" "(" ident ")" | "none" | "_"
+              | "true" | "false" | string | tuple_pattern | ident "@" pattern
+              | pattern "|" pattern | pattern "if" expr
+tuple_pattern ::= "(" pattern "," pattern { "," pattern } ")"
 
 type         ::= union_type
 union_type   ::= intersect_type { "|" intersect_type }
@@ -524,3 +543,18 @@ This language prioritizes **agent-friendly** features:
 - `at --help` — CLI reference
 - `docs/cli.md` — Detailed CLI documentation
 - `examples/` — Example programs
+const        ::= "const" ident [":" type] "=" expr ";"
+### If Statement
+
+```
+if condition {
+    print("yes");
+}
+
+if condition {
+    print("yes");
+} else {
+    print("no");
+}
+```
+if_stmt      ::= "if" expr block ["else" (block | if_stmt)]
