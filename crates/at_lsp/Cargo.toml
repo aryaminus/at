@@ -12,7 +12,7 @@ at_lint = { path = "../at_lint" }
 at_vm = { path = "../at_vm" }
 at_fmt = { path = "../at_fmt" }
 lsp-server = "0.7"
-lsp-types = "0.96"
+lsp-types = "0.97"
 serde_json = "1.0"
 sha2 = "0.10"
 hex = "0.4"

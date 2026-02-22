@@ -21,7 +21,8 @@ use lsp_types::{
     SemanticTokensOptions, SemanticTokensParams, ServerCapabilities, SignatureHelp,
     SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Uri,
+    Uri, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities,
+    WorkspaceServerCapabilities,
 };
 use sha2::{Digest, Sha256};
 
@@ -55,6 +56,47 @@ pub fn run_stdio() -> Result<(), String> {
                 },
             ),
         ),
+        workspace: Some(WorkspaceServerCapabilities {
+            workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(lsp_types::OneOf::Left(true)),
+            }),
+            file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                did_create: Some(lsp_types::FileOperationRegistrationOptions {
+                    filters: vec![lsp_types::FileOperationFilter {
+                        scheme: Some("file".to_string()),
+                        pattern: lsp_types::FileOperationPattern {
+                            glob: "**/*.at".to_string(),
+                            matches: None,
+                            options: None,
+                        },
+                    }],
+                }),
+                did_rename: Some(lsp_types::FileOperationRegistrationOptions {
+                    filters: vec![lsp_types::FileOperationFilter {
+                        scheme: Some("file".to_string()),
+                        pattern: lsp_types::FileOperationPattern {
+                            glob: "**/*.at".to_string(),
+                            matches: None,
+                            options: None,
+                        },
+                    }],
+                }),
+                did_delete: Some(lsp_types::FileOperationRegistrationOptions {
+                    filters: vec![lsp_types::FileOperationFilter {
+                        scheme: Some("file".to_string()),
+                        pattern: lsp_types::FileOperationPattern {
+                            glob: "**/*.at".to_string(),
+                            matches: None,
+                            options: None,
+                        },
+                    }],
+                }),
+                will_create: None,
+                will_rename: None,
+                will_delete: None,
+            }),
+        }),
         ..ServerCapabilities::default()
     };
 
