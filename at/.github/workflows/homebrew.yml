@@ -1,0 +1,16 @@
+name: homebrew
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  tap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Prepare Homebrew formula
+        run: |
+          echo "Homebrew tap publishing is a manual step." 

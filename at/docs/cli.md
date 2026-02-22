@@ -204,6 +204,10 @@ at cache prune --max-files 500 --max-mb 50
 | 3 | Compile error |
 | 4 | Runtime error |
 
+## Installation
+
+See `docs/install.md` for platform-specific installation options.
+
 ## Environment Variables
 
 - `AT_CACHE_DIR` — Override the default cache directory (default: `./.at/cache`)

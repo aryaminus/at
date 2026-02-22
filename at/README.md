@@ -114,13 +114,20 @@ export PATH="$PATH:$(pwd)/target/release"
 Download from GitHub releases for your platform:
 
 ```bash
-# macOS
+# macOS (Intel)
 curl -L https://github.com/your-org/at/releases/latest/download/at-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv at /usr/local/bin/
+sudo mv at-x86_64-apple-darwin /usr/local/bin/at
 
 # Linux
-curl -L https://github.com/your-org/at/releases/latest/download/at-x86_64-unknown-linux-musl.tar.gz | tar xz
-sudo mv at /usr/local/bin/
+curl -L https://github.com/your-org/at/releases/latest/download/at-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv at-x86_64-unknown-linux-gnu /usr/local/bin/at
+```
+
+### Homebrew
+
+```bash
+brew tap your-org/at
+brew install at
 ```
 
 ### Verify Installation

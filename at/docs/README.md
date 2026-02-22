@@ -8,6 +8,7 @@ Complete documentation for the `at` programming language.
 - [CLI Reference](cli.md) — All commands and options  
 - [WASM Guide](wasm.md) — Browser and embedded usage
 - [Package Manager](package_manager.md) — Lockfile and cache
+- [Installation](install.md) — Install via releases, brew, or cargo
 
 ## Language Overview
 
