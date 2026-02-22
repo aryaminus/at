@@ -1,6 +1,6 @@
 # at
 
-A programming language designed for AI agents — explicit, readable, and greppable.
+`at` (from `@`) is a programming language designed for AI agents — explicit, readable, and greppable.
 
 ## Design Philosophy
 
@@ -52,6 +52,8 @@ Comprehensive tooling for development, testing, and deployment:
 npm install -g @aryaminus/at
 ```
 
+Use `at` binaries for CLI usage; the npm package provides WASM bindings.
+
 ## Quick Start
 
 ```bash
@@ -100,12 +102,18 @@ at run --help
 
 ```bash
 # Clone and build
-git clone https://github.com/your-org/at.git
+git clone https://github.com/aryaminus/at.git
 cd at
 cargo build --release
 
 # Add to PATH
 export PATH="$PATH:$(pwd)/target/release"
+```
+
+### Cargo (git)
+
+```bash
+cargo install --git https://github.com/aryaminus/at --bin at
 ```
 
 ### Pre-built Binaries

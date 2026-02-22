@@ -5,7 +5,7 @@ Thanks for your interest in contributing to `at`!
 ## Getting Started
 
 ```bash
-git clone https://github.com/your-org/at.git
+git clone https://github.com/aryaminus/at.git
 cd at
 cargo build
 cargo test --workspace

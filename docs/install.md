@@ -41,6 +41,12 @@ Move-Item .\at-x86_64-pc-windows-msvc.exe C:\Windows\System32\at.exe
 cargo install --path crates/at_cli
 ```
 
+## Cargo (git)
+
+```bash
+cargo install --git https://github.com/aryaminus/at --bin at
+```
+
 ## npm (WASM)
 
 ```bash

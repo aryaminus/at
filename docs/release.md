@@ -21,5 +21,5 @@
 ## What the CI does
 
 - Builds and uploads binaries to GitHub Releases (macOS Intel/ARM, Linux, Windows)
-- Publishes `@aryaminus/at` to npm
+- Publishes `@aryaminus/at` to npm (WASM bindings)
 - Updates the Homebrew formula in `aryaminus/homebrew-at`
