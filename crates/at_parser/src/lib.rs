@@ -31,6 +31,7 @@ pub enum TokenKind {
     Return,
     Let,
     Const,
+    Mut,
     Pub,
     Ident(String),
     True,
@@ -2067,7 +2068,26 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_ref(&mut self) -> Result<TypeRef, ParseError> {
-        self.parse_type_union()
+        let qualifier = match self.current.kind {
+            TokenKind::Const => {
+                self.advance();
+                Some(at_syntax::TypeQualifier::Const)
+            }
+            TokenKind::Mut => {
+                self.advance();
+                Some(at_syntax::TypeQualifier::Mut)
+            }
+            _ => None,
+        };
+        let ty = self.parse_type_union()?;
+        if let Some(qualifier) = qualifier {
+            Ok(TypeRef::Qualified {
+                qualifier,
+                ty: Box::new(ty),
+            })
+        } else {
+            Ok(ty)
+        }
     }
 
     fn parse_type_union(&mut self) -> Result<TypeRef, ParseError> {
@@ -2951,6 +2971,7 @@ impl<'a> Lexer<'a> {
             "return" => TokenKind::Return,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
+            "mut" => TokenKind::Mut,
             "pub" => TokenKind::Pub,
             "true" => TokenKind::True,
             "false" => TokenKind::False,

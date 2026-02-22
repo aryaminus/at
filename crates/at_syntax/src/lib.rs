@@ -25,6 +25,10 @@ pub struct Ident {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TypeRef {
+    Qualified {
+        qualifier: TypeQualifier,
+        ty: Box<TypeRef>,
+    },
     Named {
         name: Ident,
         args: Vec<TypeRef>,
@@ -46,6 +50,12 @@ pub enum TypeRef {
         params: Vec<TypeRef>,
         return_ty: Box<TypeRef>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TypeQualifier {
+    Const,
+    Mut,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -687,6 +697,7 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
 
 pub fn walk_type_ref<V: AstVisitor + ?Sized>(visitor: &mut V, ty: &TypeRef) {
     match ty {
+        TypeRef::Qualified { ty, .. } => visitor.visit_type_ref(ty),
         TypeRef::Named { args, .. } => {
             for arg in args {
                 visitor.visit_type_ref(arg);

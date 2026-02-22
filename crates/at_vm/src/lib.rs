@@ -2484,6 +2484,7 @@ impl Compiler {
 
     fn type_check_from_ref(&self, ty: &at_syntax::TypeRef) -> Result<TypeCheck, VmError> {
         match ty {
+            at_syntax::TypeRef::Qualified { ty, .. } => self.type_check_from_ref(ty),
             at_syntax::TypeRef::Named { name, .. } => match name.name.as_str() {
                 "int" => Ok(TypeCheck::Int),
                 "float" => Ok(TypeCheck::Float),

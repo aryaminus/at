@@ -3058,6 +3058,20 @@ impl TypeChecker {
     fn expected_option_inner(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
         match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_option_inner_from_ref(ty.as_ref()),
+            TypeRef::Named { name, args } => {
+                if name.name != "option" || args.len() != 1 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[0]))
+            }
+            _ => None,
+        }
+    }
+
+    fn expected_option_inner_from_ref(&mut self, ty: &TypeRef) -> Option<SimpleType> {
+        match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_option_inner_from_ref(ty),
             TypeRef::Named { name, args } => {
                 if name.name != "option" || args.len() != 1 {
                     return None;
@@ -3071,6 +3085,20 @@ impl TypeChecker {
     fn expected_result_ok(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
         match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_result_ok_from_ref(ty.as_ref()),
+            TypeRef::Named { name, args } => {
+                if name.name != "result" || args.len() != 2 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[0]))
+            }
+            _ => None,
+        }
+    }
+
+    fn expected_result_ok_from_ref(&mut self, ty: &TypeRef) -> Option<SimpleType> {
+        match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_result_ok_from_ref(ty),
             TypeRef::Named { name, args } => {
                 if name.name != "result" || args.len() != 2 {
                     return None;
@@ -3084,6 +3112,20 @@ impl TypeChecker {
     fn expected_result_err(&mut self) -> Option<SimpleType> {
         let ty = self.current_return_ref.clone()?;
         match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_result_err_from_ref(ty.as_ref()),
+            TypeRef::Named { name, args } => {
+                if name.name != "result" || args.len() != 2 {
+                    return None;
+                }
+                Some(self.type_from_ref(&args[1]))
+            }
+            _ => None,
+        }
+    }
+
+    fn expected_result_err_from_ref(&mut self, ty: &TypeRef) -> Option<SimpleType> {
+        match ty {
+            TypeRef::Qualified { ty, .. } => self.expected_result_err_from_ref(ty),
             TypeRef::Named { name, args } => {
                 if name.name != "result" || args.len() != 2 {
                     return None;
@@ -3148,6 +3190,7 @@ impl TypeChecker {
     fn type_from_ref(&mut self, ty: &TypeRef) -> SimpleType {
         self.validate_type_ref(ty);
         match ty {
+            TypeRef::Qualified { ty, .. } => self.type_from_ref(ty),
             TypeRef::Named { name, args } => {
                 if let Some(alias) = self.resolve_alias(name) {
                     return self.type_from_ref(&alias);
@@ -3223,6 +3266,7 @@ impl TypeChecker {
 
     fn validate_type_ref(&mut self, ty: &TypeRef) {
         match ty {
+            TypeRef::Qualified { ty, .. } => self.validate_type_ref(ty),
             TypeRef::Named { name, args } => match name.name.as_str() {
                 "array" => {
                     if args.len() != 1 {

@@ -2259,6 +2259,19 @@ struct PruneReport {
 
 fn type_ref_to_schema(ty: &TypeRef) -> serde_json::Value {
     match ty {
+        TypeRef::Qualified { qualifier, ty } => {
+            let label = match qualifier {
+                at_syntax::TypeQualifier::Const => "const",
+                at_syntax::TypeQualifier::Mut => "mut",
+            };
+            let inner = type_ref_to_schema(ty);
+            json!({
+                "type": "string",
+                "x-at-type": format!("{} {}", label, format_type_ref(ty)),
+                "x-at-qualified": label,
+                "x-at-qualified-inner": inner
+            })
+        }
         TypeRef::Named { name, args } => {
             let mut schema = match name.name.as_str() {
                 "array" => {
@@ -2371,6 +2384,13 @@ fn type_name_to_schema(name: &str) -> serde_json::Value {
 
 fn format_type_ref(ty: &TypeRef) -> String {
     match ty {
+        TypeRef::Qualified { qualifier, ty } => {
+            let label = match qualifier {
+                at_syntax::TypeQualifier::Const => "const",
+                at_syntax::TypeQualifier::Mut => "mut",
+            };
+            format!("{} {}", label, format_type_ref(ty))
+        }
         TypeRef::Named { name, args } => {
             if args.is_empty() {
                 return name.name.clone();

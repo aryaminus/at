@@ -515,7 +515,7 @@ tuple_pattern ::= "(" pattern "," pattern { "," pattern } ")"
 type         ::= union_type
 union_type   ::= intersect_type { "|" intersect_type }
 intersect_type ::= primary_type { "&" primary_type }
-primary_type ::= ident ["<" type { "," type } ">"] | tuple_type | fn_type
+primary_type ::= ["const" | "mut"] ident ["<" type { "," type } ">"] | tuple_type | fn_type
 tuple_type   ::= "(" type "," type { "," type } ")"
 fn_type      ::= "fn" "(" [type { "," type }] ")" "->" type
 ```
@@ -538,12 +538,13 @@ This language prioritizes **agent-friendly** features:
 - Imports are not supported in WASM
 - Strings are immutable; concatenation creates new strings
 
-## See Also
+### Type Qualifiers
 
-- `at --help` — CLI reference
-- `docs/cli.md` — Detailed CLI documentation
-- `examples/` — Example programs
-const        ::= "const" ident [":" type] "=" expr ";"
+```
+const name: const string = "hello";
+let value: mut map<string, int> = map { "a": 1 };
+```
+
 ### If Statement
 
 ```
@@ -558,3 +559,9 @@ if condition {
 }
 ```
 if_stmt      ::= "if" expr block ["else" (block | if_stmt)]
+
+## See Also
+
+- `at --help` — CLI reference
+- `docs/cli.md` — Detailed CLI documentation
+- `examples/` — Example programs

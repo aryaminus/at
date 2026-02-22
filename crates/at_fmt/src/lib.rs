@@ -1118,6 +1118,13 @@ fn format_params(params: &[at_syntax::Param], out: &mut String) {
 
 fn format_type_ref(ty: &at_syntax::TypeRef, out: &mut String) {
     match ty {
+        at_syntax::TypeRef::Qualified { qualifier, ty } => {
+            match qualifier {
+                at_syntax::TypeQualifier::Const => out.push_str("const "),
+                at_syntax::TypeQualifier::Mut => out.push_str("mut "),
+            }
+            format_type_ref(ty, out);
+        }
         at_syntax::TypeRef::Named { name, args } => {
             out.push_str(&name.name);
             if !args.is_empty() {
