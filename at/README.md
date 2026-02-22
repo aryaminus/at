@@ -44,6 +44,15 @@ Comprehensive tooling for development, testing, and deployment:
 - **Cache**: Manage cached remote imports (`at cache`)
 - **WASM**: Browser-compatible runtime
 
+## Packaging
+
+### npm (WASM)
+
+```bash
+npm install
+npm run build:wasm
+```
+
 ## Quick Start
 
 ```bash
