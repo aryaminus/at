@@ -45,6 +45,39 @@ pub struct Prompt {
     pub messages: Vec<JsonValue>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LogMessage {
+    pub level: String,
+    pub message: String,
+    pub data: Option<JsonValue>,
+}
+
+impl LogMessage {
+    pub fn info(message: impl Into<String>) -> Self {
+        Self {
+            level: "info".to_string(),
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn warn(message: impl Into<String>) -> Self {
+        Self {
+            level: "warning".to_string(),
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            level: "error".to_string(),
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
 impl McpServer {
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
@@ -77,6 +110,26 @@ impl McpServer {
     pub fn with_prompts(mut self, prompts: Vec<Prompt>) -> Self {
         self.prompts = prompts;
         self
+    }
+
+    pub fn notify_log_message<W: Write>(
+        &self,
+        mut writer: W,
+        message: LogMessage,
+    ) -> std::io::Result<()> {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "logging/message",
+            "params": {
+                "level": message.level,
+                "message": message.message,
+                "data": message.data,
+            }
+        });
+        let response_line = serde_json::to_string(&notification).unwrap_or_default();
+        writeln!(writer, "{}", response_line)?;
+        writer.flush()?;
+        Ok(())
     }
 
     pub fn run_stdio(&self) -> std::io::Result<()> {
@@ -342,6 +395,23 @@ impl McpServer {
                                 "error": { "code": -32602, "message": "Unknown prompt" }
                             })
                         }
+                    }
+                }
+                "logging/setLevel" => {
+                    let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
+                    let level = params.get("level").and_then(|value| value.as_str());
+                    if level.is_none() {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "Invalid params: level must be a string" }
+                        })
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {}
+                        })
                     }
                 }
                 "tools/list" => json!({
