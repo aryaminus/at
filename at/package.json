@@ -1,22 +1,22 @@
 {
-  "name": "@at-lang/core",
+  "name": "@aryaminus/at",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "description": "WASM bindings for the at language",
   "type": "module",
   "files": [
-    "dist",
-    "crates/at_wasm/example.html",
-    "crates/at_wasm/example.js",
-    "crates/at_wasm/example_web.js",
-    "crates/at_wasm/README.md"
+    "dist"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build crates/at_wasm --target bundler --out-dir ../../dist",
+    "build:wasm": "wasm-pack build crates/at_wasm --target bundler --out-dir ../../dist --scope aryaminus",
+    "prepublishOnly": "npm run build:wasm",
     "test": "cargo test",
     "lint": "cargo test -p at_lint"
   },
   "devDependencies": {
     "wasm-pack": "^0.12.1"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
