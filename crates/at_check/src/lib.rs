@@ -100,6 +100,7 @@ struct TypeChecker {
     last_result_ok: Option<SimpleType>,
     last_result_err: Option<SimpleType>,
     loop_depth: usize,
+    current_is_async: bool,
 }
 
 impl TypeChecker {
@@ -127,6 +128,7 @@ impl TypeChecker {
             last_result_ok: None,
             last_result_err: None,
             loop_depth: 0,
+            current_is_async: false,
         }
     }
 
@@ -186,12 +188,19 @@ impl TypeChecker {
     }
 
     fn check_function(&mut self, func: &Function) {
+        self.current_is_async = func.is_async;
         self.locals.clear();
         self.option_inner.clear();
         self.result_ok.clear();
         self.result_err.clear();
         self.capabilities.clear();
         self.push_scope();
+        if func.is_async && !func.needs.is_empty() {
+            self.push_error(
+                "async fn cannot declare needs".to_string(),
+                Some(func.name.span),
+            );
+        }
         for need in &func.needs {
             self.insert_capability(&need.name);
         }
@@ -221,6 +230,7 @@ impl TypeChecker {
         for stmt in &func.body {
             self.check_stmt(stmt);
         }
+        self.current_is_async = false;
         // Check for missing return statement
         if self.current_return != SimpleType::Unit && self.current_return != SimpleType::Unknown {
             let has_return = func
@@ -852,7 +862,12 @@ impl TypeChecker {
                     }
                 }
             }
-            Expr::Await { expr, .. } => self.check_expr(expr),
+            Expr::Await { expr, .. } => {
+                if !self.current_is_async {
+                    self.push_error("await requires async fn".to_string(), expr_span(expr));
+                }
+                self.check_expr(expr)
+            }
             Expr::TryCatch {
                 try_block,
                 catch_block,

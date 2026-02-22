@@ -431,6 +431,7 @@ pub struct Function {
     pub id: NodeId,
     pub name: Ident,
     pub is_pub: bool,
+    pub is_async: bool,
     pub type_params: Vec<Ident>,
     pub params: Vec<Param>,
     pub return_ty: Option<TypeRef>,

@@ -466,7 +466,7 @@ Run tests with `at test file.at`.
 
 ```
 program      ::= { function | stmt }
-function     ::= "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
+function     ::= ["async"] "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
 pub_item     ::= "pub" (function | struct | enum | type | import)
 stmt         ::= pub_item | import | const | let | using | set | if_stmt | while | for | break | continue | return | test | expr ";"
 import       ::= "import" string "as" ident ";"
@@ -558,6 +558,14 @@ let merged = map { "a": 1, ...extra };
 
 ```
 let value = await call();
+```
+
+### Async Functions
+
+```
+async fn fetch_value() {
+    return await load();
+}
 ```
 
 ### If Statement

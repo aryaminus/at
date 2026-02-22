@@ -143,6 +143,9 @@ fn format_function(
     if func.is_pub {
         out.push_str("pub ");
     }
+    if func.is_async {
+        out.push_str("async ");
+    }
     if func.is_tool {
         out.push_str("tool ");
     }
