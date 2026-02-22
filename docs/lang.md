@@ -497,8 +497,10 @@ postfix      ::= primary { ("." ident) | call | index | "?" | "is" type | "as" t
 call         ::= "(" [expr { "," expr }] ")"
 index        ::= "[" expr "]"
 primary      ::= int | float | string | "true" | "false" | ident | array | map_lit | block | tuple | range | if | match | try_expr | closure | struct_lit | enum_lit | "(" expr ")"
-array        ::= "[" [expr { "," expr }] "]"
-map_lit      ::= "map" "{" [expr ":" expr { "," expr ":" expr }] "}"
+array        ::= "[" [array_item { "," array_item }] "]"
+array_item   ::= expr | "..." expr
+map_lit      ::= "map" "{" [map_item { "," map_item }] "}"
+map_item     ::= expr ":" expr | "..." expr
 tuple        ::= "(" expr "," expr { "," expr } ")"
 range        ::= expr ".." expr
 closure      ::= "|" [ident { "," ident }] "|" expr
@@ -543,6 +545,13 @@ This language prioritizes **agent-friendly** features:
 ```
 const name: const string = "hello";
 let value: mut map<string, int> = map { "a": 1 };
+```
+
+### Spread
+
+```
+let values = [1, 2, ...more];
+let merged = map { "a": 1, ...extra };
 ```
 
 ### If Statement

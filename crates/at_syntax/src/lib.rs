@@ -133,6 +133,11 @@ pub enum Expr {
         id: NodeId,
         items: Vec<Expr>,
     },
+    ArraySpread {
+        spread_span: Span,
+        id: NodeId,
+        expr: Box<Expr>,
+    },
     Index {
         index_span: Span,
         id: NodeId,
@@ -179,6 +184,11 @@ pub enum Expr {
         span: Span,
         id: NodeId,
         entries: Vec<(Expr, Expr)>,
+    },
+    MapSpread {
+        spread_span: Span,
+        id: NodeId,
+        expr: Box<Expr>,
     },
     As {
         expr: Box<Expr>,
@@ -655,6 +665,7 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
                 visitor.visit_expr(item);
             }
         }
+        Expr::ArraySpread { expr, .. } => visitor.visit_expr(expr),
         Expr::Index { base, index, .. } => {
             visitor.visit_expr(base);
             visitor.visit_expr(index);
@@ -687,6 +698,7 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
                 visitor.visit_expr(value);
             }
         }
+        Expr::MapSpread { expr, .. } => visitor.visit_expr(expr),
         Expr::As { expr, ty, .. } | Expr::Is { expr, ty, .. } => {
             visitor.visit_expr(expr);
             visitor.visit_type_ref(ty);

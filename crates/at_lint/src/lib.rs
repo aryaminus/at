@@ -636,6 +636,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(item, used);
             }
         }
+        Expr::ArraySpread { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
+        }
         Expr::Index { base, index, .. } => {
             collect_used_capabilities_expr(base, used);
             collect_used_capabilities_expr(index, used);
@@ -667,6 +670,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(key, used);
                 collect_used_capabilities_expr(value, used);
             }
+        }
+        Expr::MapSpread { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
         }
         Expr::As { expr, .. } | Expr::Is { expr, .. } => {
             collect_used_capabilities_expr(expr, used);
@@ -858,6 +864,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
                 lint_unused_match_bindings_expr(item, config, errors);
             }
         }
+        Expr::ArraySpread { expr, .. } => {
+            lint_unused_match_bindings_expr(expr, config, errors);
+        }
         Expr::Index { base, index, .. } => {
             lint_unused_match_bindings_expr(base, config, errors);
             lint_unused_match_bindings_expr(index, config, errors);
@@ -886,6 +895,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
                 lint_unused_match_bindings_expr(key, config, errors);
                 lint_unused_match_bindings_expr(value, config, errors);
             }
+        }
+        Expr::MapSpread { expr, .. } => {
+            lint_unused_match_bindings_expr(expr, config, errors);
         }
         Expr::As { expr, .. } | Expr::Is { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
@@ -1241,6 +1253,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(item, used);
             }
         }
+        Expr::ArraySpread { expr, .. } => {
+            collect_local_uses_expr(expr, used);
+        }
         Expr::Index { base, index, .. } => {
             collect_local_uses_expr(base, used);
             collect_local_uses_expr(index, used);
@@ -1269,6 +1284,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(key, used);
                 collect_local_uses_expr(value, used);
             }
+        }
+        Expr::MapSpread { expr, .. } => {
+            collect_local_uses_expr(expr, used);
         }
         Expr::As { expr, .. } | Expr::Is { expr, .. } => {
             collect_local_uses_expr(expr, used);
@@ -1459,6 +1477,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(item, used);
             }
         }
+        Expr::ArraySpread { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
+        }
         Expr::Index { base, index, .. } => {
             collect_alias_usage_expr(base, used);
             collect_alias_usage_expr(index, used);
@@ -1487,6 +1508,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(key, used);
                 collect_alias_usage_expr(value, used);
             }
+        }
+        Expr::MapSpread { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
         }
         Expr::As { expr, .. } | Expr::Is { expr, .. } => {
             collect_alias_usage_expr(expr, used);
@@ -1673,6 +1697,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_called_functions_expr(item, used);
             }
         }
+        Expr::ArraySpread { expr, .. } => {
+            collect_called_functions_expr(expr, used);
+        }
         Expr::Index { base, index, .. } => {
             collect_called_functions_expr(base, used);
             collect_called_functions_expr(index, used);
@@ -1701,6 +1728,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_called_functions_expr(key, used);
                 collect_called_functions_expr(value, used);
             }
+        }
+        Expr::MapSpread { expr, .. } => {
+            collect_called_functions_expr(expr, used);
         }
         Expr::As { expr, .. } | Expr::Is { expr, .. } => {
             collect_called_functions_expr(expr, used);

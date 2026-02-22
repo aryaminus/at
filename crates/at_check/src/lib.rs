@@ -922,6 +922,49 @@ impl TypeChecker {
                 let mut array_inner = SimpleType::Unknown;
                 for item in items {
                     let item_ty = self.check_expr(item);
+                    if matches!(item_ty, SimpleType::Array(_)) {
+                        if let SimpleType::Array(inner) = item_ty {
+                            let item_inner = (*inner).clone();
+                            if matches!(array_inner, SimpleType::Unknown) {
+                                array_inner = item_inner;
+                            } else if !matches!(item_inner, SimpleType::Unknown)
+                                && !self.types_compatible(&array_inner, &item_inner)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "array element type mismatch: expected {}, got {}",
+                                        format_type(&array_inner),
+                                        format_type(&item_inner)
+                                    ),
+                                    expr_span(item),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if matches!(item_ty, SimpleType::Tuple(_)) {
+                        if let SimpleType::Tuple(items) = item_ty {
+                            if items.is_empty() {
+                                continue;
+                            }
+                            let item_inner = items[0].clone();
+                            if matches!(array_inner, SimpleType::Unknown) {
+                                array_inner = item_inner;
+                            } else if !matches!(item_inner, SimpleType::Unknown)
+                                && !self.types_compatible(&array_inner, &item_inner)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "array element type mismatch: expected {}, got {}",
+                                        format_type(&array_inner),
+                                        format_type(&item_inner)
+                                    ),
+                                    expr_span(item),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if matches!(array_inner, SimpleType::Unknown) {
                         array_inner = item_ty;
                     } else if !matches!(item_ty, SimpleType::Unknown)
@@ -1002,6 +1045,41 @@ impl TypeChecker {
                 let mut value_ty = SimpleType::Unknown;
                 for (key, value) in entries {
                     let found_key = self.check_expr(key);
+                    if matches!(found_key, SimpleType::Map(_, _)) {
+                        if let SimpleType::Map(inner_key, inner_value) = found_key {
+                            let found_key = (*inner_key).clone();
+                            let found_value = (*inner_value).clone();
+                            if matches!(key_ty, SimpleType::Unknown) {
+                                key_ty = found_key.clone();
+                            } else if !matches!(found_key, SimpleType::Unknown)
+                                && !self.types_compatible(&key_ty, &found_key)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "map key type mismatch: expected {}, got {}",
+                                        format_type(&key_ty),
+                                        format_type(&found_key)
+                                    ),
+                                    expr_span(key),
+                                );
+                            }
+                            if matches!(value_ty, SimpleType::Unknown) {
+                                value_ty = found_value.clone();
+                            } else if !matches!(found_value, SimpleType::Unknown)
+                                && !self.types_compatible(&value_ty, &found_value)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "map value type mismatch: expected {}, got {}",
+                                        format_type(&value_ty),
+                                        format_type(&found_value)
+                                    ),
+                                    expr_span(key),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if matches!(key_ty, SimpleType::Unknown) {
                         key_ty = found_key;
                     } else if !matches!(found_key, SimpleType::Unknown)
@@ -1034,6 +1112,37 @@ impl TypeChecker {
                     }
                 }
                 SimpleType::Map(Box::new(key_ty), Box::new(value_ty))
+            }
+            Expr::ArraySpread { expr, .. } => {
+                let found = self.check_expr(expr);
+                match found {
+                    SimpleType::Array(inner) => SimpleType::Array(inner),
+                    SimpleType::Tuple(items) => SimpleType::Array(Box::new(
+                        items.into_iter().next().unwrap_or(SimpleType::Unknown),
+                    )),
+                    SimpleType::Unknown => SimpleType::Unknown,
+                    other => {
+                        self.push_error(
+                            format!("spread expects array or tuple, got {}", format_type(&other)),
+                            expr_span(expr),
+                        );
+                        SimpleType::Unknown
+                    }
+                }
+            }
+            Expr::MapSpread { expr, .. } => {
+                let found = self.check_expr(expr);
+                match found {
+                    SimpleType::Map(key, value) => SimpleType::Map(key, value),
+                    SimpleType::Unknown => SimpleType::Unknown,
+                    other => {
+                        self.push_error(
+                            format!("spread expects map, got {}", format_type(&other)),
+                            expr_span(expr),
+                        );
+                        SimpleType::Unknown
+                    }
+                }
             }
             Expr::As { expr, ty, .. } => {
                 let _ = self.check_expr(expr);
@@ -3374,6 +3483,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),
+        Expr::ArraySpread { spread_span, .. } => Some(*spread_span),
         Expr::Index { index_span, .. } => Some(*index_span),
         Expr::Tuple { tuple_span, .. } => Some(*tuple_span),
         Expr::Range { range_span, .. } => Some(*range_span),
@@ -3382,6 +3492,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
         Expr::MapLiteral { span, .. } => Some(*span),
+        Expr::MapSpread { spread_span, .. } => Some(*spread_span),
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
         Expr::Group { span, .. } => Some(*span),

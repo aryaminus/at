@@ -78,6 +78,7 @@ pub enum TokenKind {
     RBrace,
     Comma,
     Dot,
+    DotDotDot,
     DotDot,
     DotDotEquals,
     Semicolon,
@@ -1466,10 +1467,23 @@ impl<'a> Parser<'a> {
         let mut entries = Vec::new();
         if self.current.kind != TokenKind::RBrace {
             loop {
-                let key = self.parse_expr()?;
-                self.expect(TokenKind::Colon)?;
-                let value = self.parse_expr()?;
-                entries.push((key, value));
+                if self.current.kind == TokenKind::DotDotDot {
+                    let spread_span = self.current.span;
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    let key = Expr::MapSpread {
+                        spread_span,
+                        id: self.alloc_id(),
+                        expr: Box::new(expr),
+                    };
+                    let placeholder = Expr::Bool(true, spread_span, self.alloc_id());
+                    entries.push((key, placeholder));
+                } else {
+                    let key = self.parse_expr()?;
+                    self.expect(TokenKind::Colon)?;
+                    let value = self.parse_expr()?;
+                    entries.push((key, value));
+                }
                 if self.current.kind != TokenKind::Comma {
                     break;
                 }
@@ -1594,7 +1608,18 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
         if self.current.kind != TokenKind::RBracket {
             loop {
-                items.push(self.parse_expr()?);
+                if self.current.kind == TokenKind::DotDotDot {
+                    let spread_span = self.current.span;
+                    self.advance();
+                    let expr = self.parse_expr()?;
+                    items.push(Expr::ArraySpread {
+                        spread_span,
+                        id: self.alloc_id(),
+                        expr: Box::new(expr),
+                    });
+                } else {
+                    items.push(self.parse_expr()?);
+                }
                 if self.current.kind != TokenKind::Comma {
                     break;
                 }
@@ -2613,7 +2638,13 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 if self.current == Some('.') {
                     self.bump();
-                    if self.current == Some('=') {
+                    if self.current == Some('.') {
+                        self.bump();
+                        Token {
+                            kind: TokenKind::DotDotDot,
+                            span: Span::new(start, self.index),
+                        }
+                    } else if self.current == Some('=') {
                         self.bump();
                         Token {
                             kind: TokenKind::DotDotEquals,
@@ -3079,6 +3110,7 @@ fn expr_span_start(expr: &Expr) -> Option<usize> {
         Expr::Match { match_span, .. } => Some(match_span.start),
         Expr::Block { block_span, .. } => Some(block_span.start),
         Expr::Array { array_span, .. } => Some(array_span.start),
+        Expr::ArraySpread { spread_span, .. } => Some(spread_span.start),
         Expr::Index { index_span, .. } => Some(index_span.start),
         Expr::Tuple { tuple_span, .. } => Some(tuple_span.start),
         Expr::Range { range_span, .. } => Some(range_span.start),
@@ -3087,6 +3119,7 @@ fn expr_span_start(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
         Expr::MapLiteral { span, .. } => Some(span.start),
+        Expr::MapSpread { spread_span, .. } => Some(spread_span.start),
         Expr::As { span, .. } => Some(span.start),
         Expr::Is { span, .. } => Some(span.start),
         Expr::Group { span, .. } => Some(span.start),
@@ -3115,6 +3148,7 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
         Expr::Match { match_span, .. } => Some(match_span.end),
         Expr::Block { block_span, .. } => Some(block_span.end),
         Expr::Array { array_span, .. } => Some(array_span.end),
+        Expr::ArraySpread { spread_span, .. } => Some(spread_span.end),
         Expr::Index { index_span, .. } => Some(index_span.end),
         Expr::Tuple { tuple_span, .. } => Some(tuple_span.end),
         Expr::Range { range_span, .. } => Some(range_span.end),
@@ -3123,6 +3157,7 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
         Expr::MapLiteral { span, .. } => Some(span.end),
+        Expr::MapSpread { spread_span, .. } => Some(spread_span.end),
         Expr::As { span, .. } => Some(span.end),
         Expr::Is { span, .. } => Some(span.end),
         Expr::Group { span, .. } => Some(span.end),

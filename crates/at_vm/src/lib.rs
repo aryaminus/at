@@ -107,6 +107,7 @@ pub enum Op {
     Div,
     Mod,
     Array(usize),
+    ArraySpread(usize),
     Tuple(usize),
     Index,
     StoreIndex,
@@ -122,6 +123,7 @@ pub enum Op {
     CallValue(usize),
     Range(bool),
     Map(usize),
+    MapSpread(usize),
     IsType(TypeCheck),
     Cast(TypeCheck),
     Eq,
@@ -1065,10 +1067,37 @@ impl Compiler {
                 self.pop_scope();
             }
             Expr::Array { items, .. } => {
+                let mut array_count = 0;
+                let mut chunk_count = 0;
+                let mut has_spread = false;
                 for item in items {
                     self.compile_expr(item, chunk)?;
+                    match item {
+                        Expr::ArraySpread { .. } => {
+                            if array_count > 0 {
+                                chunk.push(Op::Array(array_count), expr_span(expr));
+                                array_count = 0;
+                                chunk_count += 1;
+                            }
+                            has_spread = true;
+                            chunk_count += 1;
+                        }
+                        _ => {
+                            array_count += 1;
+                        }
+                    }
                 }
-                chunk.push(Op::Array(items.len()), expr_span(expr));
+                if array_count > 0 {
+                    chunk.push(Op::Array(array_count), expr_span(expr));
+                    chunk_count += 1;
+                }
+                if has_spread {
+                    chunk.push(Op::ArraySpread(chunk_count), expr_span(expr));
+                }
+            }
+            Expr::ArraySpread { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::ArraySpread(1), expr_span(expr));
             }
             Expr::Index { base, index, .. } => {
                 self.compile_expr(base, chunk)?;
@@ -1082,11 +1111,35 @@ impl Compiler {
                 chunk.push(Op::Tuple(items.len()), expr_span(expr));
             }
             Expr::MapLiteral { entries, .. } => {
+                let mut map_count = 0;
+                let mut chunk_count = 0;
+                let mut has_spread = false;
                 for (key, value) in entries {
                     self.compile_expr(key, chunk)?;
-                    self.compile_expr(value, chunk)?;
+                    if let Expr::MapSpread { .. } = key {
+                        if map_count > 0 {
+                            chunk.push(Op::Map(map_count), expr_span(expr));
+                            map_count = 0;
+                            chunk_count += 1;
+                        }
+                        has_spread = true;
+                        chunk_count += 1;
+                    } else {
+                        self.compile_expr(value, chunk)?;
+                        map_count += 1;
+                    }
                 }
-                chunk.push(Op::Map(entries.len()), expr_span(expr));
+                if map_count > 0 {
+                    chunk.push(Op::Map(map_count), expr_span(expr));
+                    chunk_count += 1;
+                }
+                if has_spread {
+                    chunk.push(Op::MapSpread(chunk_count), expr_span(expr));
+                }
+            }
+            Expr::MapSpread { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::MapSpread(1), expr_span(expr));
             }
             Expr::As { expr, ty, .. } => {
                 self.compile_expr(expr, chunk)?;
@@ -2203,11 +2256,17 @@ impl Compiler {
                     self.collect_free_vars_expr(item, bound, captures, seen);
                 }
             }
+            Expr::ArraySpread { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
             Expr::MapLiteral { entries, .. } => {
                 for (key, value) in entries {
                     self.collect_free_vars_expr(key, bound, captures, seen);
                     self.collect_free_vars_expr(value, bound, captures, seen);
                 }
+            }
+            Expr::MapSpread { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::As { expr, .. } | Expr::Is { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
@@ -3542,6 +3601,74 @@ impl Vm {
                     entries.reverse();
                     self.stack.push(Value::Map(Rc::new(entries)));
                 }
+                Op::ArraySpread(count) => {
+                    if self.stack.len() < *count {
+                        return Err(runtime_error_at(
+                            "stack underflow".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut chunks = Vec::with_capacity(*count);
+                    for _ in 0..*count {
+                        let value = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                        chunks.push(value);
+                    }
+                    chunks.reverse();
+                    let mut items = Vec::new();
+                    for item in chunks {
+                        match item {
+                            Value::Array(values) | Value::Tuple(values) => {
+                                items.extend(values.iter().cloned());
+                            }
+                            _ => {
+                                return Err(runtime_error_at(
+                                    "spread expects array or tuple".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ))
+                            }
+                        }
+                    }
+                    self.stack.push(Value::Array(Rc::new(items)));
+                }
+                Op::MapSpread(count) => {
+                    if self.stack.len() < *count {
+                        return Err(runtime_error_at(
+                            "stack underflow".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut chunks = Vec::with_capacity(*count);
+                    for _ in 0..*count {
+                        let value = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                        chunks.push(value);
+                    }
+                    chunks.reverse();
+                    let mut entries = Vec::new();
+                    for item in chunks {
+                        match item {
+                            Value::Map(values) => {
+                                entries.extend(values.iter().cloned());
+                            }
+                            _ => {
+                                return Err(runtime_error_at(
+                                    "spread expects map".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ))
+                            }
+                        }
+                    }
+                    self.stack.push(Value::Map(Rc::new(entries)));
+                }
                 Op::Index => {
                     let index_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -4416,6 +4543,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),
+        Expr::ArraySpread { spread_span, .. } => Some(*spread_span),
         Expr::Index { index_span, .. } => Some(*index_span),
         Expr::Tuple { tuple_span, .. } => Some(*tuple_span),
         Expr::Range { range_span, .. } => Some(*range_span),
@@ -4424,6 +4552,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
         Expr::MapLiteral { span, .. } => Some(*span),
+        Expr::MapSpread { spread_span, .. } => Some(*spread_span),
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
         Expr::Ternary { span, .. } => Some(*span),

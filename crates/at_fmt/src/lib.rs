@@ -226,6 +226,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::Match { match_span, .. } => Some(match_span.start),
         Expr::Block { block_span, .. } => Some(block_span.start),
         Expr::Array { array_span, .. } => Some(array_span.start),
+        Expr::ArraySpread { spread_span, .. } => Some(spread_span.start),
         Expr::Index { index_span, .. } => Some(index_span.start),
         Expr::Tuple { tuple_span, .. } => Some(tuple_span.start),
         Expr::Range { range_span, .. } => Some(range_span.start),
@@ -234,6 +235,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
         Expr::MapLiteral { span, .. } => Some(span.start),
+        Expr::MapSpread { spread_span, .. } => Some(spread_span.start),
         Expr::As { span, .. } => Some(span.start),
         Expr::Is { span, .. } => Some(span.start),
         Expr::Group { span, .. } => Some(span.start),
@@ -275,6 +277,7 @@ fn expr_end(expr: &Expr) -> Option<usize> {
         Expr::Match { match_span, .. } => Some(match_span.end),
         Expr::Block { block_span, .. } => Some(block_span.end),
         Expr::Array { array_span, .. } => Some(array_span.end),
+        Expr::ArraySpread { spread_span, .. } => Some(spread_span.end),
         Expr::Index { index_span, .. } => Some(index_span.end),
         Expr::Tuple { tuple_span, .. } => Some(tuple_span.end),
         Expr::Range { range_span, .. } => Some(range_span.end),
@@ -283,6 +286,7 @@ fn expr_end(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
         Expr::MapLiteral { span, .. } => Some(span.end),
+        Expr::MapSpread { spread_span, .. } => Some(spread_span.end),
         Expr::As { span, .. } => Some(span.end),
         Expr::Is { span, .. } => Some(span.end),
         Expr::Group { span, .. } => Some(span.end),
@@ -880,12 +884,24 @@ fn format_expr_prec_indent(
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                format_expr_prec_indent(item, out, 0, indent, comment_state);
+                match item {
+                    Expr::ArraySpread { expr, .. } => {
+                        out.push_str("...");
+                        format_expr_prec_indent(expr, out, 0, indent, comment_state);
+                    }
+                    _ => {
+                        format_expr_prec_indent(item, out, 0, indent, comment_state);
+                    }
+                }
                 if let Some(item_span) = expr_span(item) {
                     comment_state.emit_inline_between(out, item_span, item_span + 1);
                 }
             }
             out.push(']');
+        }
+        Expr::ArraySpread { expr, .. } => {
+            out.push_str("...");
+            format_expr_prec_indent(expr, out, 0, indent, comment_state);
         }
         Expr::Index { base, index, .. } => {
             format_expr_prec_indent(base, out, 0, indent, comment_state);
@@ -952,14 +968,23 @@ fn format_expr_prec_indent(
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                format_expr_prec_indent(key, out, 0, indent, comment_state);
-                out.push_str(": ");
-                format_expr_prec_indent(value, out, 0, indent, comment_state);
+                if let Expr::MapSpread { expr, .. } = key {
+                    out.push_str("...");
+                    format_expr_prec_indent(expr, out, 0, indent, comment_state);
+                } else {
+                    format_expr_prec_indent(key, out, 0, indent, comment_state);
+                    out.push_str(": ");
+                    format_expr_prec_indent(value, out, 0, indent, comment_state);
+                }
             }
             if !entries.is_empty() {
                 out.push(' ');
             }
             out.push('}');
+        }
+        Expr::MapSpread { expr, .. } => {
+            out.push_str("...");
+            format_expr_prec_indent(expr, out, 0, indent, comment_state);
         }
         Expr::As { expr, ty, .. } => {
             format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);
