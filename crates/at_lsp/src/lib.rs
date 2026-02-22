@@ -1203,6 +1203,7 @@ fn get_cached_module(
                 functions: module.functions.clone(),
                 stmts: module.stmts.clone(),
                 comments: Vec::new(),
+                source_path: module.source_path.clone(),
             },
         },
     );

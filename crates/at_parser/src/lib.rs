@@ -235,6 +235,7 @@ impl<'a> Parser<'a> {
                 functions,
                 stmts,
                 comments: std::mem::take(&mut self.comments),
+                source_path: None,
             },
             errors,
         )
@@ -256,6 +257,7 @@ impl<'a> Parser<'a> {
             functions,
             stmts,
             comments: std::mem::take(&mut self.comments),
+            source_path: None,
         })
     }
 

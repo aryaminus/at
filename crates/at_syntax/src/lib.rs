@@ -427,6 +427,7 @@ pub struct Module {
     pub functions: Vec<Function>,
     pub stmts: Vec<Stmt>,
     pub comments: Vec<Comment>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
