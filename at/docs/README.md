@@ -51,6 +51,7 @@ See `examples/` directory for working examples:
 - `primes.at` — Algorithm example
 - `features.at` — Comprehensive feature demo
 - `calculator.at` — Error handling example
+- `mcp_tools.at` — MCP tool definition sample
 
 ## License
 

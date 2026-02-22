@@ -59,6 +59,12 @@ true, false
 "hello world"
 ```
 
+String interpolation:
+```
+"hello {name}"
+"total = {sum}"
+```
+
 String escape sequences:
 - `\n` — newline
 - `\t` — tab
@@ -103,7 +109,7 @@ using time = time.fixed("2026-01-01T00:00:00Z");
 if condition { then_expr } else { else_expr }
 ```
 
-**Important**: `if` is an expression, not a statement. The `else` branch is **required**.
+`if` is an expression. `else` is optional when used as a statement.
 ```
 let result = if x < 0 { "neg" } else { if x == 0 { "zero" } else { "pos" } };
 ```
@@ -163,6 +169,8 @@ match option_value {
 - `some(ident)` — Match some option, bind value to ident
 - `none` — Match none option
 - `_` — Wildcard (matches anything, no binding)
+- `|` — Or-patterns (e.g. `ok(x) | err(x)`)
+- Guards with `if` (e.g. `some(x) if x > 0`)
 
 ## Functions
 
@@ -173,6 +181,14 @@ fn add(a: int, b: int) -> int {
 
 fn greet(name: string) -> string {
     return "Hello, " + name;
+}
+```
+
+### Generic Functions
+
+```
+fn identity<T>(value: T) -> T {
+    return value;
 }
 ```
 
@@ -263,6 +279,23 @@ for value in values {
 - `slice(array, start, end)` — Returns sub-array from start (inclusive) to end (exclusive)
 - `array[index]` — Access element at index
 
+## Structs and Enums
+
+```
+struct Point<T> {
+    x: T,
+    y: T,
+}
+
+enum Status<T> {
+    Ok(T),
+    Err(string),
+}
+
+let origin = Point { x: 0, y: 0 };
+let good = Status::Ok(42);
+```
+
 ## Imports
 
 ```
@@ -283,16 +316,20 @@ postfix:  call ( ... ), member (.), index ([ ]), try (?)
 unary:    - !
 factor:   * / %
 term:     + -           (string + string for concatenation)
-compare:  < <= > >=
-equality: == !=
-and:      &&
-or:       ||
+    compare:  < <= > >=
+    equality: == !=
+    bit_and:  &
+    bit_xor:  ^
+    bit_or:   |
+    and:      &&
+    or:       ||
 ```
 
 ### Operator Details
 
 - `&&` — Logical AND (short-circuit)
 - `||` — Logical OR (short-circuit)
+- `&`, `|`, `^`, `<<`, `>>` — Bitwise ops (int only)
 - `%` — Modulo (remainder)
 - `+` — Addition for int/float, concatenation for strings
 - `==`, `!=` — Equality works on all types
@@ -368,7 +405,7 @@ Run tests with `at test file.at`.
 
 ```
 program      ::= { function | stmt }
-function     ::= "fn" ident "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
+function     ::= "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
 stmt         ::= import | let | using | set | while | for | break | continue | return | test | expr ";"
 import       ::= "import" string "as" ident ";"
 let          ::= "let" ident [":" type] "=" expr ";"
@@ -384,7 +421,10 @@ block        ::= "{" { stmt } [expr] "}"
 
 expr         ::= or
 or           ::= and { "||" and }
-and          ::= equality { "&&" equality }
+and          ::= bit_or { "&&" bit_or }
+bit_or       ::= bit_xor { "|" bit_xor }
+bit_xor      ::= bit_and { "^" bit_and }
+bit_and      ::= equality { "&" equality }
 equality     ::= comparison { ("==" | "!=") comparison }
 comparison   ::= term { ("<" | "<=" | ">" | ">=") term }
 term         ::= factor { ("+" | "-") factor }
@@ -393,11 +433,16 @@ unary        ::= ("-" | "!") unary | postfix
 postfix      ::= primary { ("." ident) | call | index | "?" }
 call         ::= "(" [expr { "," expr }] ")"
 index        ::= "[" expr "]"
-primary      ::= int | float | string | "true" | "false" | ident | array | block | "(" expr ")" | if | match
+primary      ::= int | float | string | "true" | "false" | ident | array | block | tuple | range | if | match | closure | struct_lit | enum_lit | "(" expr ")"
 array        ::= "[" [expr { "," expr }] "]"
+tuple        ::= "(" expr "," expr { "," expr } ")"
+range        ::= expr ".." expr
+closure      ::= "|" [ident { "," ident }] "|" expr
+struct_lit   ::= ident "{" field_init { "," field_init } "}"
+enum_lit     ::= ident "::" ident [ "(" expr ")" ]
 if           ::= "if" expr block "else" (block | if)
 match        ::= "match" expr "{" { pattern "=>" expr "," } "}"
-pattern      ::= "ok" "(" ident ")" | "err" "(" ident ")" | "some" "(" ident ")" | "none" | "_"
+pattern      ::= "ok" "(" ident ")" | "err" "(" ident ")" | "some" "(" ident ")" | "none" | "_" | pattern "|" pattern | pattern "if" expr
 
 type         ::= ident ["<" type { "," type } ">"]
 ```
@@ -417,9 +462,7 @@ This language prioritizes **agent-friendly** features:
 ## Known Limitations
 
 - `time.fixed()` and `rng.*` functions are stubs (return fixed values)
-- No closures or higher-order functions
-- No mutable arrays (all operations return new arrays)
-- No generics beyond `array`, `option`, `result`
+- Imports are not supported in WASM
 - Strings are immutable; concatenation creates new strings
 
 ## See Also

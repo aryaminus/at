@@ -15,7 +15,12 @@ fn basic_math() -> int {
     
     // Modulo
     let rem = a % b;
-    
+
+    // Bitwise
+    let bit_and = a & b;
+    let bit_or = a | b;
+    let bit_xor = a ^ b;
+
     // Comparison
     let is_greater = a > b;
     let is_equal = a == b;
@@ -33,6 +38,12 @@ fn basic_math() -> int {
     print(quot);
     print("Rem: ");
     print(rem);
+    print("BitAnd: ");
+    print(bit_and);
+    print("BitOr: ");
+    print(bit_or);
+    print("BitXor: ");
+    print(bit_xor);
     
     return sum;
 }
@@ -54,6 +65,9 @@ fn string_ops() -> string {
     let greeting = "Hello";
     let target = "World";
     let message = greeting + ", " + target + "!";
+
+    let interpolated = "Hello {target}";
+    print(interpolated);
     
     // String with escapes
     let multiline = "Line 1\nLine 2\tTabbed";
@@ -86,6 +100,14 @@ fn logical_ops() -> bool {
     // Combined
     let combined = (a || b) && !b;
     return combined;
+}
+
+// Closures and higher-order functions
+fn closure_demo() -> int {
+    let values = [1, 2, 3, 4];
+    let doubled = map(values, |x| x * 2);
+    let sum = reduce(doubled, 0, |acc, x| acc + x);
+    return sum;
 }
 
 // Control flow: if expressions
@@ -187,7 +209,7 @@ fn safe_divide(a: int, b: int) -> result<int, string> {
 
 fn match_result(a: int, b: int) -> string {
     let result = safe_divide(a, b);
-    
+
     let message = match result {
         ok(value) => "Result: " + value,
         err(msg) => "Error: " + msg,
@@ -212,9 +234,9 @@ fn find_in_array(arr: array<int>, target: int) -> option<int> {
 
 fn match_option(arr: array<int>, target: int) -> string {
     let found = find_in_array(arr, target);
-    
+
     let result = match found {
-        some(index) => "Found at index: " + index,
+        some(index) if index >= 0 => "Found at index: " + index,
         _ => "Not found",
     };
     
@@ -227,6 +249,26 @@ fn try_demo() -> result<int, string> {
     let b = safe_divide(a, 2)?;
     let c = safe_divide(b, 1)?;
     return ok(c);
+}
+
+// Structs and enums
+struct Point {
+    x: int,
+    y: int,
+}
+
+enum Status {
+    Ok(int),
+    Err(string),
+}
+
+fn struct_enum_demo() -> string {
+    let origin = Point { x: 0, y: 0 };
+    let status = Status::Ok(origin.x + origin.y);
+    return match status {
+        Status::Ok(value) => "ok: " + value,
+        Status::Err(msg) => "err: " + msg,
+    };
 }
 
 // Functions with needs

@@ -47,6 +47,24 @@ Run the linter on a file. Reports style issues and potential bugs.
 at lint file.at
 ```
 
+#### Lint configuration
+
+Create `.at-lint.toml` in your project root:
+
+```toml
+[rules]
+unused_function = "warn"
+import_order = "off"
+
+disable = ["unnecessary_needs"]
+```
+
+Inline suppression:
+
+```
+// @lint-ignore unused_function
+```
+
 ### `at test <file.at>`
 
 Run test blocks defined in a file.
@@ -61,10 +79,11 @@ at test file.at
 
 ### `at fmt <file.at>`
 
-Format a file and print the result to stdout. Does not modify the original file.
+Format a file and print the result to stdout. Use `--write` to update in place.
 
 ```
 at fmt file.at > file_formatted.at
+at fmt --write file.at
 ```
 
 ### `at bench <file.at>`
@@ -97,6 +116,12 @@ at lsp
 - Go to definition
 - Auto-completion
 - Inlay hints
+- Signature help
+- Document symbols
+- Formatting
+- Semantic tokens
+- Folding ranges
+- Document highlights
 
 ### `at mcp-server <file.at>`
 

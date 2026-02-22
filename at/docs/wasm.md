@@ -17,6 +17,13 @@ rustup target add wasm32-unknown-unknown
 cargo build -p at_wasm --target wasm32-unknown-unknown --release
 ```
 
+### Build with wasm-pack
+
+```bash
+cargo install wasm-pack
+wasm-pack build crates/at_wasm --target web
+```
+
 The output will be at:
 ```
 target/wasm32-unknown-unknown/release/at_wasm.wasm
