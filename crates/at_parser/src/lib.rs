@@ -1689,6 +1689,26 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.current.kind == TokenKind::LParen {
+            let tuple_span = self.current.span;
+            self.advance();
+            let mut items = Vec::new();
+            if self.current.kind != TokenKind::RParen {
+                loop {
+                    items.push(self.parse_type_ref()?);
+                    if self.current.kind != TokenKind::Comma {
+                        break;
+                    }
+                    self.advance();
+                    if self.current.kind == TokenKind::RParen {
+                        break;
+                    }
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+            return Ok(TypeRef::Tuple { tuple_span, items });
+        }
+
         let name = self.expect_ident()?;
         let args = if self.current.kind == TokenKind::Less {
             self.advance();

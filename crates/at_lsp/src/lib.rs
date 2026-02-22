@@ -1896,6 +1896,16 @@ fn format_type_ref(ty: &TypeRef, out: &mut String) {
                 out.push('>');
             }
         }
+        TypeRef::Tuple { items, .. } => {
+            out.push('(');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                format_type_ref(item, out);
+            }
+            out.push(')');
+        }
         TypeRef::Function {
             params, return_ty, ..
         } => {

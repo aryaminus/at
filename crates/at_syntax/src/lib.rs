@@ -16,6 +16,10 @@ pub enum TypeRef {
         name: Ident,
         args: Vec<TypeRef>,
     },
+    Tuple {
+        tuple_span: Span,
+        items: Vec<TypeRef>,
+    },
     Function {
         fn_span: Span,
         params: Vec<TypeRef>,

@@ -15,6 +15,7 @@ enum SimpleType {
     Option(Box<SimpleType>),
     Result(Box<SimpleType>, Box<SimpleType>),
     Function(Vec<SimpleType>, Box<SimpleType>),
+    Tuple(Vec<SimpleType>),
     Custom(String, Vec<SimpleType>),
     Unknown,
 }
@@ -719,10 +720,11 @@ impl TypeChecker {
                 }
             }
             Expr::Tuple { items, .. } => {
+                let mut tys = Vec::new();
                 for item in items {
-                    self.check_expr(item);
+                    tys.push(self.check_expr(item));
                 }
-                SimpleType::Unknown
+                SimpleType::Tuple(tys)
             }
             Expr::Range { start, end, .. } => {
                 self.check_expr(start);
@@ -1049,6 +1051,13 @@ impl TypeChecker {
             (SimpleType::Result(ok_left, err_left), SimpleType::Result(ok_right, err_right)) => {
                 self.types_compatible(ok_left, ok_right)
                     && self.types_compatible(err_left, err_right)
+            }
+            (SimpleType::Tuple(left), SimpleType::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right.iter())
+                        .all(|(l, r)| self.types_compatible(l, r))
             }
             (
                 SimpleType::Function(params_left, ret_left),
@@ -2790,6 +2799,9 @@ impl TypeChecker {
                     }
                 }
             }
+            TypeRef::Tuple { items, .. } => {
+                SimpleType::Tuple(items.iter().map(|item| self.type_from_ref(item)).collect())
+            }
             TypeRef::Function {
                 params, return_ty, ..
             } => SimpleType::Function(
@@ -2840,6 +2852,11 @@ impl TypeChecker {
                     }
                 }
             },
+            TypeRef::Tuple { items, .. } => {
+                for item in items {
+                    self.validate_type_ref(item);
+                }
+            }
             TypeRef::Function {
                 params, return_ty, ..
             } => {
@@ -2919,6 +2936,10 @@ fn format_type(ty: &SimpleType) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("fn({params}) -> {}", format_type(return_ty))
+        }
+        SimpleType::Tuple(items) => {
+            let inner = items.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            format!("({inner})")
         }
         SimpleType::Custom(name, args) => {
             if args.is_empty() {
