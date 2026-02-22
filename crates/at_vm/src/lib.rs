@@ -320,7 +320,7 @@ impl Compiler {
         let mut current = base;
         loop {
             match current {
-                Expr::Member { base, name } => {
+                Expr::Member { base, name, .. } => {
                     path.push(SetSegment::Member(name.clone()));
                     current = base;
                 }
@@ -328,6 +328,7 @@ impl Compiler {
                     base,
                     index,
                     index_span,
+                    ..
                 } => {
                     path.push(SetSegment::Index {
                         expr: (**index).clone(),
@@ -657,7 +658,7 @@ impl Compiler {
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
                 chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
             }
-            Stmt::Set { name, value } => {
+            Stmt::Set { name, value, .. } => {
                 self.compile_expr(value, chunk)?;
                 let slot = self.resolve_local(&name.name).ok_or_else(|| {
                     compile_error(
@@ -667,11 +668,15 @@ impl Compiler {
                 })?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
             }
-            Stmt::SetMember { base, field, value } => {
+            Stmt::SetMember {
+                base, field, value, ..
+            } => {
                 let segments = vec![SetSegment::Member(field.clone())];
                 self.compile_set_target(base, segments, value, chunk)?;
             }
-            Stmt::SetIndex { base, index, value } => {
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
                 let segments = vec![SetSegment::Index {
                     expr: index.clone(),
                     span: expr_span(index),
@@ -682,6 +687,7 @@ impl Compiler {
                 while_span,
                 condition,
                 body,
+                ..
             } => {
                 let loop_start = chunk.code.len();
                 self.loop_stack.push(LoopContext::new());
@@ -710,6 +716,7 @@ impl Compiler {
                 item,
                 iter,
                 body,
+                ..
             } => {
                 self.compile_expr(iter, chunk)?;
                 let arr_name = self.next_synthetic_name("for_arr");
@@ -761,7 +768,7 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::Break { break_span } => {
+            Stmt::Break { break_span, .. } => {
                 let jump = chunk.code.len();
                 chunk.push(Op::Jump(usize::MAX), Some(*break_span));
                 if let Some(loop_ctx) = self.loop_stack.last_mut() {
@@ -773,7 +780,7 @@ impl Compiler {
                     ));
                 }
             }
-            Stmt::Continue { continue_span } => {
+            Stmt::Continue { continue_span, .. } => {
                 let jump = chunk.code.len();
                 chunk.push(Op::Jump(usize::MAX), Some(*continue_span));
                 if let Some(loop_ctx) = self.loop_stack.last_mut() {
@@ -785,11 +792,11 @@ impl Compiler {
                     ));
                 }
             }
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
                 chunk.push(Op::Pop, expr_span(expr));
             }
-            Stmt::Return(expr) => {
+            Stmt::Return { expr, .. } => {
                 if let Some(expr) = expr {
                     self.compile_expr(expr, chunk)?;
                 } else {
@@ -798,7 +805,7 @@ impl Compiler {
                 }
                 chunk.push(Op::Return, expr.as_ref().and_then(expr_span));
             }
-            Stmt::Block(stmts) => {
+            Stmt::Block { stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {
                     self.compile_stmt(stmt, chunk)?;
@@ -819,19 +826,19 @@ impl Compiler {
 
     fn compile_expr(&mut self, expr: &Expr, chunk: &mut Chunk) -> Result<(), VmError> {
         match expr {
-            Expr::Int(value, _) => {
+            Expr::Int(value, _, _) => {
                 let index = chunk.add_const(Value::Int(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
-            Expr::Float(value, _) => {
+            Expr::Float(value, _, _) => {
                 let index = chunk.add_const(Value::Float(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
-            Expr::String(value, _) => {
+            Expr::String(value, _, _) => {
                 let index = chunk.add_const(Value::String(Rc::new(value.clone())));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
-            Expr::Bool(value, _) => {
+            Expr::Bool(value, _, _) => {
                 let index = chunk.add_const(Value::Bool(*value));
                 chunk.push(Op::Const(index), expr_span(expr));
             }
@@ -849,6 +856,7 @@ impl Compiler {
                 op,
                 op_span,
                 right,
+                ..
             } => match op {
                 at_syntax::BinaryOp::And => {
                     self.compile_to_bool(left, chunk)?;
@@ -908,7 +916,9 @@ impl Compiler {
                     chunk.push(op, Some(*op_span));
                 }
             },
-            Expr::Unary { op, op_span, expr } => {
+            Expr::Unary {
+                op, op_span, expr, ..
+            } => {
                 self.compile_expr(expr, chunk)?;
                 let op = match op {
                     at_syntax::UnaryOp::Neg => Op::Neg,
@@ -921,6 +931,7 @@ impl Compiler {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 self.compile_expr(condition, chunk)?;
                 let jump_if_false = chunk.code.len();
@@ -1001,11 +1012,11 @@ impl Compiler {
                 chunk.push(Op::Const(empty_idx), expr_span(expr));
                 for part in parts {
                     match part {
-                        at_syntax::InterpPart::String(s) => {
+                        at_syntax::InterpPart::String(s, _) => {
                             let idx = chunk.add_const(Value::String(Rc::new(s.clone())));
                             chunk.push(Op::Const(idx), expr_span(expr));
                         }
-                        at_syntax::InterpPart::Expr(e) => {
+                        at_syntax::InterpPart::Expr(e, _) => {
                             self.compile_expr(e, chunk)?;
                         }
                     }
@@ -1049,11 +1060,13 @@ impl Compiler {
             Expr::Group { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
             }
-            Expr::Closure { span, params, body } => {
+            Expr::Closure {
+                span, params, body, ..
+            } => {
                 self.compile_closure_expr(*span, params, body, chunk)?;
             }
-            Expr::Call { callee, args } => {
-                if let Expr::Member { base, name } = callee.as_ref() {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Member { base, name, .. } = callee.as_ref() {
                     if let Expr::Ident(base_ident) = base.as_ref() {
                         if let Some(builtin) = map_builtin(&base_ident.name, &name.name, args.len())
                         {
@@ -1326,7 +1339,7 @@ impl Compiler {
                 chunk.push(Op::CallValue(args.len()), expr_span(callee));
                 return Ok(());
             }
-            Expr::Try(expr) => {
+            Expr::Try(expr, _) => {
                 self.compile_expr(expr, chunk)?;
                 chunk.push(Op::Try, expr_span(expr));
             }
@@ -1370,10 +1383,11 @@ impl Compiler {
                 match_span,
                 value,
                 arms,
+                ..
             } => {
                 self.compile_match_expr(*match_span, value, arms, chunk)?;
             }
-            Expr::Member { base, name } => {
+            Expr::Member { base, name, .. } => {
                 self.compile_expr(base, chunk)?;
                 chunk.push(Op::GetMember(name.name.clone()), Some(name.span));
             }
@@ -1402,7 +1416,7 @@ impl Compiler {
         let mut guard_fail_jumps: Vec<(usize, usize)> = Vec::new();
         let mut wildcard_body_index: Option<usize> = None;
         for (arm_index, arm) in arms.iter().enumerate() {
-            let is_wildcard = matches!(arm.pattern, at_syntax::MatchPattern::Wildcard);
+            let is_wildcard = matches!(arm.pattern, at_syntax::MatchPattern::Wildcard(_));
             let arm_start = if is_wildcard {
                 let idx = chunk.code.len();
                 if arm.guard.is_none() {
@@ -1414,11 +1428,13 @@ impl Compiler {
                 let match_op_index = chunk.code.len();
                 chunk.push(
                     match &arm.pattern {
-                        at_syntax::MatchPattern::Int(value) => Op::MatchInt(*value, usize::MAX),
-                        at_syntax::MatchPattern::ResultOk(_) => Op::MatchResultOk(usize::MAX),
-                        at_syntax::MatchPattern::ResultErr(_) => Op::MatchResultErr(usize::MAX),
-                        at_syntax::MatchPattern::OptionSome(_) => Op::MatchOptionSome(usize::MAX),
-                        at_syntax::MatchPattern::OptionNone => Op::MatchOptionNone(usize::MAX),
+                        at_syntax::MatchPattern::Int(value, _) => Op::MatchInt(*value, usize::MAX),
+                        at_syntax::MatchPattern::ResultOk(_, _) => Op::MatchResultOk(usize::MAX),
+                        at_syntax::MatchPattern::ResultErr(_, _) => Op::MatchResultErr(usize::MAX),
+                        at_syntax::MatchPattern::OptionSome(_, _) => {
+                            Op::MatchOptionSome(usize::MAX)
+                        }
+                        at_syntax::MatchPattern::OptionNone(_) => Op::MatchOptionNone(usize::MAX),
                         at_syntax::MatchPattern::Struct { fields, .. } => {
                             let names = fields
                                 .iter()
@@ -1430,13 +1446,14 @@ impl Compiler {
                             name,
                             variant,
                             binding,
+                            ..
                         } => Op::MatchEnum {
                             name: name.name.clone(),
                             variant: variant.name.clone(),
                             has_payload: binding.is_some(),
                             target: usize::MAX,
                         },
-                        at_syntax::MatchPattern::Wildcard => unreachable!(),
+                        at_syntax::MatchPattern::Wildcard(_) => unreachable!(),
                     },
                     Some(match_span),
                 );
@@ -1450,16 +1467,16 @@ impl Compiler {
             let mut binding_span: Option<Span> = None;
             let mut struct_guard_slot: Option<usize> = None;
             match &arm.pattern {
-                at_syntax::MatchPattern::Int(_) => {}
-                at_syntax::MatchPattern::ResultOk(ident)
-                | at_syntax::MatchPattern::ResultErr(ident)
-                | at_syntax::MatchPattern::OptionSome(ident) => {
+                at_syntax::MatchPattern::Int(_, _) => {}
+                at_syntax::MatchPattern::ResultOk(ident, _)
+                | at_syntax::MatchPattern::ResultErr(ident, _)
+                | at_syntax::MatchPattern::OptionSome(ident, _) => {
                     let slot = self.bind_local_checked(&ident.name, ident.span)?;
                     chunk.push(Op::StoreLocal(slot), Some(ident.span));
                     binding_slot = Some(slot);
                     binding_span = Some(ident.span);
                 }
-                at_syntax::MatchPattern::OptionNone => {}
+                at_syntax::MatchPattern::OptionNone(_) => {}
                 at_syntax::MatchPattern::Enum { binding, .. } => {
                     if let Some(binding) = binding {
                         let slot = self.bind_local_checked(&binding.name, binding.span)?;
@@ -1490,7 +1507,7 @@ impl Compiler {
                         chunk.push(Op::Pop, Some(match_span));
                     }
                 }
-                at_syntax::MatchPattern::Wildcard => {}
+                at_syntax::MatchPattern::Wildcard(_) => {}
             }
 
             let mut guard_jump_index: Option<usize> = None;
@@ -1515,7 +1532,7 @@ impl Compiler {
                 patch_jump(&mut chunk.code, guard_jump_index, guard_fail_index);
 
                 match &arm.pattern {
-                    at_syntax::MatchPattern::Int(value) => {
+                    at_syntax::MatchPattern::Int(value, _) => {
                         let idx = chunk.add_const(Value::Int(*value));
                         chunk.push(Op::Const(idx), Some(match_span));
                     }
@@ -1533,7 +1550,7 @@ impl Compiler {
                             chunk.push(Op::LoadLocal(slot), span);
                         }
                     }
-                    at_syntax::MatchPattern::ResultOk(_) => {
+                    at_syntax::MatchPattern::ResultOk(_, _) => {
                         let slot = binding_slot.ok_or_else(|| {
                             compile_error("missing match binding".to_string(), Some(match_span))
                         })?;
@@ -1541,7 +1558,7 @@ impl Compiler {
                         chunk.push(Op::LoadLocal(slot), span);
                         chunk.push(Op::Builtin(Builtin::ResultOk), span);
                     }
-                    at_syntax::MatchPattern::ResultErr(_) => {
+                    at_syntax::MatchPattern::ResultErr(_, _) => {
                         let slot = binding_slot.ok_or_else(|| {
                             compile_error("missing match binding".to_string(), Some(match_span))
                         })?;
@@ -1549,7 +1566,7 @@ impl Compiler {
                         chunk.push(Op::LoadLocal(slot), span);
                         chunk.push(Op::Builtin(Builtin::ResultErr), span);
                     }
-                    at_syntax::MatchPattern::OptionSome(_) => {
+                    at_syntax::MatchPattern::OptionSome(_, _) => {
                         let slot = binding_slot.ok_or_else(|| {
                             compile_error("missing match binding".to_string(), Some(match_span))
                         })?;
@@ -1557,10 +1574,10 @@ impl Compiler {
                         chunk.push(Op::LoadLocal(slot), span);
                         chunk.push(Op::Builtin(Builtin::OptionSome), span);
                     }
-                    at_syntax::MatchPattern::OptionNone => {
+                    at_syntax::MatchPattern::OptionNone(_) => {
                         chunk.push(Op::Builtin(Builtin::OptionNone), Some(match_span));
                     }
-                    at_syntax::MatchPattern::Wildcard => {}
+                    at_syntax::MatchPattern::Wildcard(_) => {}
                 }
 
                 let guard_fail_jump = chunk.code.len();
@@ -1907,7 +1924,10 @@ impl Compiler {
         seen: &mut HashSet<String>,
     ) {
         match expr {
-            Expr::Int(_, _) | Expr::Float(_, _) | Expr::String(_, _) | Expr::Bool(_, _) => {}
+            Expr::Int(_, _, _)
+            | Expr::Float(_, _, _)
+            | Expr::String(_, _, _)
+            | Expr::Bool(_, _, _) => {}
             Expr::Range { start, end, .. } => {
                 self.collect_free_vars_expr(start, bound, captures, seen);
                 self.collect_free_vars_expr(end, bound, captures, seen);
@@ -1942,13 +1962,13 @@ impl Compiler {
             Expr::Member { base, .. } => {
                 self.collect_free_vars_expr(base, bound, captures, seen);
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 self.collect_free_vars_expr(callee, bound, captures, seen);
                 for arg in args {
                     self.collect_free_vars_expr(arg, bound, captures, seen);
                 }
             }
-            Expr::Try(expr) => {
+            Expr::Try(expr, _) => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::TryCatch {
@@ -2007,7 +2027,7 @@ impl Compiler {
             }
             Expr::InterpolatedString { parts, .. } => {
                 for part in parts {
-                    if let at_syntax::InterpPart::Expr(expr) = part {
+                    if let at_syntax::InterpPart::Expr(expr, _) = part {
                         self.collect_free_vars_expr(expr, bound, captures, seen);
                     }
                 }
@@ -2051,7 +2071,9 @@ impl Compiler {
                 self.collect_free_vars_expr(base, bound, captures, seen);
                 self.collect_free_vars_expr(value, bound, captures, seen);
             }
-            Stmt::SetIndex { base, index, value } => {
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
                 self.collect_free_vars_expr(base, bound, captures, seen);
                 self.collect_free_vars_expr(index, bound, captures, seen);
                 self.collect_free_vars_expr(value, bound, captures, seen);
@@ -2080,15 +2102,15 @@ impl Compiler {
                 self.pop_bound_scope(bound);
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
-            Stmt::Return(expr) => {
+            Stmt::Return { expr, .. } => {
                 if let Some(expr) = expr {
                     self.collect_free_vars_expr(expr, bound, captures, seen);
                 }
             }
-            Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_bound_scope(bound);
                 for stmt in stmts {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
@@ -2104,12 +2126,12 @@ impl Compiler {
         bound: &mut Vec<HashSet<String>>,
     ) {
         let name = match pattern {
-            at_syntax::MatchPattern::ResultOk(ident)
-            | at_syntax::MatchPattern::ResultErr(ident)
-            | at_syntax::MatchPattern::OptionSome(ident) => Some(&ident.name),
-            at_syntax::MatchPattern::Int(_)
-            | at_syntax::MatchPattern::OptionNone
-            | at_syntax::MatchPattern::Wildcard => None,
+            at_syntax::MatchPattern::ResultOk(ident, _)
+            | at_syntax::MatchPattern::ResultErr(ident, _)
+            | at_syntax::MatchPattern::OptionSome(ident, _) => Some(&ident.name),
+            at_syntax::MatchPattern::Int(_, _)
+            | at_syntax::MatchPattern::OptionNone(_)
+            | at_syntax::MatchPattern::Wildcard(_) => None,
             at_syntax::MatchPattern::Struct { .. } => None,
             at_syntax::MatchPattern::Enum { binding, .. } => binding.as_ref().map(|b| &b.name),
         };
@@ -4050,17 +4072,17 @@ fn runtime_error_at(message: String, span: Option<Span>) -> VmError {
 
 fn expr_span(expr: &Expr) -> Option<Span> {
     match expr {
-        Expr::Int(_, span) => Some(*span),
-        Expr::Float(_, span) => Some(*span),
-        Expr::String(_, span) => Some(*span),
-        Expr::Bool(_, span) => Some(*span),
+        Expr::Int(_, span, _) => Some(*span),
+        Expr::Float(_, span, _) => Some(*span),
+        Expr::String(_, span, _) => Some(*span),
+        Expr::Bool(_, span, _) => Some(*span),
         Expr::Ident(ident) => Some(ident.span),
         Expr::Unary { op_span, .. } => Some(*op_span),
         Expr::Binary { op_span, .. } => Some(*op_span),
         Expr::If { if_span, .. } => Some(*if_span),
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
-        Expr::Try(expr) => expr_span(expr),
+        Expr::Try(expr, _) => expr_span(expr),
         Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Group { span, .. } => Some(*span),
         Expr::Match { match_span, .. } => Some(*match_span),

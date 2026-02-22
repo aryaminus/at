@@ -308,7 +308,7 @@ fn main() {
 
         let mut failures = 0;
         for stmt in &module.stmts {
-            if let at_syntax::Stmt::Test { name, body } = stmt {
+            if let at_syntax::Stmt::Test { name, body, .. } = stmt {
                 let chunk = match compiler.compile_test_body(body) {
                     Ok(chunk) => chunk,
                     Err(err) => {
@@ -1142,6 +1142,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
     if !visited.insert(normalized.clone()) {
         return Ok(LoadedModule {
             module: Module {
+                id: at_syntax::NodeId(0),
                 functions: Vec::new(),
                 stmts: Vec::new(),
                 comments: Vec::new(),
@@ -1168,7 +1169,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
 
     for stmt in module.stmts.drain(..) {
         match stmt {
-            Stmt::Import { path, alias } => {
+            Stmt::Import { path, alias, .. } => {
                 if !seen_aliases.insert(alias.name.clone()) {
                     return Err(format!("duplicate import alias: {}", alias.name));
                 }
@@ -1210,6 +1211,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
 
     Ok(LoadedModule {
         module: Module {
+            id: module.id,
             functions: merged_functions,
             stmts: merged_stmts,
             comments: Vec::new(),

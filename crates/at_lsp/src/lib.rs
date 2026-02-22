@@ -764,7 +764,7 @@ fn provide_folding_ranges(text: &str, module: Option<&Module>) -> Option<Vec<Fol
         }
     }
     for stmt in &module.stmts {
-        if let at_syntax::Stmt::Block(stmts) = stmt {
+        if let at_syntax::Stmt::Block { stmts, .. } = stmt {
             if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
                 let start = stmt_span(first);
                 let end = stmt_span(last);
@@ -1066,7 +1066,7 @@ fn collect_imports(text: &str) -> Option<HashMap<String, ImportInfo>> {
 fn collect_imports_from_module(module: &Module) -> HashMap<String, ImportInfo> {
     let mut imports = HashMap::new();
     for stmt in &module.stmts {
-        if let at_syntax::Stmt::Import { path, alias } = stmt {
+        if let at_syntax::Stmt::Import { path, alias, .. } = stmt {
             imports.insert(
                 alias.name.clone(),
                 ImportInfo {
@@ -1157,6 +1157,7 @@ fn get_cached_module(
         DocCacheEntry {
             hash,
             module: Module {
+                id: module.id,
                 functions: module.functions.clone(),
                 stmts: module.stmts.clone(),
                 comments: Vec::new(),
@@ -1585,10 +1586,10 @@ fn span_to_range(text: &str, span: Span) -> Range {
 
 fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
     match expr {
-        at_syntax::Expr::Int(_, span)
-        | at_syntax::Expr::Float(_, span)
-        | at_syntax::Expr::String(_, span)
-        | at_syntax::Expr::Bool(_, span) => Some(*span),
+        at_syntax::Expr::Int(_, span, _)
+        | at_syntax::Expr::Float(_, span, _)
+        | at_syntax::Expr::String(_, span, _)
+        | at_syntax::Expr::Bool(_, span, _) => Some(*span),
         at_syntax::Expr::Ident(ident) => Some(ident.span),
         at_syntax::Expr::Unary { expr, .. } => expr_span(expr),
         at_syntax::Expr::Binary { left, right, .. } => {
@@ -1610,12 +1611,12 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             };
             Some(Span::new(start, end))
         }
-        at_syntax::Expr::Member { base, name } => {
+        at_syntax::Expr::Member { base, name, .. } => {
             let start = expr_span(base)?.start;
             let end = name.span.end;
             Some(Span::new(start, end))
         }
-        at_syntax::Expr::Call { callee, args } => {
+        at_syntax::Expr::Call { callee, args, .. } => {
             let start = expr_span(callee)?.start;
             let end = if let Some(last) = args.last() {
                 expr_span(last)?.end
@@ -1624,7 +1625,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             };
             Some(Span::new(start, end))
         }
-        at_syntax::Expr::Try(expr) => expr_span(expr),
+        at_syntax::Expr::Try(expr, _) => expr_span(expr),
         at_syntax::Expr::TryCatch { try_span, .. } => Some(*try_span),
         at_syntax::Expr::Match { match_span, .. } => Some(*match_span),
         at_syntax::Expr::Block { block_span, .. } => Some(*block_span),
@@ -1656,13 +1657,13 @@ fn stmt_span(stmt: &at_syntax::Stmt) -> Span {
         at_syntax::Stmt::SetIndex { base, .. } => expr_span(base).unwrap_or(Span::new(0, 0)),
         at_syntax::Stmt::While { while_span, .. } => *while_span,
         at_syntax::Stmt::For { for_span, .. } => *for_span,
-        at_syntax::Stmt::Break { break_span } => *break_span,
-        at_syntax::Stmt::Continue { continue_span } => *continue_span,
-        at_syntax::Stmt::Expr(expr) => expr_span(expr).unwrap_or(Span::new(0, 0)),
-        at_syntax::Stmt::Return(expr) => {
+        at_syntax::Stmt::Break { break_span, .. } => *break_span,
+        at_syntax::Stmt::Continue { continue_span, .. } => *continue_span,
+        at_syntax::Stmt::Expr { expr, .. } => expr_span(expr).unwrap_or(Span::new(0, 0)),
+        at_syntax::Stmt::Return { expr, .. } => {
             expr.as_ref().and_then(expr_span).unwrap_or(Span::new(0, 0))
         }
-        at_syntax::Stmt::Block(stmts) => {
+        at_syntax::Stmt::Block { stmts, .. } => {
             if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
                 let start = stmt_span(first).start;
                 let end = stmt_span(last).end;

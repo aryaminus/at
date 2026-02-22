@@ -282,7 +282,7 @@ pub fn lint_module_with_config(
         if let Stmt::Import { alias, .. } = stmt {
             aliases.push(alias.clone());
         }
-        if let Stmt::Import { path, alias } = stmt {
+        if let Stmt::Import { path, alias, .. } = stmt {
             import_paths.push((path.clone(), alias.clone()));
         }
     }
@@ -427,21 +427,24 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
 
     for stmt in stmts {
         match stmt {
-            Stmt::Break { break_span }
+            Stmt::Break { break_span, .. }
             | Stmt::Continue {
                 continue_span: break_span,
+                ..
             } => {
                 if unreachable_start.is_none() {
                     unreachable_start = Some(*break_span);
                 }
             }
-            Stmt::Return(Some(_expr)) => {
+            Stmt::Return {
+                expr: Some(_expr), ..
+            } => {
                 if unreachable_start.is_none() {
                     // Get span from the statement itself if possible
                     unreachable_start = Some(Span::new(0, 0));
                 }
             }
-            Stmt::Return(None) => {
+            Stmt::Return { expr: None, .. } => {
                 if unreachable_start.is_none() {
                     // Use a default span since Return without value has no span
                     unreachable_start = Some(Span::new(0, 0));
@@ -465,7 +468,10 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
         match stmt {
             Stmt::While { body, .. } => check_unreachable_stmts(body, config, errors),
             Stmt::For { body, .. } => check_unreachable_stmts(body, config, errors),
-            Stmt::Block(nested_stmts) => check_unreachable_stmts(nested_stmts, config, errors),
+            Stmt::Block {
+                stmts: nested_stmts,
+                ..
+            } => check_unreachable_stmts(nested_stmts, config, errors),
             Stmt::Test { body, .. } => check_unreachable_stmts(body, config, errors),
             _ => {}
         }
@@ -512,7 +518,7 @@ fn lint_unnecessary_needs(module: &Module, config: &LintConfig, errors: &mut Vec
 
 fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
+        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_used_capabilities_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -522,7 +528,9 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_used_capabilities_expr(base, used);
             collect_used_capabilities_expr(value, used);
         }
-        Stmt::SetIndex { base, index, value } => {
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
             collect_used_capabilities_expr(base, used);
             collect_used_capabilities_expr(index, used);
             collect_used_capabilities_expr(value, used);
@@ -541,12 +549,12 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
                 collect_used_capabilities_stmt(stmt, used);
             }
         }
-        Stmt::Return(value) => {
-            if let Some(expr) = value {
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
                 collect_used_capabilities_expr(expr, used);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_used_capabilities_stmt(stmt, used);
             }
@@ -563,7 +571,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
             }
             collect_used_capabilities_expr(base, used);
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             collect_used_capabilities_expr(callee, used);
             for arg in args {
                 collect_used_capabilities_expr(arg, used);
@@ -614,7 +622,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
             collect_used_capabilities_expr(base, used);
             collect_used_capabilities_expr(index, used);
         }
-        Expr::Try(expr) => {
+        Expr::Try(expr, _) => {
             collect_used_capabilities_expr(expr, used);
         }
         Expr::Tuple { items, .. } => {
@@ -651,7 +659,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         }
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
-                if let InterpPart::Expr(expr) = part {
+                if let InterpPart::Expr(expr, _) = part {
                     collect_used_capabilities_expr(expr, used);
                 }
             }
@@ -679,7 +687,7 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
 fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mut Vec<LintError>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
+        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
             lint_unused_match_bindings_expr(value, config, errors);
         }
         Stmt::Set { value, .. } => {
@@ -689,7 +697,9 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
             lint_unused_match_bindings_expr(base, config, errors);
             lint_unused_match_bindings_expr(value, config, errors);
         }
-        Stmt::SetIndex { base, index, value } => {
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
             lint_unused_match_bindings_expr(base, config, errors);
             lint_unused_match_bindings_expr(index, config, errors);
             lint_unused_match_bindings_expr(value, config, errors);
@@ -709,12 +719,12 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return(value) => {
-            if let Some(expr) = value {
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
                 lint_unused_match_bindings_expr(expr, config, errors);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 lint_unused_match_bindings_stmt(stmt, config, errors);
             }
@@ -771,7 +781,7 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
                 lint_unused_match_bindings_expr(else_expr, config, errors);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             lint_unused_match_bindings_expr(callee, config, errors);
             for arg in args {
                 lint_unused_match_bindings_expr(arg, config, errors);
@@ -780,7 +790,7 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
         Expr::Member { base, .. } => {
             lint_unused_match_bindings_expr(base, config, errors);
         }
-        Expr::Try(expr) => {
+        Expr::Try(expr, _) => {
             lint_unused_match_bindings_expr(expr, config, errors);
         }
         Expr::Block { stmts, tail, .. } => {
@@ -834,7 +844,7 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
         }
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
-                if let InterpPart::Expr(expr) = part {
+                if let InterpPart::Expr(expr, _) = part {
                     lint_unused_match_bindings_expr(expr, config, errors);
                 }
             }
@@ -861,11 +871,11 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
 
 fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
     match pattern {
-        at_syntax::MatchPattern::Int(_) => Vec::new(),
-        at_syntax::MatchPattern::ResultOk(ident)
-        | at_syntax::MatchPattern::ResultErr(ident)
-        | at_syntax::MatchPattern::OptionSome(ident) => vec![ident.clone()],
-        at_syntax::MatchPattern::OptionNone => Vec::new(),
+        at_syntax::MatchPattern::Int(_, _) => Vec::new(),
+        at_syntax::MatchPattern::ResultOk(ident, _)
+        | at_syntax::MatchPattern::ResultErr(ident, _)
+        | at_syntax::MatchPattern::OptionSome(ident, _) => vec![ident.clone()],
+        at_syntax::MatchPattern::OptionNone(_) => Vec::new(),
         at_syntax::MatchPattern::Struct { fields, .. } => fields
             .iter()
             .filter_map(|field| field.binding.clone().or_else(|| Some(field.name.clone())))
@@ -873,7 +883,7 @@ fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
         at_syntax::MatchPattern::Enum { binding, .. } => {
             binding.clone().map_or_else(Vec::new, |ident| vec![ident])
         }
-        at_syntax::MatchPattern::Wildcard => Vec::new(),
+        at_syntax::MatchPattern::Wildcard(_) => Vec::new(),
     }
 }
 
@@ -985,7 +995,7 @@ fn collect_local_defs_stmt(
                 collect_local_defs_stmt(stmt, locals, &mut inner_seen, config, errors);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             let mut inner_seen = HashSet::new();
             for stmt in stmts {
                 collect_local_defs_stmt(stmt, locals, &mut inner_seen, config, errors);
@@ -998,7 +1008,7 @@ fn collect_local_defs_stmt(
 fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
+        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_local_uses_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1008,7 +1018,9 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_local_uses_expr(base, used);
             collect_local_uses_expr(value, used);
         }
-        Stmt::SetIndex { base, index, value } => {
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
             collect_local_uses_expr(base, used);
             collect_local_uses_expr(index, used);
             collect_local_uses_expr(value, used);
@@ -1028,12 +1040,12 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return(value) => {
-            if let Some(expr) = value {
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
                 collect_local_uses_expr(expr, used);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_local_uses_stmt(stmt, used);
             }
@@ -1086,13 +1098,13 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(base, used);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             collect_local_uses_expr(callee, used);
             for arg in args {
                 collect_local_uses_expr(arg, used);
             }
         }
-        Expr::Try(expr) => {
+        Expr::Try(expr, _) => {
             collect_local_uses_expr(expr, used);
         }
         Expr::Match { value, arms, .. } => {
@@ -1155,7 +1167,7 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
         }
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
-                if let InterpPart::Expr(expr) = part {
+                if let InterpPart::Expr(expr, _) = part {
                     collect_local_uses_expr(expr, used);
                 }
             }
@@ -1194,7 +1206,7 @@ fn collect_alias_usage(module: &Module, used: &mut HashSet<String>) {
 fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
+        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_alias_usage_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1204,7 +1216,9 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_alias_usage_expr(base, used);
             collect_alias_usage_expr(value, used);
         }
-        Stmt::SetIndex { base, index, value } => {
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
             collect_alias_usage_expr(base, used);
             collect_alias_usage_expr(index, used);
             collect_alias_usage_expr(value, used);
@@ -1224,12 +1238,12 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return(value) => {
-            if let Some(expr) = value {
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
                 collect_alias_usage_expr(expr, used);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_alias_usage_stmt(stmt, used);
             }
@@ -1268,13 +1282,13 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(base, used);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             collect_alias_usage_expr(callee, used);
             for arg in args {
                 collect_alias_usage_expr(arg, used);
             }
         }
-        Expr::Try(expr) => {
+        Expr::Try(expr, _) => {
             collect_alias_usage_expr(expr, used);
         }
         Expr::Match { value, arms, .. } => {
@@ -1337,7 +1351,7 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
         }
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
-                if let InterpPart::Expr(expr) = part {
+                if let InterpPart::Expr(expr, _) = part {
                     collect_alias_usage_expr(expr, used);
                 }
             }
@@ -1376,7 +1390,7 @@ fn collect_called_functions(module: &Module, used: &mut HashSet<String>) {
 fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
     match stmt {
         Stmt::Import { .. } | Stmt::Struct { .. } | Stmt::TypeAlias { .. } | Stmt::Enum { .. } => {}
-        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr(value) => {
+        Stmt::Let { value, .. } | Stmt::Using { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_called_functions_expr(value, used);
         }
         Stmt::Set { value, .. } => {
@@ -1386,7 +1400,9 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             collect_called_functions_expr(base, used);
             collect_called_functions_expr(value, used);
         }
-        Stmt::SetIndex { base, index, value } => {
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
             collect_called_functions_expr(base, used);
             collect_called_functions_expr(index, used);
             collect_called_functions_expr(value, used);
@@ -1406,12 +1422,12 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return(value) => {
-            if let Some(expr) = value {
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
                 collect_called_functions_expr(expr, used);
             }
         }
-        Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+        Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_called_functions_stmt(stmt, used);
             }
@@ -1421,7 +1437,7 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
 
 fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
     match expr {
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             if let Expr::Ident(ident) = callee.as_ref() {
                 used.insert(ident.name.clone());
             }
@@ -1452,7 +1468,7 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Member { base, .. } => {
             collect_called_functions_expr(base, used);
         }
-        Expr::Try(expr) => {
+        Expr::Try(expr, _) => {
             collect_called_functions_expr(expr, used);
         }
         Expr::Match { value, arms, .. } => {
@@ -1515,7 +1531,7 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         }
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
-                if let InterpPart::Expr(expr) = part {
+                if let InterpPart::Expr(expr, _) = part {
                     collect_called_functions_expr(expr, used);
                 }
             }

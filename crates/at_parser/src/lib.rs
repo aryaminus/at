@@ -165,6 +165,7 @@ struct Parser<'a> {
     current: Token,
     comments: Vec<Comment>,
     pending_token: Option<Token>,
+    next_id: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -177,9 +178,16 @@ impl<'a> Parser<'a> {
             },
             comments: Vec::new(),
             pending_token: None,
+            next_id: 1,
         };
         parser.advance();
         parser
+    }
+
+    fn alloc_id(&mut self) -> at_syntax::NodeId {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        at_syntax::NodeId(id)
     }
 
     fn parse_module_with_errors(&mut self) -> (Module, Vec<ParseError>) {
@@ -213,6 +221,7 @@ impl<'a> Parser<'a> {
         }
         (
             Module {
+                id: self.alloc_id(),
                 functions,
                 stmts,
                 comments: std::mem::take(&mut self.comments),
@@ -232,6 +241,7 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(Module {
+            id: self.alloc_id(),
             functions,
             stmts,
             comments: std::mem::take(&mut self.comments),
@@ -313,12 +323,18 @@ impl<'a> Parser<'a> {
                 if self.current.kind == TokenKind::Semicolon {
                     self.advance();
                 }
-                Ok(Stmt::Expr(expr))
+                Ok(Stmt::Expr {
+                    id: self.alloc_id(),
+                    expr,
+                })
             }
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::Semicolon)?;
-                Ok(Stmt::Expr(expr))
+                Ok(Stmt::Expr {
+                    id: self.alloc_id(),
+                    expr,
+                })
             }
         }
     }
@@ -360,6 +376,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(Function {
+            id: self.alloc_id(),
             name,
             type_params,
             params,
@@ -383,6 +400,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Let {
+            id: self.alloc_id(),
             name: ident,
             ty,
             value,
@@ -408,7 +426,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::As)?;
         let alias = self.expect_ident()?;
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Import { path, alias })
+        Ok(Stmt::Import {
+            id: self.alloc_id(),
+            path,
+            alias,
+        })
     }
 
     fn parse_type_alias_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -417,7 +439,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::Equals)?;
         let ty = self.parse_type_ref()?;
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::TypeAlias { name, ty })
+        Ok(Stmt::TypeAlias {
+            id: self.alloc_id(),
+            name,
+            ty,
+        })
     }
 
     fn parse_enum_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -438,6 +464,7 @@ impl<'a> Parser<'a> {
                     None
                 };
                 variants.push(EnumVariant {
+                    id: self.alloc_id(),
                     name: variant_name,
                     payload,
                 });
@@ -452,6 +479,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(Stmt::Enum {
+            id: self.alloc_id(),
             name,
             type_params,
             variants,
@@ -470,6 +498,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Colon)?;
                 let ty = self.parse_type_ref()?;
                 fields.push(StructField {
+                    id: self.alloc_id(),
                     name: field_name,
                     ty,
                 });
@@ -484,6 +513,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(Stmt::Struct {
+            id: self.alloc_id(),
             name,
             type_params,
             fields,
@@ -525,6 +555,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Using {
+            id: self.alloc_id(),
             name: ident,
             ty,
             value,
@@ -547,6 +578,7 @@ impl<'a> Parser<'a> {
 
                 if self.current.kind == TokenKind::Dot || self.current.kind == TokenKind::LBracket {
                     base_expr = Expr::Member {
+                        id: self.alloc_id(),
                         base: Box::new(base_expr),
                         name: field,
                     };
@@ -569,6 +601,7 @@ impl<'a> Parser<'a> {
                 if self.current.kind == TokenKind::Dot || self.current.kind == TokenKind::LBracket {
                     base_expr = Expr::Index {
                         index_span,
+                        id: self.alloc_id(),
                         base: Box::new(base_expr),
                         index: Box::new(index),
                     };
@@ -651,17 +684,20 @@ impl<'a> Parser<'a> {
                 let value = if let Some((op, op_span)) = assign_op {
                     Expr::Binary {
                         left: Box::new(Expr::Member {
+                            id: self.alloc_id(),
                             base: Box::new(base_expr.clone()),
                             name: field.clone(),
                         }),
                         op,
                         op_span,
+                        id: self.alloc_id(),
                         right: Box::new(value),
                     }
                 } else {
                     value
                 };
                 Ok(Stmt::SetMember {
+                    id: self.alloc_id(),
                     base: base_expr,
                     field,
                     value,
@@ -674,17 +710,20 @@ impl<'a> Parser<'a> {
                     Expr::Binary {
                         left: Box::new(Expr::Index {
                             index_span: last_index_span.unwrap_or(op_span),
+                            id: self.alloc_id(),
                             base: Box::new(base_expr.clone()),
                             index: Box::new(index.clone()),
                         }),
                         op,
                         op_span,
+                        id: self.alloc_id(),
                         right: Box::new(value),
                     }
                 } else {
                     value
                 };
                 Ok(Stmt::SetIndex {
+                    id: self.alloc_id(),
                     base: base_expr,
                     index,
                     value,
@@ -698,12 +737,14 @@ impl<'a> Parser<'a> {
                         left: Box::new(Expr::Ident(base_ident.clone())),
                         op,
                         op_span,
+                        id: self.alloc_id(),
                         right: Box::new(value),
                     }
                 } else {
                     value
                 };
                 Ok(Stmt::Set {
+                    id: self.alloc_id(),
                     name: base_ident,
                     value,
                 })
@@ -716,11 +757,17 @@ impl<'a> Parser<'a> {
         self.advance();
         if self.current.kind == TokenKind::Semicolon {
             self.advance();
-            return Ok(Stmt::Return(None));
+            return Ok(Stmt::Return {
+                id: self.alloc_id(),
+                expr: None,
+            });
         }
         let expr = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Return(Some(expr)))
+        Ok(Stmt::Return {
+            id: self.alloc_id(),
+            expr: Some(expr),
+        })
     }
 
     fn parse_block_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -730,7 +777,10 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt()?);
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Stmt::Block(stmts))
+        Ok(Stmt::Block {
+            id: self.alloc_id(),
+            stmts,
+        })
     }
 
     fn parse_test_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -750,10 +800,14 @@ impl<'a> Parser<'a> {
             }
         };
         let body = match self.parse_block_stmt()? {
-            Stmt::Block(stmts) => stmts,
+            Stmt::Block { stmts, .. } => stmts,
             _ => Vec::new(),
         };
-        Ok(Stmt::Test { name, body })
+        Ok(Stmt::Test {
+            id: self.alloc_id(),
+            name,
+            body,
+        })
     }
 
     fn parse_while_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -761,10 +815,11 @@ impl<'a> Parser<'a> {
         self.advance();
         let condition = self.parse_expr()?;
         let body = match self.parse_block_stmt()? {
-            Stmt::Block(stmts) => stmts,
+            Stmt::Block { stmts, .. } => stmts,
             _ => Vec::new(),
         };
         Ok(Stmt::While {
+            id: self.alloc_id(),
             while_span,
             condition,
             body,
@@ -778,10 +833,11 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::In)?;
         let iter = self.parse_expr()?;
         let body = match self.parse_block_stmt()? {
-            Stmt::Block(stmts) => stmts,
+            Stmt::Block { stmts, .. } => stmts,
             _ => Vec::new(),
         };
         Ok(Stmt::For {
+            id: self.alloc_id(),
             for_span,
             item,
             iter,
@@ -793,14 +849,20 @@ impl<'a> Parser<'a> {
         let break_span = self.current.span;
         self.advance();
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Break { break_span })
+        Ok(Stmt::Break {
+            id: self.alloc_id(),
+            break_span,
+        })
     }
 
     fn parse_continue_stmt(&mut self) -> Result<Stmt, ParseError> {
         let continue_span = self.current.span;
         self.advance();
         self.expect(TokenKind::Semicolon)?;
-        Ok(Stmt::Continue { continue_span })
+        Ok(Stmt::Continue {
+            id: self.alloc_id(),
+            continue_span,
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -820,6 +882,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -839,6 +902,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -859,6 +923,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -881,6 +946,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -900,6 +966,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -919,6 +986,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -938,6 +1006,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -958,6 +1027,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -973,6 +1043,7 @@ impl<'a> Parser<'a> {
             let end = self.parse_term()?;
             expr = Expr::Range {
                 range_span,
+                id: self.alloc_id(),
                 start: Box::new(expr),
                 end: Box::new(end),
                 inclusive,
@@ -995,6 +1066,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -1016,6 +1088,7 @@ impl<'a> Parser<'a> {
                 left: Box::new(expr),
                 op,
                 op_span: span,
+                id: self.alloc_id(),
                 right: Box::new(right),
             };
         }
@@ -1031,6 +1104,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Unary {
                     op: at_syntax::UnaryOp::Neg,
                     op_span: span,
+                    id: self.alloc_id(),
                     expr: Box::new(expr),
                 })
             }
@@ -1041,6 +1115,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Unary {
                     op: at_syntax::UnaryOp::Not,
                     op_span: span,
+                    id: self.alloc_id(),
                     expr: Box::new(expr),
                 })
             }
@@ -1055,6 +1130,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let name = self.expect_ident()?;
                 expr = Expr::Member {
+                    id: self.alloc_id(),
                     base: Box::new(expr),
                     name,
                 };
@@ -1066,6 +1142,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen)?;
                 expr = Expr::Call {
                     callee: Box::new(expr),
+                    id: self.alloc_id(),
                     args,
                 };
                 continue;
@@ -1077,6 +1154,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RBracket)?;
                 expr = Expr::Index {
                     index_span,
+                    id: self.alloc_id(),
                     base: Box::new(expr),
                     index: Box::new(index),
                 };
@@ -1084,7 +1162,7 @@ impl<'a> Parser<'a> {
             }
             if self.current.kind == TokenKind::Question {
                 self.advance();
-                expr = Expr::Try(Box::new(expr));
+                expr = Expr::Try(Box::new(expr), self.alloc_id());
                 continue;
             }
             if self.current.kind == TokenKind::Is {
@@ -1095,6 +1173,7 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     ty,
                     span,
+                    id: self.alloc_id(),
                 };
                 continue;
             }
@@ -1106,6 +1185,7 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     ty,
                     span,
+                    id: self.alloc_id(),
                 };
                 continue;
             }
@@ -1122,24 +1202,24 @@ impl<'a> Parser<'a> {
             TokenKind::True => {
                 let span = self.current.span;
                 self.advance();
-                Ok(Expr::Bool(true, span))
+                Ok(Expr::Bool(true, span, self.alloc_id()))
             }
             TokenKind::False => {
                 let span = self.current.span;
                 self.advance();
-                Ok(Expr::Bool(false, span))
+                Ok(Expr::Bool(false, span, self.alloc_id()))
             }
             TokenKind::Int(value) => {
                 let span = self.current.span;
                 let v = *value;
                 self.advance();
-                Ok(Expr::Int(v, span))
+                Ok(Expr::Int(v, span, self.alloc_id()))
             }
             TokenKind::Float(value) => {
                 let span = self.current.span;
                 let v = *value;
                 self.advance();
-                Ok(Expr::Float(v, span))
+                Ok(Expr::Float(v, span, self.alloc_id()))
             }
             TokenKind::String(value) => {
                 let span = self.current.span;
@@ -1148,7 +1228,7 @@ impl<'a> Parser<'a> {
                 if v.contains('{') {
                     return self.parse_interpolated_string(v, span);
                 }
-                Ok(Expr::String(v, span))
+                Ok(Expr::String(v, span, self.alloc_id()))
             }
             TokenKind::UnterminatedString => Err(ParseError::UnterminatedString {
                 span: self.current.span,
@@ -1163,6 +1243,7 @@ impl<'a> Parser<'a> {
                 let ident = Ident {
                     name: name.clone(),
                     span: self.current.span,
+                    id: self.alloc_id(),
                 };
                 self.advance();
                 if ident.name == "map" && self.current.kind == TokenKind::LBrace {
@@ -1190,6 +1271,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     return Ok(Expr::Tuple {
                         tuple_span: paren_span,
+                        id: self.alloc_id(),
                         items: vec![],
                     });
                 }
@@ -1216,6 +1298,7 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::RParen)?;
                     return Ok(Expr::Tuple {
                         tuple_span: paren_span,
+                        id: self.alloc_id(),
                         items,
                     });
                 }
@@ -1224,6 +1307,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::RParen)?;
                 Ok(Expr::Group {
                     span: Span::new(paren_span.start, end_span.end),
+                    id: self.alloc_id(),
                     expr: Box::new(first_expr),
                 })
             }
@@ -1260,6 +1344,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::MapLiteral {
             span: Span::new(span_start, end_span.end),
+            id: self.alloc_id(),
             entries,
         })
     }
@@ -1277,7 +1362,7 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 if !current.is_empty() {
-                    parts.push(InterpPart::String(current.clone()));
+                    parts.push(InterpPart::String(current.clone(), self.alloc_id()));
                     current.clear();
                 }
                 let mut expr_str = String::new();
@@ -1306,7 +1391,7 @@ impl<'a> Parser<'a> {
                         span: expr_parser.current.span,
                     });
                 }
-                parts.push(InterpPart::Expr(expr));
+                parts.push(InterpPart::Expr(expr, self.alloc_id()));
                 continue;
             }
             if ch == '}' && chars.peek() == Some(&'}') {
@@ -1318,10 +1403,14 @@ impl<'a> Parser<'a> {
         }
 
         if !current.is_empty() {
-            parts.push(InterpPart::String(current));
+            parts.push(InterpPart::String(current, self.alloc_id()));
         }
 
-        Ok(Expr::InterpolatedString { span, parts })
+        Ok(Expr::InterpolatedString {
+            span,
+            id: self.alloc_id(),
+            parts,
+        })
     }
 
     fn parse_closure_expr(&mut self) -> Result<Expr, ParseError> {
@@ -1331,12 +1420,8 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         if self.current.kind != TokenKind::Pipe {
             loop {
-                if let TokenKind::Ident(name) = &self.current.kind {
-                    params.push(Ident {
-                        name: name.clone(),
-                        span: self.current.span,
-                    });
-                    self.advance();
+                if matches!(self.current.kind, TokenKind::Ident(_)) {
+                    params.push(self.expect_ident()?);
                     if self.current.kind != TokenKind::Comma {
                         break;
                     }
@@ -1358,6 +1443,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_expr()?;
         Ok(Expr::Closure {
             span,
+            id: self.alloc_id(),
             params,
             body: Box::new(body),
         })
@@ -1380,7 +1466,11 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RBracket)?;
-        Ok(Expr::Array { array_span, items })
+        Ok(Expr::Array {
+            array_span,
+            id: self.alloc_id(),
+            items,
+        })
     }
 
     fn parse_struct_literal(&mut self, name: Ident) -> Result<Expr, ParseError> {
@@ -1393,6 +1483,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Colon)?;
                 let value = self.parse_expr()?;
                 fields.push(StructLiteralField {
+                    id: self.alloc_id(),
                     name: field_name,
                     value,
                 });
@@ -1406,7 +1497,12 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Expr::StructLiteral { span, name, fields })
+        Ok(Expr::StructLiteral {
+            span,
+            id: self.alloc_id(),
+            name,
+            fields,
+        })
     }
 
     fn parse_enum_literal(&mut self, name: Ident) -> Result<Expr, ParseError> {
@@ -1423,6 +1519,7 @@ impl<'a> Parser<'a> {
         };
         Ok(Expr::EnumLiteral {
             span,
+            id: self.alloc_id(),
             name,
             variant,
             payload,
@@ -1447,6 +1544,7 @@ impl<'a> Parser<'a> {
         };
         Ok(Expr::If {
             if_span,
+            id: self.alloc_id(),
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
             else_branch,
@@ -1479,7 +1577,10 @@ impl<'a> Parser<'a> {
                     let expr = self.parse_expr()?;
                     if self.current.kind == TokenKind::Semicolon {
                         self.advance();
-                        stmts.push(Stmt::Expr(expr));
+                        stmts.push(Stmt::Expr {
+                            id: self.alloc_id(),
+                            expr,
+                        });
                     } else {
                         tail = Some(Box::new(expr));
                         break;
@@ -1490,6 +1591,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::Block {
             block_span,
+            id: self.alloc_id(),
             stmts,
             tail,
         })
@@ -1517,6 +1619,7 @@ impl<'a> Parser<'a> {
             let body = self.parse_expr()?;
             for pattern in patterns {
                 arms.push(MatchArm {
+                    id: self.alloc_id(),
                     pattern,
                     guard: guard.clone(),
                     body: body.clone(),
@@ -1541,6 +1644,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::Match {
             match_span,
+            id: self.alloc_id(),
             value: Box::new(value),
             arms,
         })
@@ -1575,6 +1679,7 @@ impl<'a> Parser<'a> {
 
         Ok(Expr::TryCatch {
             try_span,
+            id: self.alloc_id(),
             try_block: Box::new(try_block),
             catch_block,
             finally_block,
@@ -1584,12 +1689,12 @@ impl<'a> Parser<'a> {
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
         if self.current.kind == TokenKind::Ident(String::from("_")) {
             self.advance();
-            return Ok(MatchPattern::Wildcard);
+            return Ok(MatchPattern::Wildcard(self.alloc_id()));
         }
         if let TokenKind::Int(value) = self.current.kind {
             let value = value;
             self.advance();
-            return Ok(MatchPattern::Int(value));
+            return Ok(MatchPattern::Int(value, self.alloc_id()));
         }
         if self.current.kind == TokenKind::Minus {
             let span = self.current.span;
@@ -1598,7 +1703,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Int(value) => {
                     let value = value;
                     self.advance();
-                    return Ok(MatchPattern::Int(-value));
+                    return Ok(MatchPattern::Int(-value, self.alloc_id()));
                 }
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -1622,6 +1727,7 @@ impl<'a> Parser<'a> {
                 None
             };
             return Ok(MatchPattern::Enum {
+                id: self.alloc_id(),
                 name: head,
                 variant,
                 binding,
@@ -1632,21 +1738,21 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::LParen)?;
                 let name = self.expect_ident()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(MatchPattern::ResultOk(name))
+                Ok(MatchPattern::ResultOk(name, self.alloc_id()))
             }
             "err" => {
                 self.expect(TokenKind::LParen)?;
                 let name = self.expect_ident()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(MatchPattern::ResultErr(name))
+                Ok(MatchPattern::ResultErr(name, self.alloc_id()))
             }
             "some" => {
                 self.expect(TokenKind::LParen)?;
                 let name = self.expect_ident()?;
                 self.expect(TokenKind::RParen)?;
-                Ok(MatchPattern::OptionSome(name))
+                Ok(MatchPattern::OptionSome(name, self.alloc_id()))
             }
-            "none" => Ok(MatchPattern::OptionNone),
+            "none" => Ok(MatchPattern::OptionNone(self.alloc_id())),
             _ => {
                 let is_type_name = head
                     .name
@@ -1669,6 +1775,7 @@ impl<'a> Parser<'a> {
                             fields.push(StructPatternField {
                                 name: field_name,
                                 binding,
+                                id: self.alloc_id(),
                             });
                             if self.current.kind != TokenKind::Comma {
                                 break;
@@ -1680,7 +1787,11 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(TokenKind::RBrace)?;
-                    Ok(MatchPattern::Struct { name: head, fields })
+                    Ok(MatchPattern::Struct {
+                        id: self.alloc_id(),
+                        name: head,
+                        fields,
+                    })
                 } else {
                     Err(ParseError::UnexpectedToken {
                         expected: "match pattern".to_string(),
@@ -1705,7 +1816,11 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            params.push(Param { name, ty });
+            params.push(Param {
+                id: self.alloc_id(),
+                name,
+                ty,
+            });
             if self.current.kind != TokenKind::Comma {
                 break;
             }
@@ -1807,6 +1922,7 @@ impl<'a> Parser<'a> {
             let return_ty = self.parse_type_ref()?;
             return Ok(TypeRef::Function {
                 fn_span,
+                id: self.alloc_id(),
                 params,
                 return_ty: Box::new(return_ty),
             });
@@ -1829,7 +1945,11 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(TokenKind::RParen)?;
-            return Ok(TypeRef::Tuple { tuple_span, items });
+            return Ok(TypeRef::Tuple {
+                tuple_span,
+                id: self.alloc_id(),
+                items,
+            });
         }
 
         let name = self.expect_ident()?;
@@ -1892,6 +2012,7 @@ impl<'a> Parser<'a> {
                 let ident = Ident {
                     name: name.clone(),
                     span: self.current.span,
+                    id: self.alloc_id(),
                 };
                 self.advance();
                 Ok(ident)
@@ -1935,7 +2056,8 @@ impl<'a> Parser<'a> {
     fn capture_comment(&mut self) {
         let span = self.current.span;
         let text = self.lexer.source[span.start..span.end].to_string();
-        self.comments.push(Comment { span, text });
+        let id = self.alloc_id();
+        self.comments.push(Comment { span, text, id });
     }
 }
 

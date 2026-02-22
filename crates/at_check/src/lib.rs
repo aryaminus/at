@@ -221,7 +221,10 @@ impl TypeChecker {
         }
         // Check for missing return statement
         if self.current_return != SimpleType::Unit && self.current_return != SimpleType::Unknown {
-            let has_return = func.body.iter().any(|stmt| matches!(stmt, Stmt::Return(_)));
+            let has_return = func
+                .body
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Return { .. }));
             if !has_return {
                 self.push_error(
                     format!(
@@ -257,6 +260,7 @@ impl TypeChecker {
                 name,
                 type_params,
                 fields,
+                ..
             } = stmt
             {
                 if self.structs.contains_key(&name.name) {
@@ -286,6 +290,7 @@ impl TypeChecker {
                 name,
                 type_params,
                 variants,
+                ..
             } = stmt
             {
                 if self.enums.contains_key(&name.name) {
@@ -311,7 +316,7 @@ impl TypeChecker {
     fn load_type_aliases(&mut self, module: &Module) {
         self.type_aliases.clear();
         for stmt in &module.stmts {
-            if let Stmt::TypeAlias { name, ty } = stmt {
+            if let Stmt::TypeAlias { name, ty, .. } = stmt {
                 if self.type_aliases.contains_key(&name.name) {
                     self.push_error(
                         format!("duplicate type alias: {}", name.name),
@@ -342,7 +347,9 @@ impl TypeChecker {
             Stmt::TypeAlias { .. } => {}
             Stmt::Enum { .. } => {}
             Stmt::Struct { .. } => {}
-            Stmt::Let { name, ty, value } => {
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
                 self.last_option_inner = None;
                 self.last_result_ok = None;
                 self.last_result_err = None;
@@ -365,7 +372,9 @@ impl TypeChecker {
                     self.bind_inner_types(name, &value_ty);
                 }
             }
-            Stmt::Using { name, ty, value } => {
+            Stmt::Using {
+                name, ty, value, ..
+            } => {
                 self.last_option_inner = None;
                 self.last_result_ok = None;
                 self.last_result_err = None;
@@ -389,7 +398,7 @@ impl TypeChecker {
                 }
                 self.insert_capability(&name.name);
             }
-            Stmt::Set { name, value } => {
+            Stmt::Set { name, value, .. } => {
                 self.last_option_inner = None;
                 self.last_result_ok = None;
                 self.last_result_err = None;
@@ -439,7 +448,9 @@ impl TypeChecker {
                 let _ = self.check_expr(base);
                 self.check_expr(value);
             }
-            Stmt::SetIndex { base, index, value } => {
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
                 let base_ty = self.check_expr(base);
                 let index_ty = self.check_expr(index);
                 let value_ty = self.check_expr(value);
@@ -500,6 +511,7 @@ impl TypeChecker {
                 while_span,
                 condition,
                 body,
+                ..
             } => {
                 let cond_ty = self.check_expr(condition);
                 if cond_ty != SimpleType::Bool
@@ -524,6 +536,7 @@ impl TypeChecker {
                 item,
                 iter,
                 body,
+                ..
             } => {
                 let iter_ty = self.check_expr(iter);
                 if !matches!(iter_ty, SimpleType::Array(_)) && iter_ty != SimpleType::Unknown {
@@ -545,12 +558,12 @@ impl TypeChecker {
                 self.pop_scope();
                 self.loop_depth -= 1;
             }
-            Stmt::Break { break_span } => {
+            Stmt::Break { break_span, .. } => {
                 if self.loop_depth == 0 {
                     self.push_error("break used outside of loop".to_string(), Some(*break_span));
                 }
             }
-            Stmt::Continue { continue_span } => {
+            Stmt::Continue { continue_span, .. } => {
                 if self.loop_depth == 0 {
                     self.push_error(
                         "continue used outside of loop".to_string(),
@@ -558,10 +571,10 @@ impl TypeChecker {
                     );
                 }
             }
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 self.check_expr(expr);
             }
-            Stmt::Return(expr) => match (expr, self.current_return.clone()) {
+            Stmt::Return { expr, .. } => match (expr, self.current_return.clone()) {
                 (None, SimpleType::Unit) => {}
                 (None, SimpleType::Unknown) => {
                     self.current_return = SimpleType::Unit;
@@ -613,7 +626,7 @@ impl TypeChecker {
                     }
                 }
             },
-            Stmt::Block(stmts) | Stmt::Test { body: stmts, .. } => {
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {
                     self.check_stmt(stmt);
@@ -625,10 +638,10 @@ impl TypeChecker {
 
     fn check_expr(&mut self, expr: &Expr) -> SimpleType {
         match expr {
-            Expr::Int(_, _) => SimpleType::Int,
-            Expr::Float(_, _) => SimpleType::Float,
-            Expr::String(_, _) => SimpleType::String,
-            Expr::Bool(_, _) => SimpleType::Bool,
+            Expr::Int(_, _, _) => SimpleType::Int,
+            Expr::Float(_, _, _) => SimpleType::Float,
+            Expr::String(_, _, _) => SimpleType::String,
+            Expr::Bool(_, _, _) => SimpleType::Bool,
             Expr::Ident(ident) => {
                 let ty = if let Some(ty) = self.resolve_local(ident) {
                     ty
@@ -655,15 +668,19 @@ impl TypeChecker {
                 op,
                 op_span,
                 right,
+                ..
             } => self.check_binary(left, *op, *op_span, right),
-            Expr::Unary { op, op_span, expr } => self.check_unary(*op, *op_span, expr),
+            Expr::Unary {
+                op, op_span, expr, ..
+            } => self.check_unary(*op, *op_span, expr),
             Expr::If {
                 if_span,
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => self.check_if(*if_span, condition, then_branch, else_branch.as_deref()),
-            Expr::Member { base, name } => {
+            Expr::Member { base, name, .. } => {
                 let base_ty = self.check_expr(base);
                 if let SimpleType::Custom(struct_name, _) = base_ty {
                     if let Some((_, fields)) = self.structs.get(&struct_name) {
@@ -683,11 +700,11 @@ impl TypeChecker {
                 }
                 SimpleType::Unknown
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 let result = self.check_call(callee, args);
                 result
             }
-            Expr::Try(expr) => {
+            Expr::Try(expr, _) => {
                 let expects_result = matches!(self.current_return, SimpleType::Result(_, _))
                     || matches!(
                         self.current_return_ref,
@@ -765,6 +782,7 @@ impl TypeChecker {
                 match_span,
                 value,
                 arms,
+                ..
             } => self.check_match(*match_span, value, arms),
             Expr::Block { stmts, tail, .. } => {
                 self.push_scope();
@@ -912,7 +930,7 @@ impl TypeChecker {
             }
             Expr::InterpolatedString { parts, .. } => {
                 for part in parts {
-                    if let at_syntax::InterpPart::Expr(expr) = part {
+                    if let at_syntax::InterpPart::Expr(expr, _) = part {
                         self.check_expr(expr);
                     }
                 }
@@ -1484,7 +1502,7 @@ impl TypeChecker {
             is_some = Some(false);
         }
 
-        let Expr::Call { callee, args } = call_expr else {
+        let Expr::Call { callee, args, .. } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
@@ -1550,7 +1568,7 @@ impl TypeChecker {
             is_ok = Some(false);
         }
 
-        let Expr::Call { callee, args } = call_expr else {
+        let Expr::Call { callee, args, .. } = call_expr else {
             return None;
         };
         if let Expr::Ident(ident) = callee.as_ref() {
@@ -1719,12 +1737,12 @@ impl TypeChecker {
         for arm in arms {
             self.push_scope();
             match &arm.pattern {
-                at_syntax::MatchPattern::Int(_) => {
+                at_syntax::MatchPattern::Int(_, _) => {
                     if value_ty != SimpleType::Int && value_ty != SimpleType::Unknown {
                         self.push_error("match expects int value".to_string(), Some(match_span));
                     }
                 }
-                at_syntax::MatchPattern::Struct { name, fields } => {
+                at_syntax::MatchPattern::Struct { name, fields, .. } => {
                     let struct_fields = self.structs.get(&name.name).cloned();
                     if struct_fields.is_none() {
                         self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
@@ -1774,6 +1792,7 @@ impl TypeChecker {
                     name,
                     variant,
                     binding,
+                    ..
                 } => {
                     let enum_variants = self.enums.get(&name.name).cloned();
                     if enum_variants.is_none() {
@@ -1835,7 +1854,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                at_syntax::MatchPattern::ResultOk(ident) => {
+                at_syntax::MatchPattern::ResultOk(ident, _) => {
                     has_ok = true;
                     if !matches!(value_ty, SimpleType::Result(_, _))
                         && value_ty != SimpleType::Unknown
@@ -1845,7 +1864,7 @@ impl TypeChecker {
                     let ty = result_ok.clone().unwrap_or(SimpleType::Unknown);
                     self.bind_local(ident, ty);
                 }
-                at_syntax::MatchPattern::ResultErr(ident) => {
+                at_syntax::MatchPattern::ResultErr(ident, _) => {
                     has_err = true;
                     if !matches!(value_ty, SimpleType::Result(_, _))
                         && value_ty != SimpleType::Unknown
@@ -1855,7 +1874,7 @@ impl TypeChecker {
                     let ty = result_err.clone().unwrap_or(SimpleType::Unknown);
                     self.bind_local(ident, ty);
                 }
-                at_syntax::MatchPattern::OptionSome(ident) => {
+                at_syntax::MatchPattern::OptionSome(ident, _) => {
                     has_some = true;
                     if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
                     {
@@ -1864,14 +1883,14 @@ impl TypeChecker {
                     let ty = option_inner.clone().unwrap_or(SimpleType::Unknown);
                     self.bind_local(ident, ty);
                 }
-                at_syntax::MatchPattern::OptionNone => {
+                at_syntax::MatchPattern::OptionNone(_) => {
                     has_none = true;
                     if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
                     {
                         self.push_error("match expects option value".to_string(), Some(match_span));
                     }
                 }
-                at_syntax::MatchPattern::Wildcard => {
+                at_syntax::MatchPattern::Wildcard(_) => {
                     has_wildcard = true;
                 }
             }
@@ -1992,7 +2011,7 @@ impl TypeChecker {
             return SimpleType::Unknown;
         }
 
-        if let Expr::Member { base, name } = callee {
+        if let Expr::Member { base, name, .. } = callee {
             if let Expr::Ident(base_ident) = base.as_ref() {
                 if !self.has_capability(&base_ident.name)
                     && ((base_ident.name == "time" && name.name == "now")
@@ -3119,16 +3138,16 @@ impl TypeChecker {
 
 fn expr_span(expr: &Expr) -> Option<Span> {
     match expr {
-        Expr::Int(_, span) => Some(*span),
-        Expr::String(_, span) => Some(*span),
-        Expr::Bool(_, span) => Some(*span),
+        Expr::Int(_, span, _) => Some(*span),
+        Expr::String(_, span, _) => Some(*span),
+        Expr::Bool(_, span, _) => Some(*span),
         Expr::Ident(ident) => Some(ident.span),
         Expr::Unary { op_span, .. } => Some(*op_span),
         Expr::Binary { op_span, .. } => Some(*op_span),
         Expr::If { if_span, .. } => Some(*if_span),
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
-        Expr::Try(expr) => expr_span(expr),
+        Expr::Try(expr, _) => expr_span(expr),
         Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),
@@ -3144,7 +3163,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
         Expr::Group { span, .. } => Some(*span),
-        Expr::Float(_, span) => Some(*span),
+        Expr::Float(_, span, _) => Some(*span),
     }
 }
 
