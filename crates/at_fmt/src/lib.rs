@@ -1,10 +1,68 @@
 use std::collections::HashSet;
+use std::fmt;
 
 use at_syntax::{Comment, Expr, Function, Ident, MatchPattern, Module, Stmt};
 
 struct CommentState {
     comments: Vec<Comment>,
     index: usize,
+}
+
+pub struct DisplayModule<'a>(pub &'a Module);
+pub struct DisplayFunction<'a>(pub &'a Function);
+pub struct DisplayStmt<'a>(pub &'a Stmt);
+pub struct DisplayExpr<'a>(pub &'a Expr);
+pub struct DisplayTypeRef<'a>(pub &'a at_syntax::TypeRef);
+pub struct DisplayPattern<'a>(pub &'a MatchPattern);
+
+impl fmt::Display for DisplayModule<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_module(self.0))
+    }
+}
+
+impl fmt::Display for DisplayFunction<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        let import_aliases = HashSet::new();
+        let mut comment_state = CommentState::new(Vec::new());
+        format_function(self.0, &mut out, 0, &import_aliases, &mut comment_state);
+        f.write_str(&out)
+    }
+}
+
+impl fmt::Display for DisplayStmt<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        let mut comment_state = CommentState::new(Vec::new());
+        format_stmt(self.0, &mut out, 0, &mut comment_state);
+        f.write_str(&out)
+    }
+}
+
+impl fmt::Display for DisplayExpr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        let mut comment_state = CommentState::new(Vec::new());
+        format_expr_with_indent(self.0, &mut out, 0, &mut comment_state);
+        f.write_str(&out)
+    }
+}
+
+impl fmt::Display for DisplayTypeRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        format_type_ref(self.0, &mut out);
+        f.write_str(&out)
+    }
+}
+
+impl fmt::Display for DisplayPattern<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        format_match_pattern(self.0, &mut out);
+        f.write_str(&out)
+    }
 }
 
 impl CommentState {

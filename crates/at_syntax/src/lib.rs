@@ -436,3 +436,300 @@ pub struct Comment {
     pub text: String,
     pub id: NodeId,
 }
+
+pub trait AstVisitor {
+    fn visit_module(&mut self, module: &Module) {
+        walk_module(self, module);
+    }
+    fn visit_function(&mut self, function: &Function) {
+        walk_function(self, function);
+    }
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        walk_stmt(self, stmt);
+    }
+    fn visit_expr(&mut self, expr: &Expr) {
+        walk_expr(self, expr);
+    }
+    fn visit_type_ref(&mut self, ty: &TypeRef) {
+        walk_type_ref(self, ty);
+    }
+    fn visit_match_pattern(&mut self, pattern: &MatchPattern) {
+        walk_match_pattern(self, pattern);
+    }
+}
+
+pub fn walk_module<V: AstVisitor + ?Sized>(visitor: &mut V, module: &Module) {
+    for function in &module.functions {
+        visitor.visit_function(function);
+    }
+    for stmt in &module.stmts {
+        visitor.visit_stmt(stmt);
+    }
+}
+
+pub fn walk_function<V: AstVisitor + ?Sized>(visitor: &mut V, function: &Function) {
+    for ty in function.params.iter().filter_map(|param| param.ty.as_ref()) {
+        visitor.visit_type_ref(ty);
+    }
+    if let Some(ty) = &function.return_ty {
+        visitor.visit_type_ref(ty);
+    }
+    for stmt in &function.body {
+        visitor.visit_stmt(stmt);
+    }
+}
+
+pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
+    match stmt {
+        Stmt::Import { .. } => {}
+        Stmt::TypeAlias { ty, .. } => visitor.visit_type_ref(ty),
+        Stmt::Enum { variants, .. } => {
+            for variant in variants {
+                if let Some(payload) = &variant.payload {
+                    visitor.visit_type_ref(payload);
+                }
+            }
+        }
+        Stmt::Struct { fields, .. } => {
+            for field in fields {
+                visitor.visit_type_ref(&field.ty);
+            }
+        }
+        Stmt::Const { ty, value, .. }
+        | Stmt::Let { ty, value, .. }
+        | Stmt::Using { ty, value, .. } => {
+            if let Some(ty) = ty {
+                visitor.visit_type_ref(ty);
+            }
+            visitor.visit_expr(value);
+        }
+        Stmt::Set { value, .. } => visitor.visit_expr(value),
+        Stmt::SetMember { base, value, .. } => {
+            visitor.visit_expr(base);
+            visitor.visit_expr(value);
+        }
+        Stmt::SetIndex {
+            base, index, value, ..
+        } => {
+            visitor.visit_expr(base);
+            visitor.visit_expr(index);
+            visitor.visit_expr(value);
+        }
+        Stmt::While {
+            condition, body, ..
+        } => {
+            visitor.visit_expr(condition);
+            for stmt in body {
+                visitor.visit_stmt(stmt);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visitor.visit_expr(condition);
+            for stmt in then_branch {
+                visitor.visit_stmt(stmt);
+            }
+            if let Some(branch) = else_branch {
+                for stmt in branch {
+                    visitor.visit_stmt(stmt);
+                }
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            visitor.visit_expr(iter);
+            for stmt in body {
+                visitor.visit_stmt(stmt);
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Expr { expr, .. } => visitor.visit_expr(expr),
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
+                visitor.visit_expr(expr);
+            }
+        }
+        Stmt::Block { stmts, .. } => {
+            for stmt in stmts {
+                visitor.visit_stmt(stmt);
+            }
+        }
+        Stmt::Test { body, .. } => {
+            for stmt in body {
+                visitor.visit_stmt(stmt);
+            }
+        }
+    }
+}
+
+pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
+    match expr {
+        Expr::Int(..) | Expr::Float(..) | Expr::String(..) | Expr::Bool(..) | Expr::Ident(..) => {}
+        Expr::Unary { expr, .. } => visitor.visit_expr(expr),
+        Expr::Binary { left, right, .. } => {
+            visitor.visit_expr(left);
+            visitor.visit_expr(right);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visitor.visit_expr(condition);
+            visitor.visit_expr(then_branch);
+            visitor.visit_expr(else_branch);
+        }
+        Expr::ChainedComparison { items, .. } => {
+            for item in items {
+                visitor.visit_expr(item);
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visitor.visit_expr(condition);
+            visitor.visit_expr(then_branch);
+            if let Some(branch) = else_branch {
+                visitor.visit_expr(branch);
+            }
+        }
+        Expr::Member { base, .. } => visitor.visit_expr(base),
+        Expr::Call { callee, args, .. } => {
+            visitor.visit_expr(callee);
+            for arg in args {
+                visitor.visit_expr(arg);
+            }
+        }
+        Expr::Try(expr, _) => visitor.visit_expr(expr),
+        Expr::Match { value, arms, .. } => {
+            visitor.visit_expr(value);
+            for arm in arms {
+                visitor.visit_match_pattern(&arm.pattern);
+                if let Some(guard) = &arm.guard {
+                    visitor.visit_expr(guard);
+                }
+                visitor.visit_expr(&arm.body);
+            }
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            visitor.visit_expr(try_block);
+            if let Some(block) = catch_block {
+                visitor.visit_expr(block);
+            }
+            if let Some(block) = finally_block {
+                visitor.visit_expr(block);
+            }
+        }
+        Expr::Block { stmts, tail, .. } => {
+            for stmt in stmts {
+                visitor.visit_stmt(stmt);
+            }
+            if let Some(expr) = tail {
+                visitor.visit_expr(expr);
+            }
+        }
+        Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+            for item in items {
+                visitor.visit_expr(item);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            visitor.visit_expr(base);
+            visitor.visit_expr(index);
+        }
+        Expr::Range { start, end, .. } => {
+            visitor.visit_expr(start);
+            visitor.visit_expr(end);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr, _) = part {
+                    visitor.visit_expr(expr);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => visitor.visit_expr(body),
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                visitor.visit_expr(&field.value);
+            }
+        }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(expr) = payload {
+                visitor.visit_expr(expr);
+            }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                visitor.visit_expr(key);
+                visitor.visit_expr(value);
+            }
+        }
+        Expr::As { expr, ty, .. } | Expr::Is { expr, ty, .. } => {
+            visitor.visit_expr(expr);
+            visitor.visit_type_ref(ty);
+        }
+        Expr::Group { expr, .. } => visitor.visit_expr(expr),
+    }
+}
+
+pub fn walk_type_ref<V: AstVisitor + ?Sized>(visitor: &mut V, ty: &TypeRef) {
+    match ty {
+        TypeRef::Named { args, .. } => {
+            for arg in args {
+                visitor.visit_type_ref(arg);
+            }
+        }
+        TypeRef::Union { types } | TypeRef::Intersection { types } => {
+            for ty in types {
+                visitor.visit_type_ref(ty);
+            }
+        }
+        TypeRef::Tuple { items, .. } => {
+            for item in items {
+                visitor.visit_type_ref(item);
+            }
+        }
+        TypeRef::Function {
+            params, return_ty, ..
+        } => {
+            for param in params {
+                visitor.visit_type_ref(param);
+            }
+            visitor.visit_type_ref(return_ty);
+        }
+    }
+}
+
+pub fn walk_match_pattern<V: AstVisitor + ?Sized>(visitor: &mut V, pattern: &MatchPattern) {
+    match pattern {
+        MatchPattern::Int(..)
+        | MatchPattern::Bool(..)
+        | MatchPattern::String(..)
+        | MatchPattern::ResultOk(..)
+        | MatchPattern::ResultErr(..)
+        | MatchPattern::OptionSome(..)
+        | MatchPattern::OptionNone(..)
+        | MatchPattern::Wildcard(..) => {}
+        MatchPattern::Tuple { items, .. } => {
+            for item in items {
+                visitor.visit_match_pattern(item);
+            }
+        }
+        MatchPattern::Struct { .. } => {}
+        MatchPattern::Enum { .. } => {}
+        MatchPattern::Binding { pattern, .. } => visitor.visit_match_pattern(pattern),
+    }
+}
