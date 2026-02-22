@@ -207,10 +207,12 @@ pub enum Stmt {
     },
     Enum {
         name: Ident,
+        type_params: Vec<Ident>,
         variants: Vec<EnumVariant>,
     },
     Struct {
         name: Ident,
+        type_params: Vec<Ident>,
         fields: Vec<StructField>,
     },
     Let {
@@ -266,6 +268,7 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: Ident,
+    pub type_params: Vec<Ident>,
     pub params: Vec<Param>,
     pub return_ty: Option<TypeRef>,
     pub needs: Vec<Ident>,

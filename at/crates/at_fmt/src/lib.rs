@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use at_syntax::{Comment, Expr, Function, MatchPattern, Module, Stmt};
+use at_syntax::{Comment, Expr, Function, Ident, MatchPattern, Module, Stmt};
 
 struct CommentState {
     comments: Vec<Comment>,
@@ -87,6 +87,7 @@ fn format_function(
     }
     out.push_str("fn ");
     out.push_str(&func.name.name);
+    format_type_params(&func.type_params, out);
     out.push('(');
     format_params(&func.params, out);
     out.push(')');
@@ -230,10 +231,15 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             format_type_ref(ty, out);
             out.push_str(";\n");
         }
-        Stmt::Enum { name, variants } => {
+        Stmt::Enum {
+            name,
+            type_params,
+            variants,
+        } => {
             indent_to(out, indent);
             out.push_str("enum ");
             out.push_str(&name.name);
+            format_type_params(type_params, out);
             out.push_str(" {\n");
             for variant in variants {
                 indent_to(out, indent + 4);
@@ -248,10 +254,15 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             indent_to(out, indent);
             out.push_str("}\n");
         }
-        Stmt::Struct { name, fields } => {
+        Stmt::Struct {
+            name,
+            type_params,
+            fields,
+        } => {
             indent_to(out, indent);
             out.push_str("struct ");
             out.push_str(&name.name);
+            format_type_params(type_params, out);
             out.push_str(" {\n");
             for field in fields {
                 indent_to(out, indent + 4);
@@ -886,6 +897,20 @@ fn format_type_ref(ty: &at_syntax::TypeRef, out: &mut String) {
             format_type_ref(return_ty, out);
         }
     }
+}
+
+fn format_type_params(params: &[Ident], out: &mut String) {
+    if params.is_empty() {
+        return;
+    }
+    out.push('<');
+    for (idx, param) in params.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&param.name);
+    }
+    out.push('>');
 }
 
 fn format_name_list(names: &[String], out: &mut String) {

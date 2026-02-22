@@ -330,6 +330,7 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LParen)?;
         let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
@@ -356,6 +357,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         Ok(Function {
             name,
+            type_params,
             params,
             return_ty,
             needs,
@@ -417,6 +419,7 @@ impl<'a> Parser<'a> {
     fn parse_enum_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LBrace)?;
         let mut variants = Vec::new();
         if self.current.kind != TokenKind::RBrace {
@@ -444,12 +447,17 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Stmt::Enum { name, variants })
+        Ok(Stmt::Enum {
+            name,
+            type_params,
+            variants,
+        })
     }
 
     fn parse_struct_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LBrace)?;
         let mut fields = Vec::new();
         if self.current.kind != TokenKind::RBrace {
@@ -471,7 +479,33 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Stmt::Struct { name, fields })
+        Ok(Stmt::Struct {
+            name,
+            type_params,
+            fields,
+        })
+    }
+
+    fn parse_type_params(&mut self) -> Result<Vec<Ident>, ParseError> {
+        let mut params = Vec::new();
+        if self.current.kind != TokenKind::Less {
+            return Ok(params);
+        }
+        self.advance();
+        if self.current.kind != TokenKind::Greater {
+            loop {
+                params.push(self.expect_ident()?);
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.current.kind == TokenKind::Greater {
+                    break;
+                }
+            }
+        }
+        self.consume_type_greater()?;
+        Ok(params)
     }
 
     fn parse_using_stmt(&mut self) -> Result<Stmt, ParseError> {

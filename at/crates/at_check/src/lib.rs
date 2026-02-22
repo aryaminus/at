@@ -76,9 +76,9 @@ pub fn infer_function_returns(module: &Module) -> HashMap<String, String> {
 struct TypeChecker {
     functions: HashMap<String, FuncSig>,
     function_needs: HashMap<String, Vec<String>>,
-    structs: HashMap<String, Vec<StructField>>,
+    structs: HashMap<String, (Vec<Ident>, Vec<StructField>)>,
     type_aliases: HashMap<String, TypeRef>,
-    enums: HashMap<String, Vec<EnumVariant>>,
+    enums: HashMap<String, (Vec<Ident>, Vec<EnumVariant>)>,
     locals: Vec<HashMap<String, SimpleType>>,
     option_inner: Vec<HashMap<String, SimpleType>>,
     result_ok: Vec<HashMap<String, SimpleType>>,
@@ -132,6 +132,9 @@ impl TypeChecker {
                     Some(func.name.span),
                 );
                 continue;
+            }
+            if !func.type_params.is_empty() {
+                self.validate_type_params(&func.type_params, func.name.span, "function");
             }
             self.function_needs.insert(
                 func.name.name.clone(),
@@ -246,11 +249,17 @@ impl TypeChecker {
     fn load_structs(&mut self, module: &Module) {
         self.structs.clear();
         for stmt in &module.stmts {
-            if let Stmt::Struct { name, fields } = stmt {
+            if let Stmt::Struct {
+                name,
+                type_params,
+                fields,
+            } = stmt
+            {
                 if self.structs.contains_key(&name.name) {
                     self.push_error(format!("duplicate struct: {}", name.name), Some(name.span));
                     continue;
                 }
+                self.validate_type_params(type_params, name.span, "struct");
                 let mut seen = HashSet::new();
                 for field in fields {
                     if !seen.insert(field.name.name.clone()) {
@@ -260,7 +269,8 @@ impl TypeChecker {
                         );
                     }
                 }
-                self.structs.insert(name.name.clone(), fields.clone());
+                self.structs
+                    .insert(name.name.clone(), (type_params.clone(), fields.clone()));
             }
         }
     }
@@ -268,11 +278,17 @@ impl TypeChecker {
     fn load_enums(&mut self, module: &Module) {
         self.enums.clear();
         for stmt in &module.stmts {
-            if let Stmt::Enum { name, variants } = stmt {
+            if let Stmt::Enum {
+                name,
+                type_params,
+                variants,
+            } = stmt
+            {
                 if self.enums.contains_key(&name.name) {
                     self.push_error(format!("duplicate enum: {}", name.name), Some(name.span));
                     continue;
                 }
+                self.validate_type_params(type_params, name.span, "enum");
                 let mut seen = HashSet::new();
                 for variant in variants {
                     if !seen.insert(variant.name.name.clone()) {
@@ -282,7 +298,8 @@ impl TypeChecker {
                         );
                     }
                 }
-                self.enums.insert(name.name.clone(), variants.clone());
+                self.enums
+                    .insert(name.name.clone(), (type_params.clone(), variants.clone()));
             }
         }
     }
@@ -299,6 +316,18 @@ impl TypeChecker {
                     continue;
                 }
                 self.type_aliases.insert(name.name.clone(), ty.clone());
+            }
+        }
+    }
+
+    fn validate_type_params(&mut self, params: &[Ident], span: Span, kind: &str) {
+        let mut seen = HashSet::new();
+        for param in params {
+            if !seen.insert(param.name.clone()) {
+                self.push_error(
+                    format!("duplicate {kind} type parameter: {}", param.name),
+                    Some(span),
+                );
             }
         }
     }
@@ -581,7 +610,7 @@ impl TypeChecker {
             Expr::Member { base, name } => {
                 let base_ty = self.check_expr(base);
                 if let SimpleType::Custom(struct_name, _) = base_ty {
-                    if let Some(fields) = self.structs.get(&struct_name) {
+                    if let Some((_, fields)) = self.structs.get(&struct_name) {
                         let field_ty = fields
                             .iter()
                             .find(|field| field.name.name == name.name)
@@ -730,7 +759,7 @@ impl TypeChecker {
                 if enum_variants.is_none() {
                     self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
                 }
-                if let Some(enum_variants) = enum_variants {
+                if let Some((_, enum_variants)) = enum_variants {
                     if let Some(expected) = enum_variants
                         .iter()
                         .find(|entry| entry.name.name == variant.name)
@@ -792,7 +821,7 @@ impl TypeChecker {
                         );
                     }
                     let value_ty = self.check_expr(&field.value);
-                    if let Some(struct_fields) = struct_fields.as_ref() {
+                    if let Some((_, struct_fields)) = struct_fields.as_ref() {
                         if let Some(expected) = struct_fields
                             .iter()
                             .find(|entry| entry.name.name == field.name.name)
@@ -815,7 +844,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                if let Some(struct_fields) = struct_fields.as_ref() {
+                if let Some((_, struct_fields)) = struct_fields.as_ref() {
                     for field in struct_fields {
                         if !provided.contains(&field.name.name) {
                             self.push_error(
@@ -1514,7 +1543,7 @@ impl TypeChecker {
                         );
                     }
 
-                    if let Some(struct_fields) = struct_fields {
+                    if let Some((_, struct_fields)) = struct_fields {
                         for field in fields {
                             let binding = field.binding.as_ref().unwrap_or(&field.name);
                             if binding.name != "_" {
@@ -1564,7 +1593,7 @@ impl TypeChecker {
                         );
                     }
 
-                    if let Some(enum_variants) = enum_variants {
+                    if let Some((_, enum_variants)) = enum_variants {
                         if let Some(expected) = enum_variants
                             .iter()
                             .find(|entry| entry.name.name == variant.name)
