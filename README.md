@@ -117,6 +117,10 @@ Download from GitHub releases for your platform:
 curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv at-x86_64-apple-darwin /usr/local/bin/at
 
+# macOS (Apple Silicon)
+curl -L https://github.com/aryaminus/at/releases/latest/download/at-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv at-aarch64-apple-darwin /usr/local/bin/at
+
 # Linux
 curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv at-x86_64-unknown-linux-gnu /usr/local/bin/at

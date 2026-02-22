@@ -70,8 +70,11 @@ jobs:
           EOF
 
           git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/aryaminus/homebrew-at.git /tmp/homebrew-at
+          mkdir -p /tmp/homebrew-at/Formula
           cp /tmp/at.rb /tmp/homebrew-at/Formula/at.rb
           cd /tmp/homebrew-at
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/at.rb
           git commit -m "at ${VERSION}"
           git push

@@ -9,6 +9,7 @@ Complete documentation for the `at` programming language.
 - [WASM Guide](wasm.md) — Browser and embedded usage
 - [Package Manager](package_manager.md) — Lockfile and cache
 - [Installation](install.md) — Install via releases, brew, or cargo
+- [Release Checklist](release.md) — Versioning and CI steps
 
 ## Language Overview
 
