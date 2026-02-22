@@ -4,9 +4,10 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -27,7 +28,7 @@ pub enum Value {
     Unit,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClosureValue {
     func_id: usize,
     captures: Vec<Value>,
@@ -90,7 +91,7 @@ pub fn format_value(value: &Value) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Const(usize),
     LoadLocal(usize),
@@ -156,7 +157,7 @@ pub enum Op {
     Halt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Builtin {
     TimeNow,
     TimeFixed,
@@ -178,7 +179,7 @@ pub enum Builtin {
     Slice,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeCheck {
     Int,
     Float,
@@ -194,7 +195,7 @@ pub enum TypeCheck {
     Enum(String),
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Chunk {
     pub code: Vec<Op>,
     pub constants: Vec<Value>,
@@ -221,7 +222,7 @@ impl Chunk {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionChunk {
     pub name: String,
     pub params: usize,
@@ -231,11 +232,21 @@ pub struct FunctionChunk {
     pub chunk: Chunk,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<FunctionChunk>,
     pub main: Chunk,
     pub main_locals: usize,
+}
+
+impl Program {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
+    }
 }
 
 #[derive(Debug, Default)]

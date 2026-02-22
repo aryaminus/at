@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 at_syntax = { path = "../at_syntax" }
 uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive", "rc"] }
+bincode = "1"
 
 [dev-dependencies]
 at_parser = { path = "../at_parser" }

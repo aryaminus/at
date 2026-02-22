@@ -173,7 +173,7 @@ impl<'a> Parser<'a> {
             lexer,
             current: Token {
                 kind: TokenKind::Eof,
-                span: Span { start: 0, end: 0 },
+                span: Span::new(0, 0),
             },
             comments: Vec::new(),
             pending_token: None,
@@ -1223,10 +1223,7 @@ impl<'a> Parser<'a> {
                 let end_span = self.current.span;
                 self.expect(TokenKind::RParen)?;
                 Ok(Expr::Group {
-                    span: Span {
-                        start: paren_span.start,
-                        end: end_span.end,
-                    },
+                    span: Span::new(paren_span.start, end_span.end),
                     expr: Box::new(first_expr),
                 })
             }
@@ -1262,10 +1259,7 @@ impl<'a> Parser<'a> {
         let end_span = self.current.span;
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::MapLiteral {
-            span: Span {
-                start: span_start,
-                end: end_span.end,
-            },
+            span: Span::new(span_start, end_span.end),
             entries,
         })
     }
@@ -1875,17 +1869,11 @@ impl<'a> Parser<'a> {
                 let mid = span.start.saturating_add(1).min(span.end);
                 self.pending_token = Some(Token {
                     kind: TokenKind::Greater,
-                    span: Span {
-                        start: mid,
-                        end: span.end,
-                    },
+                    span: Span::new(mid, span.end),
                 });
                 self.current = Token {
                     kind: TokenKind::Greater,
-                    span: Span {
-                        start: span.start,
-                        end: mid,
-                    },
+                    span: Span::new(span.start, mid),
                 };
                 self.advance();
                 Ok(())
@@ -1980,10 +1968,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token {
                     kind: TokenKind::Plus,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('-') => {
@@ -1992,18 +1977,12 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::Arrow,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Minus,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2011,30 +1990,21 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token {
                     kind: TokenKind::Star,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('/') => {
                 self.bump();
                 Token {
                     kind: TokenKind::Slash,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('%') => {
                 self.bump();
                 Token {
                     kind: TokenKind::Percent,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('&') => {
@@ -2043,27 +2013,18 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::AndAnd,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::AmpersandEquals,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Ampersand,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2073,27 +2034,18 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::OrOr,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::PipeEquals,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Pipe,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2103,18 +2055,12 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::CaretEquals,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Caret,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2124,18 +2070,12 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::BangEqual,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Bang,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2147,36 +2087,24 @@ impl<'a> Lexer<'a> {
                         self.bump();
                         Token {
                             kind: TokenKind::ShlEquals,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     } else {
                         Token {
                             kind: TokenKind::Shl,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     }
                 } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::LessEqual,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Less,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2188,36 +2116,24 @@ impl<'a> Lexer<'a> {
                         self.bump();
                         Token {
                             kind: TokenKind::ShrEquals,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     } else {
                         Token {
                             kind: TokenKind::Shr,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     }
                 } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::GreaterEqual,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Greater,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2229,27 +2145,18 @@ impl<'a> Lexer<'a> {
                         self.bump();
                         Token {
                             kind: TokenKind::DotDotEquals,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     } else {
                         Token {
                             kind: TokenKind::DotDot,
-                            span: Span {
-                                start,
-                                end: self.index,
-                            },
+                            span: Span::new(start, self.index),
                         }
                     }
                 } else {
                     Token {
                         kind: TokenKind::Dot,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2259,18 +2166,12 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::ColonColon,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Colon,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2278,80 +2179,56 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token {
                     kind: TokenKind::Question,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('(') => {
                 self.bump();
                 Token {
                     kind: TokenKind::LParen,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some(')') => {
                 self.bump();
                 Token {
                     kind: TokenKind::RParen,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('[') => {
                 self.bump();
                 Token {
                     kind: TokenKind::LBracket,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some(']') => {
                 self.bump();
                 Token {
                     kind: TokenKind::RBracket,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('{') => {
                 self.bump();
                 Token {
                     kind: TokenKind::LBrace,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('}') => {
                 self.bump();
                 Token {
                     kind: TokenKind::RBrace,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some(',') => {
                 self.bump();
                 Token {
                     kind: TokenKind::Comma,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('=') => {
@@ -2360,27 +2237,18 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     Token {
                         kind: TokenKind::FatArrow,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else if self.current == Some('=') {
                     self.bump();
                     Token {
                         kind: TokenKind::EqualEqual,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Equals,
-                        span: Span {
-                            start,
-                            end: self.index,
-                        },
+                        span: Span::new(start, self.index),
                     }
                 }
             }
@@ -2388,10 +2256,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token {
                     kind: TokenKind::Semicolon,
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             Some('"') => {
@@ -2408,18 +2273,12 @@ impl<'a> Lexer<'a> {
                 self.bump();
                 Token {
                     kind: TokenKind::Invalid(ch),
-                    span: Span {
-                        start,
-                        end: self.index,
-                    },
+                    span: Span::new(start, self.index),
                 }
             }
             None => Token {
                 kind: TokenKind::Eof,
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             },
         }
     }
@@ -2475,18 +2334,12 @@ impl<'a> Lexer<'a> {
         if terminated {
             Token {
                 kind: TokenKind::String(value),
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         } else {
             Token {
                 kind: TokenKind::UnterminatedString,
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         }
     }
@@ -2508,18 +2361,12 @@ impl<'a> Lexer<'a> {
         if terminated {
             Token {
                 kind: TokenKind::String(value),
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         } else {
             Token {
                 kind: TokenKind::UnterminatedString,
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         }
     }
@@ -2544,18 +2391,12 @@ impl<'a> Lexer<'a> {
         if terminated {
             Token {
                 kind: TokenKind::String(value),
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         } else {
             Token {
                 kind: TokenKind::UnterminatedString,
-                span: Span {
-                    start,
-                    end: self.index,
-                },
+                span: Span::new(start, self.index),
             }
         }
     }
@@ -2581,10 +2422,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        let span = Span {
-            start,
-            end: self.index,
-        };
+        let span = Span::new(start, self.index);
         if has_dot {
             match value.parse::<f64>() {
                 Ok(parsed) => Token {
@@ -2651,10 +2489,7 @@ impl<'a> Lexer<'a> {
         };
         Token {
             kind,
-            span: Span {
-                start,
-                end: self.index,
-            },
+            span: Span::new(start, self.index),
         }
     }
 
@@ -2676,10 +2511,7 @@ impl<'a> Lexer<'a> {
                     }
                     return Some(Token {
                         kind: TokenKind::Comment,
-                        span: Span {
-                            start: comment_start,
-                            end: self.index,
-                        },
+                        span: Span::new(comment_start, self.index),
                     });
                 }
                 Some('/') if self.peek() == Some('*') => {
@@ -2706,18 +2538,12 @@ impl<'a> Lexer<'a> {
                     if depth > 0 {
                         return Some(Token {
                             kind: TokenKind::UnterminatedBlockComment,
-                            span: Span {
-                                start: comment_start,
-                                end: self.index,
-                            },
+                            span: Span::new(comment_start, self.index),
                         });
                     }
                     return Some(Token {
                         kind: TokenKind::Comment,
-                        span: Span {
-                            start: comment_start,
-                            end: self.index,
-                        },
+                        span: Span::new(comment_start, self.index),
                     });
                 }
                 _ => break,

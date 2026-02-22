@@ -198,7 +198,7 @@ impl LintError {
             rule: None,
             fix: Some(LintFix {
                 description: fix_description.into(),
-                span: span.unwrap_or(Span { start: 0, end: 0 }),
+                span: span.unwrap_or(Span::new(0, 0)),
                 replacement: replacement.into(),
             }),
         }
@@ -219,7 +219,7 @@ impl LintError {
             rule: Some(rule),
             fix: Some(LintFix {
                 description: fix_description.into(),
-                span: span.unwrap_or(Span { start: 0, end: 0 }),
+                span: span.unwrap_or(Span::new(0, 0)),
                 replacement: replacement.into(),
             }),
         }
@@ -438,13 +438,13 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
             Stmt::Return(Some(_expr)) => {
                 if unreachable_start.is_none() {
                     // Get span from the statement itself if possible
-                    unreachable_start = Some(Span { start: 0, end: 0 });
+                    unreachable_start = Some(Span::new(0, 0));
                 }
             }
             Stmt::Return(None) => {
                 if unreachable_start.is_none() {
                     // Use a default span since Return without value has no span
-                    unreachable_start = Some(Span { start: 0, end: 0 });
+                    unreachable_start = Some(Span::new(0, 0));
                 }
             }
             _ => {

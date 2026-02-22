@@ -1594,7 +1594,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
         at_syntax::Expr::Binary { left, right, .. } => {
             let start = expr_span(left)?.start;
             let end = expr_span(right)?.end;
-            Some(Span { start, end })
+            Some(Span::new(start, end))
         }
         at_syntax::Expr::If {
             condition,
@@ -1608,12 +1608,12 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             } else {
                 expr_span(then_branch)?.end
             };
-            Some(Span { start, end })
+            Some(Span::new(start, end))
         }
         at_syntax::Expr::Member { base, name } => {
             let start = expr_span(base)?.start;
             let end = name.span.end;
-            Some(Span { start, end })
+            Some(Span::new(start, end))
         }
         at_syntax::Expr::Call { callee, args } => {
             let start = expr_span(callee)?.start;
@@ -1622,7 +1622,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             } else {
                 start
             };
-            Some(Span { start, end })
+            Some(Span::new(start, end))
         }
         at_syntax::Expr::Try(expr) => expr_span(expr),
         at_syntax::Expr::TryCatch { try_span, .. } => Some(*try_span),
@@ -1653,28 +1653,25 @@ fn stmt_span(stmt: &at_syntax::Stmt) -> Span {
         at_syntax::Stmt::Using { name, .. } => name.span,
         at_syntax::Stmt::Set { name, .. } => name.span,
         at_syntax::Stmt::SetMember { field, .. } => field.span,
-        at_syntax::Stmt::SetIndex { base, .. } => {
-            expr_span(base).unwrap_or(Span { start: 0, end: 0 })
-        }
+        at_syntax::Stmt::SetIndex { base, .. } => expr_span(base).unwrap_or(Span::new(0, 0)),
         at_syntax::Stmt::While { while_span, .. } => *while_span,
         at_syntax::Stmt::For { for_span, .. } => *for_span,
         at_syntax::Stmt::Break { break_span } => *break_span,
         at_syntax::Stmt::Continue { continue_span } => *continue_span,
-        at_syntax::Stmt::Expr(expr) => expr_span(expr).unwrap_or(Span { start: 0, end: 0 }),
-        at_syntax::Stmt::Return(expr) => expr
-            .as_ref()
-            .and_then(expr_span)
-            .unwrap_or(Span { start: 0, end: 0 }),
+        at_syntax::Stmt::Expr(expr) => expr_span(expr).unwrap_or(Span::new(0, 0)),
+        at_syntax::Stmt::Return(expr) => {
+            expr.as_ref().and_then(expr_span).unwrap_or(Span::new(0, 0))
+        }
         at_syntax::Stmt::Block(stmts) => {
             if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
                 let start = stmt_span(first).start;
                 let end = stmt_span(last).end;
-                Span { start, end }
+                Span::new(start, end)
             } else {
-                Span { start: 0, end: 0 }
+                Span::new(0, 0)
             }
         }
-        at_syntax::Stmt::Test { .. } => Span { start: 0, end: 0 },
+        at_syntax::Stmt::Test { .. } => Span::new(0, 0),
     }
 }
 
