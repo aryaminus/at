@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 at_syntax = { path = "../at_syntax" }
+toml = "0.8"
 
 [dev-dependencies]
 at_parser = { path = "../at_parser" }

@@ -409,12 +409,15 @@ fn main() {
             }
         };
 
-        match at_lint::lint_module(&module) {
+        let config_source = load_lint_config(path);
+        match at_lint::lint_module_with_config(&module, config_source.as_deref()) {
             Ok(()) => {
                 println!("no issues found");
             }
             Err(errors) => {
                 let fixable = at_lint::count_fixable(&errors);
+                let (errors, warnings, infos) = split_lint_by_severity(errors);
+                let total = errors.len() + warnings.len() + infos.len();
 
                 if fix_mode && fixable > 0 {
                     // Apply fixes
@@ -437,44 +440,35 @@ fn main() {
                         }
                     };
 
-                    if let Err(remaining) = at_lint::lint_module(&fixed_module) {
+                    if let Err(remaining) =
+                        at_lint::lint_module_with_config(&fixed_module, config_source.as_deref())
+                    {
                         let remaining_fixable = at_lint::count_fixable(&remaining);
+                        let (errors, warnings, infos) = split_lint_by_severity(remaining);
+                        let total = errors.len() + warnings.len() + infos.len();
                         if remaining_fixable > 0 {
                             println!(
                                 "{} remaining issue(s) can be auto-fixed (run --fix again)",
                                 remaining_fixable
                             );
                         }
-                        println!(
-                            "{} issue(s) require manual fix",
-                            remaining.len() - remaining_fixable
-                        );
-                        for error in remaining {
-                            if error.fix.is_none() {
-                                eprintln!(
-                                    "{}",
-                                    format_diagnostic(
-                                        &error.message,
-                                        error.span,
-                                        &fixed_source,
-                                        Some(path)
-                                    )
-                                );
-                            }
+                        print_lint_bucket("error", errors, &fixed_source, Some(path));
+                        print_lint_bucket("warn", warnings, &fixed_source, Some(path));
+                        print_lint_bucket("info", infos, &fixed_source, Some(path));
+                        if total > 0 {
+                            println!("{} issue(s) require manual fix", total - remaining_fixable);
                         }
                     }
                 } else {
-                    // Normal lint mode - just print errors
-                    for error in errors {
-                        eprintln!(
-                            "{}",
-                            format_diagnostic(&error.message, error.span, &source, Some(path))
-                        );
-                    }
+                    print_lint_bucket("error", errors, &source, Some(path));
+                    print_lint_bucket("warn", warnings, &source, Some(path));
+                    print_lint_bucket("info", infos, &source, Some(path));
                     if fixable > 0 {
                         eprintln!("\n{} issue(s) can be auto-fixed with --fix", fixable);
                     }
-                    std::process::exit(1);
+                    if total > 0 {
+                        std::process::exit(1);
+                    }
                 }
             }
         }
@@ -501,13 +495,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(errors) = at_lint::lint_module(&module) {
-            for error in errors {
-                eprintln!(
-                    "{}",
-                    format_diagnostic(&error.message, error.span, &source, Some(path))
-                );
-            }
+        let config_source = load_lint_config(path);
+        if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
+            let (errors, warnings, infos) = split_lint_by_severity(errors);
+            print_lint_bucket("error", errors, &source, Some(path));
+            print_lint_bucket("warn", warnings, &source, Some(path));
+            print_lint_bucket("info", infos, &source, Some(path));
             std::process::exit(1);
         }
         if let Err(errors) = at_check::typecheck_module(&module) {
@@ -951,6 +944,64 @@ fn format_parse_error(err: &at_parser::ParseError, source: &str, path: Option<&s
     }
 
     format!("{prefix}: {message}")
+}
+
+fn load_lint_config(path: &str) -> Option<String> {
+    let file_path = Path::new(path);
+    let mut dir = file_path.parent()?;
+    loop {
+        let candidate = dir.join(".at-lint.toml");
+        if candidate.exists() {
+            return fs::read_to_string(candidate).ok();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    None
+}
+
+fn split_lint_by_severity(
+    mut errors: Vec<at_lint::LintError>,
+) -> (
+    Vec<at_lint::LintError>,
+    Vec<at_lint::LintError>,
+    Vec<at_lint::LintError>,
+) {
+    let mut error_list = Vec::new();
+    let mut warn_list = Vec::new();
+    let mut info_list = Vec::new();
+    for error in errors.drain(..) {
+        match error.severity {
+            at_lint::LintSeverity::Error => error_list.push(error),
+            at_lint::LintSeverity::Warn => warn_list.push(error),
+            at_lint::LintSeverity::Info => info_list.push(error),
+        }
+    }
+    (error_list, warn_list, info_list)
+}
+
+fn print_lint_bucket(
+    label: &str,
+    errors: Vec<at_lint::LintError>,
+    source: &str,
+    path: Option<&str>,
+) {
+    if errors.is_empty() {
+        return;
+    }
+    for error in errors {
+        eprintln!(
+            "{}",
+            format_diagnostic(
+                &format!("[{label}] {}", error.message),
+                error.span,
+                source,
+                path
+            )
+        );
+    }
 }
 
 fn format_compile_error(err: &at_vm::VmError, source: Option<&str>, path: Option<&str>) -> String {
