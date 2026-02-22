@@ -1,5 +1,4 @@
 # Build artifacts
-at/target/
 target/
 
 # Cargo
@@ -18,7 +17,7 @@ target/
 .at/lock
 
 # WASM build output
-at/crates/at_wasm/pkg/
+crates/at_wasm/pkg/
 
 # OS
 Thumbs.db
