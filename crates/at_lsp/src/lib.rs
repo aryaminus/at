@@ -1904,6 +1904,9 @@ fn format_function_signature_with_inferred(
     inferred_return: Option<&String>,
 ) -> String {
     let mut out = String::new();
+    if func.is_async {
+        out.push_str("async ");
+    }
     if func.is_tool {
         out.push_str("tool ");
     }
