@@ -11,6 +11,8 @@ pub struct McpServer {
     tools: Vec<Tool>,
     context: Option<String>,
     tool_handler: Option<Rc<ToolHandler>>,
+    resources: Vec<Resource>,
+    prompts: Vec<Prompt>,
     client_initialized: Cell<bool>,
 }
 
@@ -27,6 +29,22 @@ pub struct Tool {
     pub import_aliases: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Resource {
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Prompt {
+    pub name: String,
+    pub description: Option<String>,
+    pub messages: Vec<JsonValue>,
+}
+
 impl McpServer {
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
@@ -35,6 +53,8 @@ impl McpServer {
             tools: Vec::new(),
             context: None,
             tool_handler: None,
+            resources: Vec::new(),
+            prompts: Vec::new(),
             client_initialized: Cell::new(false),
         }
     }
@@ -46,6 +66,16 @@ impl McpServer {
 
     pub fn with_context(mut self, context: Option<String>) -> Self {
         self.context = context;
+        self
+    }
+
+    pub fn with_resources(mut self, resources: Vec<Resource>) -> Self {
+        self.resources = resources;
+        self
+    }
+
+    pub fn with_prompts(mut self, prompts: Vec<Prompt>) -> Self {
+        self.prompts = prompts;
         self
     }
 
@@ -209,6 +239,8 @@ impl McpServer {
                                 "capabilities": {
                                     "tools": {},
                                     "roots": {},
+                                    "resources": {},
+                                    "prompts": {},
                                 }
                             }
                         });
@@ -219,6 +251,97 @@ impl McpServer {
                         }
 
                         result
+                    }
+                }
+                "resources/list" => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resources": self.resources.iter().map(|resource| json!({
+                            "uri": resource.uri,
+                            "name": resource.name,
+                            "description": resource.description,
+                            "mimeType": resource.mime_type,
+                        })).collect::<Vec<_>>(),
+                    }
+                }),
+                "resources/read" => {
+                    let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
+                    let uri = params.get("uri").and_then(|value| value.as_str());
+                    if uri.is_none() {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "Invalid params: uri must be a string" }
+                        })
+                    } else {
+                        let uri = uri.unwrap();
+                        let resource = self.resources.iter().find(|res| res.uri == uri);
+                        if let Some(resource) = resource {
+                            let content = if let Some(text) = &resource.text {
+                                json!({
+                                    "type": "text",
+                                    "text": text,
+                                })
+                            } else {
+                                json!({
+                                    "type": "text",
+                                    "text": "",
+                                })
+                            };
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "contents": [content],
+                                }
+                            })
+                        } else {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32602, "message": "Unknown resource" }
+                            })
+                        }
+                    }
+                }
+                "prompts/list" => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "prompts": self.prompts.iter().map(|prompt| json!({
+                            "name": prompt.name,
+                            "description": prompt.description,
+                        })).collect::<Vec<_>>(),
+                    }
+                }),
+                "prompts/get" => {
+                    let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
+                    let name = params.get("name").and_then(|value| value.as_str());
+                    if name.is_none() {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "Invalid params: name must be a string" }
+                        })
+                    } else {
+                        let name = name.unwrap();
+                        let prompt = self.prompts.iter().find(|prompt| prompt.name == name);
+                        if let Some(prompt) = prompt {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "messages": prompt.messages,
+                                }
+                            })
+                        } else {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32602, "message": "Unknown prompt" }
+                            })
+                        }
                     }
                 }
                 "tools/list" => json!({
