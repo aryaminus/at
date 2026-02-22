@@ -1625,6 +1625,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             Some(Span { start, end })
         }
         at_syntax::Expr::Try(expr) => expr_span(expr),
+        at_syntax::Expr::TryCatch { try_span, .. } => Some(*try_span),
         at_syntax::Expr::Match { match_span, .. } => Some(*match_span),
         at_syntax::Expr::Block { block_span, .. } => Some(*block_span),
         at_syntax::Expr::Array { array_span, .. } => Some(*array_span),
@@ -1921,6 +1922,22 @@ fn format_type_ref(ty: &TypeRef, out: &mut String) {
                     format_type_ref(arg, out);
                 }
                 out.push('>');
+            }
+        }
+        TypeRef::Union { types } => {
+            for (idx, ty) in types.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(" | ");
+                }
+                format_type_ref(ty, out);
+            }
+        }
+        TypeRef::Intersection { types } => {
+            for (idx, ty) in types.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(" & ");
+                }
+                format_type_ref(ty, out);
             }
         }
         TypeRef::Tuple { items, .. } => {

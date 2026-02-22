@@ -216,6 +216,20 @@ fn map_literals_and_casts() {
     }
 }
 
+// Try/catch/finally with result
+fn try_catch_demo() -> int {
+    let result = try { ok(21) } catch { 0 } finally { print("cleanup"); };
+    return result * 2;
+}
+
+// Union type usage
+fn union_demo(value: int | string) -> int {
+    if value is int {
+        return value;
+    }
+    return 0;
+}
+
 // Pattern matching with result
 fn safe_divide(a: int, b: int) -> result<int, string> {
     return if b == 0 {
@@ -360,6 +374,17 @@ test "try operator" {
     assert(is_ok(result));
 }
 
+test "try/catch/finally" {
+    let result = try_catch_demo();
+    assert_eq(result, 42);
+}
+
+test "union types" {
+    let value: int | string = 7;
+    let result = union_demo(value);
+    assert_eq(result, 7);
+}
+
 // Main entry point for running as script
 fn main() {
     print("=== Basic Math ===");
@@ -402,6 +427,12 @@ fn main() {
     
     print("\n=== Try Demo ===");
     print(try_demo());
+
+    print("\n=== Try/Catch Demo ===");
+    print(try_catch_demo());
+
+    print("\n=== Union Types ===");
+    print(union_demo(7));
     
     return 0;
 }

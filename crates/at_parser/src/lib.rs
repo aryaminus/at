@@ -13,6 +13,9 @@ pub enum TokenKind {
     Import,
     As,
     Is,
+    Try,
+    Catch,
+    Finally,
     Match,
     While,
     For,
@@ -1115,6 +1118,7 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::If => self.parse_if_expr(),
             TokenKind::Match => self.parse_match_expr(),
+            TokenKind::Try => self.parse_try_expr(),
             TokenKind::True => {
                 let span = self.current.span;
                 self.advance();
@@ -1548,6 +1552,41 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_try_expr(&mut self) -> Result<Expr, ParseError> {
+        let try_span = self.current.span;
+        self.advance();
+        let try_block = self.parse_block_expr()?;
+
+        let catch_block = if self.current.kind == TokenKind::Catch {
+            self.advance();
+            Some(Box::new(self.parse_block_expr()?))
+        } else {
+            None
+        };
+
+        let finally_block = if self.current.kind == TokenKind::Finally {
+            self.advance();
+            Some(Box::new(self.parse_block_expr()?))
+        } else {
+            None
+        };
+
+        if catch_block.is_none() && finally_block.is_none() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "catch or finally".to_string(),
+                found: self.current.kind.clone(),
+                span: self.current.span,
+            });
+        }
+
+        Ok(Expr::TryCatch {
+            try_span,
+            try_block: Box::new(try_block),
+            catch_block,
+            finally_block,
+        })
+    }
+
     fn parse_match_pattern(&mut self) -> Result<MatchPattern, ParseError> {
         if self.current.kind == TokenKind::Ident(String::from("_")) {
             self.advance();
@@ -1718,6 +1757,40 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_ref(&mut self) -> Result<TypeRef, ParseError> {
+        self.parse_type_union()
+    }
+
+    fn parse_type_union(&mut self) -> Result<TypeRef, ParseError> {
+        let ty = self.parse_type_intersection()?;
+        let mut items = Vec::new();
+        items.push(ty);
+        while self.current.kind == TokenKind::Pipe {
+            self.advance();
+            items.push(self.parse_type_intersection()?);
+        }
+        if items.len() == 1 {
+            Ok(items.remove(0))
+        } else {
+            Ok(TypeRef::Union { types: items })
+        }
+    }
+
+    fn parse_type_intersection(&mut self) -> Result<TypeRef, ParseError> {
+        let ty = self.parse_type_primary()?;
+        let mut items = Vec::new();
+        items.push(ty);
+        while self.current.kind == TokenKind::Ampersand {
+            self.advance();
+            items.push(self.parse_type_primary()?);
+        }
+        if items.len() == 1 {
+            Ok(items.remove(0))
+        } else {
+            Ok(TypeRef::Intersection { types: items })
+        }
+    }
+
+    fn parse_type_primary(&mut self) -> Result<TypeRef, ParseError> {
         if self.current.kind == TokenKind::Fn {
             let fn_span = self.current.span;
             self.advance();
@@ -2555,6 +2628,9 @@ impl<'a> Lexer<'a> {
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
             "is" => TokenKind::Is,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
+            "finally" => TokenKind::Finally,
             "match" => TokenKind::Match,
             "while" => TokenKind::While,
             "for" => TokenKind::For,
@@ -2974,6 +3050,18 @@ fn f() {
     if taylor is int {
         print(count);
     }
+}
+"#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_try_catch_and_union_types() {
+        let source = r#"
+fn f() {
+    let value: int | string = 1;
+    let result = try { ok(1) } catch { 0 } finally { print(value); };
+    print(result);
 }
 "#;
         assert!(parse_module(source).is_ok());

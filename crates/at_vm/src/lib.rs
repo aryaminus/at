@@ -1319,6 +1319,42 @@ impl Compiler {
                 self.compile_expr(expr, chunk)?;
                 chunk.push(Op::Try, expr_span(expr));
             }
+            Expr::TryCatch {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                let catch_block = match catch_block {
+                    Some(block) => block,
+                    None => {
+                        return Err(compile_error(
+                            "try requires catch".to_string(),
+                            expr_span(expr),
+                        ))
+                    }
+                };
+
+                self.compile_expr(try_block, chunk)?;
+                let match_index = chunk.code.len();
+                chunk.push(Op::MatchResultOk(usize::MAX), expr_span(try_block));
+
+                let jump_index = chunk.code.len();
+                chunk.push(Op::Jump(usize::MAX), None);
+
+                let catch_start = chunk.code.len();
+                chunk.push(Op::Pop, expr_span(catch_block));
+                self.compile_expr(catch_block, chunk)?;
+
+                let after_catch = chunk.code.len();
+                patch_jump(&mut chunk.code, match_index, catch_start);
+                patch_jump(&mut chunk.code, jump_index, after_catch);
+
+                if let Some(finally_block) = finally_block {
+                    let _ = self.compile_expr(finally_block, chunk)?;
+                    chunk.push(Op::Pop, expr_span(finally_block));
+                }
+            }
             Expr::Match {
                 match_span,
                 value,
@@ -1904,6 +1940,20 @@ impl Compiler {
             Expr::Try(expr) => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
+            Expr::TryCatch {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                self.collect_free_vars_expr(try_block, bound, captures, seen);
+                if let Some(catch_block) = catch_block {
+                    self.collect_free_vars_expr(catch_block, bound, captures, seen);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.collect_free_vars_expr(finally_block, bound, captures, seen);
+                }
+            }
             Expr::Match { value, arms, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
                 for arm in arms {
@@ -2164,6 +2214,12 @@ impl Compiler {
                 }
             },
             at_syntax::TypeRef::Tuple { .. } => Ok(TypeCheck::Tuple),
+            at_syntax::TypeRef::Union { .. } | at_syntax::TypeRef::Intersection { .. } => {
+                Err(compile_error(
+                    "cannot cast or check union/intersection type".to_string(),
+                    None,
+                ))
+            }
             at_syntax::TypeRef::Function { .. } => Err(compile_error(
                 "cannot cast or check function type".to_string(),
                 None,
@@ -2759,13 +2815,9 @@ impl Vm {
                             })?;
                             match array {
                                 Value::Array(items) => {
-                                    // Clone the array and push the new element
-                                    // Note: when the array is uniquely owned (refcount=1),
-                                    // Rc::make_mut would be more efficient but requires
-                                    // &mut self which we don't have here
-                                    let mut new_items = (*items).clone();
-                                    new_items.push(value);
-                                    Value::Array(Rc::new(new_items))
+                                    let mut items = items.clone();
+                                    Rc::make_mut(&mut items).push(value);
+                                    Value::Array(items)
                                 }
                                 _ => {
                                     return Err(runtime_error_at(
@@ -2897,12 +2949,12 @@ impl Vm {
                             self.stack.push((*inner).clone());
                         }
                         Value::Result(Err(inner)) => {
-                            let value = Value::Result(Err(inner));
-                            self.pop_frame();
-                            if self.frames.is_empty() {
-                                return Ok(Some(value));
-                            }
-                            self.stack.push(value);
+                            let span = self.current_span(program);
+                            let message = match inner.as_ref() {
+                                Value::String(text) => text.as_ref().clone(),
+                                other => format_value(other),
+                            };
+                            return Err(self.runtime_error(message, span, program));
                         }
                         _ => {
                             return Err(self.runtime_error(
@@ -3998,6 +4050,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr) => expr_span(expr),
+        Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Group { span, .. } => Some(*span),
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),

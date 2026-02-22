@@ -2238,6 +2238,16 @@ fn type_ref_to_schema(ty: &TypeRef) -> serde_json::Value {
 
             schema
         }
+        TypeRef::Union { types } => json!({
+            "type": "string",
+            "x-at-type": format_type_ref(ty),
+            "x-at-type-variants": types.iter().map(format_type_ref).collect::<Vec<_>>(),
+        }),
+        TypeRef::Intersection { types } => json!({
+            "type": "string",
+            "x-at-type": format_type_ref(ty),
+            "x-at-type-variants": types.iter().map(format_type_ref).collect::<Vec<_>>(),
+        }),
         TypeRef::Tuple { items, .. } => json!({
             "type": "string",
             "x-at-type": format_type_ref(ty),
@@ -2295,6 +2305,16 @@ fn format_type_ref(ty: &TypeRef) -> String {
                 .join(", ");
             format!("{}<{}>", name.name, args)
         }
+        TypeRef::Union { types } => types
+            .iter()
+            .map(format_type_ref)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        TypeRef::Intersection { types } => types
+            .iter()
+            .map(format_type_ref)
+            .collect::<Vec<_>>()
+            .join(" & "),
         TypeRef::Function {
             params, return_ty, ..
         } => {

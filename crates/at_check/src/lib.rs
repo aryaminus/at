@@ -17,6 +17,8 @@ enum SimpleType {
     Function(Vec<SimpleType>, Box<SimpleType>),
     Tuple(Vec<SimpleType>),
     Map(Box<SimpleType>, Box<SimpleType>),
+    Union(Vec<SimpleType>),
+    Intersection(Vec<SimpleType>),
     Custom(String, Vec<SimpleType>),
     Unknown,
 }
@@ -712,6 +714,53 @@ impl TypeChecker {
                     }
                 }
             }
+            Expr::TryCatch {
+                try_block,
+                catch_block,
+                finally_block,
+                ..
+            } => {
+                let try_ty = self.check_expr(try_block);
+                let catch_block = match catch_block {
+                    Some(catch_block) => catch_block,
+                    None => {
+                        self.push_error("try requires catch".to_string(), expr_span(try_block));
+                        if let Some(finally_block) = finally_block {
+                            let _ = self.check_expr(finally_block);
+                        }
+                        return SimpleType::Unknown;
+                    }
+                };
+                let catch_ty = self.check_expr(catch_block);
+                if let Some(finally_block) = finally_block {
+                    let _ = self.check_expr(finally_block);
+                }
+                match try_ty {
+                    SimpleType::Result(ok, _) => {
+                        if !matches!(catch_ty, SimpleType::Unknown)
+                            && !self.types_compatible(&ok, &catch_ty)
+                        {
+                            self.push_error(
+                                format!(
+                                    "try/catch type mismatch: try is {}, catch is {}",
+                                    format_type(&ok),
+                                    format_type(&catch_ty)
+                                ),
+                                expr_span(catch_block),
+                            );
+                        }
+                        (*ok).clone()
+                    }
+                    SimpleType::Unknown => SimpleType::Unknown,
+                    other => {
+                        self.push_error(
+                            format!("try expects result, got {}", format_type(&other)),
+                            expr_span(try_block),
+                        );
+                        SimpleType::Unknown
+                    }
+                }
+            }
             Expr::Match {
                 match_span,
                 value,
@@ -1181,6 +1230,18 @@ impl TypeChecker {
             (SimpleType::Result(ok_left, err_left), SimpleType::Result(ok_right, err_right)) => {
                 self.types_compatible(ok_left, ok_right)
                     && self.types_compatible(err_left, err_right)
+            }
+            (SimpleType::Union(left), other) => {
+                left.iter().any(|ty| self.types_compatible(ty, other))
+            }
+            (other, SimpleType::Union(right)) => {
+                right.iter().any(|ty| self.types_compatible(other, ty))
+            }
+            (SimpleType::Intersection(left), other) => {
+                left.iter().all(|ty| self.types_compatible(ty, other))
+            }
+            (other, SimpleType::Intersection(right)) => {
+                right.iter().all(|ty| self.types_compatible(other, ty))
             }
             (SimpleType::Map(left_key, left_val), SimpleType::Map(right_key, right_val)) => {
                 self.types_compatible(left_key, right_key)
@@ -2944,6 +3005,12 @@ impl TypeChecker {
                     }
                 }
             }
+            TypeRef::Union { types } => {
+                SimpleType::Union(types.iter().map(|ty| self.type_from_ref(ty)).collect())
+            }
+            TypeRef::Intersection { types } => {
+                SimpleType::Intersection(types.iter().map(|ty| self.type_from_ref(ty)).collect())
+            }
             TypeRef::Tuple { items, .. } => {
                 SimpleType::Tuple(items.iter().map(|item| self.type_from_ref(item)).collect())
             }
@@ -3010,6 +3077,11 @@ impl TypeChecker {
                     self.validate_type_ref(item);
                 }
             }
+            TypeRef::Union { types } | TypeRef::Intersection { types } => {
+                for ty in types {
+                    self.validate_type_ref(ty);
+                }
+            }
             TypeRef::Function {
                 params, return_ty, ..
             } => {
@@ -3057,6 +3129,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr) => expr_span(expr),
+        Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),
         Expr::Array { array_span, .. } => Some(*array_span),
@@ -3097,6 +3170,16 @@ fn format_type(ty: &SimpleType) -> String {
             let inner = items.iter().map(format_type).collect::<Vec<_>>().join(", ");
             format!("({inner})")
         }
+        SimpleType::Union(items) => items
+            .iter()
+            .map(format_type)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        SimpleType::Intersection(items) => items
+            .iter()
+            .map(format_type)
+            .collect::<Vec<_>>()
+            .join(" & "),
         SimpleType::Map(key, value) => {
             format!("map<{}, {}>", format_type(key), format_type(value))
         }
@@ -3209,6 +3292,21 @@ fn f() {
     let count = taylor as int;
     if taylor is int {
         return count;
+    }
+    return 0;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn allows_union_types() {
+        let source = r#"
+fn f() {
+    let value: int | string = 1;
+    if value is int {
+        return value;
     }
     return 0;
 }

@@ -16,6 +16,12 @@ pub enum TypeRef {
         name: Ident,
         args: Vec<TypeRef>,
     },
+    Union {
+        types: Vec<TypeRef>,
+    },
+    Intersection {
+        types: Vec<TypeRef>,
+    },
     Tuple {
         tuple_span: Span,
         items: Vec<TypeRef>,
@@ -64,6 +70,12 @@ pub enum Expr {
         match_span: Span,
         value: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    TryCatch {
+        try_span: Span,
+        try_block: Box<Expr>,
+        catch_block: Option<Box<Expr>>,
+        finally_block: Option<Box<Expr>>,
     },
     Block {
         block_span: Span,

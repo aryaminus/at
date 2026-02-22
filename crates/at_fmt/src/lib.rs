@@ -157,6 +157,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::Member { base, .. } => expr_span(base),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr) => expr_span(expr),
+        Expr::TryCatch { try_span, .. } => Some(try_span.start),
         Expr::Match { match_span, .. } => Some(match_span.start),
         Expr::Block { block_span, .. } => Some(block_span.start),
         Expr::Array { array_span, .. } => Some(array_span.start),
@@ -202,6 +203,7 @@ fn expr_end(expr: &Expr) -> Option<usize> {
             }
         }
         Expr::Try(expr) => expr_end(expr),
+        Expr::TryCatch { try_span, .. } => Some(try_span.end),
         Expr::Match { match_span, .. } => Some(match_span.end),
         Expr::Block { block_span, .. } => Some(block_span.end),
         Expr::Array { array_span, .. } => Some(array_span.end),
@@ -613,6 +615,25 @@ fn format_expr_prec_indent(
             format_expr_prec_indent(expr, out, 0, indent, comment_state);
             out.push('?');
         }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            out.push_str("try ");
+            format_expr_prec_indent(try_block, out, 0, indent, comment_state);
+            if let Some(catch_block) = catch_block {
+                out.push(' ');
+                out.push_str("catch ");
+                format_expr_prec_indent(catch_block, out, 0, indent, comment_state);
+            }
+            if let Some(finally_block) = finally_block {
+                out.push(' ');
+                out.push_str("finally ");
+                format_expr_prec_indent(finally_block, out, 0, indent, comment_state);
+            }
+        }
         Expr::Match { value, arms, .. } => {
             let wrap = parent_prec > 0;
             if wrap {
@@ -917,6 +938,22 @@ fn format_type_ref(ty: &at_syntax::TypeRef, out: &mut String) {
                 out.push('>');
             }
         }
+        at_syntax::TypeRef::Union { types } => {
+            for (idx, ty) in types.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(" | ");
+                }
+                format_type_ref(ty, out);
+            }
+        }
+        at_syntax::TypeRef::Intersection { types } => {
+            for (idx, ty) in types.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(" & ");
+                }
+                format_type_ref(ty, out);
+            }
+        }
         at_syntax::TypeRef::Tuple { items, .. } => {
             out.push('(');
             for (idx, item) in items.iter().enumerate() {
@@ -1079,6 +1116,20 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
         }
         Expr::Try(expr) => {
             collect_needs_expr(expr, needs, import_aliases);
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_needs_expr(try_block, needs, import_aliases);
+            if let Some(catch_block) = catch_block {
+                collect_needs_expr(catch_block, needs, import_aliases);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_needs_expr(finally_block, needs, import_aliases);
+            }
         }
         Expr::Match { value, arms, .. } => {
             collect_needs_expr(value, needs, import_aliases);

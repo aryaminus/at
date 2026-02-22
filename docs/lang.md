@@ -388,6 +388,7 @@ is_ok(value)
 is_err(value)
 ```
 
+
 ### Casts and Type Checks
 
 ```
@@ -395,6 +396,29 @@ let count = value as int;
 if value is string {
     print(value);
 }
+```
+
+## Structured Error Handling
+
+```
+try {
+    let value = risky();
+    value
+} catch {
+    "fallback"
+} finally {
+    cleanup();
+}
+```
+
+- `try { ... } catch { ... }` — Evaluate try block; on error, run catch block.
+- `finally { ... }` — Always runs after try/catch; its value is ignored.
+
+## Union and Intersection Types
+
+```
+let id: int | string = 42;
+let both: option<int> & option<string> = none();
 ```
 
 ### Capabilities
@@ -456,19 +480,25 @@ unary        ::= ("-" | "!") unary | postfix
 postfix      ::= primary { ("." ident) | call | index | "?" | "is" type | "as" type }
 call         ::= "(" [expr { "," expr }] ")"
 index        ::= "[" expr "]"
-primary      ::= int | float | string | "true" | "false" | ident | array | map_lit | block | tuple | range | if | match | closure | struct_lit | enum_lit | "(" expr ")"
+primary      ::= int | float | string | "true" | "false" | ident | array | map_lit | block | tuple | range | if | match | try_expr | closure | struct_lit | enum_lit | "(" expr ")"
 array        ::= "[" [expr { "," expr }] "]"
 map_lit      ::= "map" "{" [expr ":" expr { "," expr ":" expr }] "}"
 tuple        ::= "(" expr "," expr { "," expr } ")"
 range        ::= expr ".." expr
 closure      ::= "|" [ident { "," ident }] "|" expr
+try_expr     ::= "try" block "catch" block ["finally" block]
 struct_lit   ::= ident "{" field_init { "," field_init } "}"
 enum_lit     ::= ident "::" ident [ "(" expr ")" ]
 if           ::= "if" expr block "else" (block | if)
 match        ::= "match" expr "{" { pattern "=>" expr "," } "}"
 pattern      ::= "ok" "(" ident ")" | "err" "(" ident ")" | "some" "(" ident ")" | "none" | "_" | pattern "|" pattern | pattern "if" expr
 
-type         ::= ident ["<" type { "," type } ">"]
+type         ::= union_type
+union_type   ::= intersect_type { "|" intersect_type }
+intersect_type ::= primary_type { "&" primary_type }
+primary_type ::= ident ["<" type { "," type } ">"] | tuple_type | fn_type
+tuple_type   ::= "(" type "," type { "," type } ")"
+fn_type      ::= "fn" "(" [type { "," type }] ")" "->" type
 ```
 
 ## Design Rationale

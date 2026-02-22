@@ -622,6 +622,20 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(item, used);
             }
         }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_used_capabilities_expr(try_block, used);
+            if let Some(catch_block) = catch_block {
+                collect_used_capabilities_expr(catch_block, used);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_used_capabilities_expr(finally_block, used);
+            }
+        }
         Expr::MapLiteral { entries, .. } => {
             for (key, value) in entries {
                 collect_used_capabilities_expr(key, used);
@@ -789,6 +803,20 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
         Expr::Tuple { items, .. } => {
             for item in items {
                 lint_unused_match_bindings_expr(item, config, errors);
+            }
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            lint_unused_match_bindings_expr(try_block, config, errors);
+            if let Some(catch_block) = catch_block {
+                lint_unused_match_bindings_expr(catch_block, config, errors);
+            }
+            if let Some(finally_block) = finally_block {
+                lint_unused_match_bindings_expr(finally_block, config, errors);
             }
         }
         Expr::MapLiteral { entries, .. } => {
@@ -1098,6 +1126,20 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(item, used);
             }
         }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_local_uses_expr(try_block, used);
+            if let Some(catch_block) = catch_block {
+                collect_local_uses_expr(catch_block, used);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_local_uses_expr(finally_block, used);
+            }
+        }
         Expr::MapLiteral { entries, .. } => {
             for (key, value) in entries {
                 collect_local_uses_expr(key, used);
@@ -1266,6 +1308,20 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(item, used);
             }
         }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_alias_usage_expr(try_block, used);
+            if let Some(catch_block) = catch_block {
+                collect_alias_usage_expr(catch_block, used);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_alias_usage_expr(finally_block, used);
+            }
+        }
         Expr::MapLiteral { entries, .. } => {
             for (key, value) in entries {
                 collect_alias_usage_expr(key, used);
@@ -1428,6 +1484,20 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Tuple { items, .. } => {
             for item in items {
                 collect_called_functions_expr(item, used);
+            }
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_called_functions_expr(try_block, used);
+            if let Some(catch_block) = catch_block {
+                collect_called_functions_expr(catch_block, used);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_called_functions_expr(finally_block, used);
             }
         }
         Expr::MapLiteral { entries, .. } => {
