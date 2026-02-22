@@ -852,6 +852,7 @@ impl TypeChecker {
                     }
                 }
             }
+            Expr::Await { expr, .. } => self.check_expr(expr),
             Expr::TryCatch {
                 try_block,
                 catch_block,
@@ -3479,6 +3480,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr, _) => expr_span(expr),
+        Expr::Await { await_span, .. } => Some(*await_span),
         Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Match { match_span, .. } => Some(*match_span),
         Expr::Block { block_span, .. } => Some(*block_span),

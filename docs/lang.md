@@ -492,7 +492,7 @@ equality     ::= comparison { ("==" | "!=") comparison }
 comparison   ::= term { ("<" | "<=" | ">" | ">=") term }
 term         ::= factor { ("+" | "-") factor }
 factor       ::= unary { ("*" | "/" | "%") unary }
-unary        ::= ("-" | "!") unary | postfix
+unary        ::= ("-" | "!" | "await") unary | postfix
 postfix      ::= primary { ("." ident) | call | index | "?" | "is" type | "as" type }
 call         ::= "(" [expr { "," expr }] ")"
 index        ::= "[" expr "]"
@@ -552,6 +552,12 @@ let value: mut map<string, int> = map { "a": 1 };
 ```
 let values = [1, 2, ...more];
 let merged = map { "a": 1, ...extra };
+```
+
+### Await
+
+```
+let value = await call();
 ```
 
 ### If Statement

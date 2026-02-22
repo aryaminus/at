@@ -1497,6 +1497,9 @@ impl Compiler {
                 self.compile_expr(expr, chunk)?;
                 chunk.push(Op::Try, expr_span(expr));
             }
+            Expr::Await { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+            }
             Expr::TryCatch {
                 try_block,
                 catch_block,
@@ -2213,6 +2216,9 @@ impl Compiler {
                 }
             }
             Expr::Try(expr, _) => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
+            Expr::Await { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::TryCatch {
@@ -4538,6 +4544,7 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Member { name, .. } => Some(name.span),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr, _) => expr_span(expr),
+        Expr::Await { await_span, .. } => Some(*await_span),
         Expr::TryCatch { try_span, .. } => Some(*try_span),
         Expr::Group { span, .. } => Some(*span),
         Expr::Match { match_span, .. } => Some(*match_span),

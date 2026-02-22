@@ -646,6 +646,9 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Try(expr, _) => {
             collect_used_capabilities_expr(expr, used);
         }
+        Expr::Await { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
+        }
         Expr::Tuple { items, .. } => {
             for item in items {
                 collect_used_capabilities_expr(item, used);
@@ -849,6 +852,9 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
             lint_unused_match_bindings_expr(base, config, errors);
         }
         Expr::Try(expr, _) => {
+            lint_unused_match_bindings_expr(expr, config, errors);
+        }
+        Expr::Await { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
         }
         Expr::Block { stmts, tail, .. } => {
@@ -1231,6 +1237,9 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Try(expr, _) => {
             collect_local_uses_expr(expr, used);
         }
+        Expr::Await { expr, .. } => {
+            collect_local_uses_expr(expr, used);
+        }
         Expr::Match { value, arms, .. } => {
             collect_local_uses_expr(value, used);
             for arm in arms {
@@ -1455,6 +1464,9 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
         Expr::Try(expr, _) => {
             collect_alias_usage_expr(expr, used);
         }
+        Expr::Await { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
+        }
         Expr::Match { value, arms, .. } => {
             collect_alias_usage_expr(value, used);
             for arm in arms {
@@ -1673,6 +1685,9 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
             collect_called_functions_expr(base, used);
         }
         Expr::Try(expr, _) => {
+            collect_called_functions_expr(expr, used);
+        }
+        Expr::Await { expr, .. } => {
             collect_called_functions_expr(expr, used);
         }
         Expr::Match { value, arms, .. } => {

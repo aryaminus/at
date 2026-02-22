@@ -1647,6 +1647,7 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
             Some(Span::new(start, end))
         }
         at_syntax::Expr::Try(expr, _) => expr_span(expr),
+        at_syntax::Expr::Await { await_span, .. } => Some(*await_span),
         at_syntax::Expr::TryCatch { try_span, .. } => Some(*try_span),
         at_syntax::Expr::Match { match_span, .. } => Some(*match_span),
         at_syntax::Expr::Block { block_span, .. } => Some(*block_span),

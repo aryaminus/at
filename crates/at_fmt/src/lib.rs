@@ -220,6 +220,7 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::Member { base, .. } => expr_span(base),
         Expr::Call { callee, .. } => expr_span(callee),
         Expr::Try(expr, _) => expr_span(expr),
+        Expr::Await { await_span, .. } => Some(await_span.start),
         Expr::Ternary { span, .. } => Some(span.start),
         Expr::ChainedComparison { span, .. } => Some(span.start),
         Expr::TryCatch { try_span, .. } => Some(try_span.start),
@@ -271,6 +272,7 @@ fn expr_end(expr: &Expr) -> Option<usize> {
             }
         }
         Expr::Try(expr, _) => expr_end(expr),
+        Expr::Await { await_span, .. } => Some(await_span.end),
         Expr::Ternary { span, .. } => Some(span.end),
         Expr::ChainedComparison { span, .. } => Some(span.end),
         Expr::TryCatch { try_span, .. } => Some(try_span.end),
@@ -807,6 +809,10 @@ fn format_expr_prec_indent(
         Expr::Try(expr, _) => {
             format_expr_prec_indent(expr, out, 0, indent, comment_state);
             out.push('?');
+        }
+        Expr::Await { expr, .. } => {
+            out.push_str("await ");
+            format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);
         }
         Expr::TryCatch {
             try_block,
@@ -1359,6 +1365,9 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
             collect_needs_expr(body, needs, import_aliases);
         }
         Expr::Try(expr, _) => {
+            collect_needs_expr(expr, needs, import_aliases);
+        }
+        Expr::Await { expr, .. } => {
             collect_needs_expr(expr, needs, import_aliases);
         }
         Expr::Ternary {

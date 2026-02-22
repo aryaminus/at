@@ -108,6 +108,11 @@ pub enum Expr {
         id: NodeId,
         args: Vec<Expr>,
     },
+    Await {
+        await_span: Span,
+        id: NodeId,
+        expr: Box<Expr>,
+    },
     Try(Box<Expr>, NodeId),
     Match {
         match_span: Span,
@@ -628,6 +633,7 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::Try(expr, _) => visitor.visit_expr(expr),
+        Expr::Await { expr, .. } => visitor.visit_expr(expr),
         Expr::Match { value, arms, .. } => {
             visitor.visit_expr(value);
             for arm in arms {

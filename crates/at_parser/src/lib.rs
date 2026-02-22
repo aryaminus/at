@@ -14,6 +14,7 @@ pub enum TokenKind {
     As,
     Is,
     Try,
+    Await,
     Catch,
     Finally,
     Match,
@@ -1252,6 +1253,16 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Unary {
                     op: at_syntax::UnaryOp::Not,
                     op_span: span,
+                    id: self.alloc_id(),
+                    expr: Box::new(expr),
+                })
+            }
+            TokenKind::Await => {
+                let span = self.current.span;
+                self.advance();
+                let expr = self.parse_unary()?;
+                Ok(Expr::Await {
+                    await_span: span,
                     id: self.alloc_id(),
                     expr: Box::new(expr),
                 })
@@ -2985,6 +2996,7 @@ impl<'a> Lexer<'a> {
             "as" => TokenKind::As,
             "is" => TokenKind::Is,
             "try" => TokenKind::Try,
+            "await" => TokenKind::Await,
             "catch" => TokenKind::Catch,
             "finally" => TokenKind::Finally,
             "match" => TokenKind::Match,
@@ -3106,6 +3118,7 @@ fn expr_span_start(expr: &Expr) -> Option<usize> {
         Expr::Member { base, .. } => expr_span_start(base),
         Expr::Call { callee, .. } => expr_span_start(callee),
         Expr::Try(expr, _) => expr_span_start(expr),
+        Expr::Await { await_span, .. } => Some(await_span.start),
         Expr::TryCatch { try_span, .. } => Some(try_span.start),
         Expr::Match { match_span, .. } => Some(match_span.start),
         Expr::Block { block_span, .. } => Some(block_span.start),
@@ -3144,6 +3157,7 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
             .and_then(expr_span_end)
             .or_else(|| expr_span_end(callee)),
         Expr::Try(expr, _) => expr_span_end(expr),
+        Expr::Await { await_span, .. } => Some(await_span.end),
         Expr::TryCatch { try_span, .. } => Some(try_span.end),
         Expr::Match { match_span, .. } => Some(match_span.end),
         Expr::Block { block_span, .. } => Some(block_span.end),
