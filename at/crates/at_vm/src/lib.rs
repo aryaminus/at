@@ -2247,6 +2247,7 @@ impl Vm {
             }
 
             set_stack_trace(self.build_stack_trace(program));
+            set_current_span(span_at(chunk, frame_ip));
 
             let mut advance = true;
             match &chunk.code[frame_ip] {
@@ -3747,6 +3748,7 @@ impl Vm {
 
 thread_local! {
     static STACK_TRACE: RefCell<Option<Vec<StackFrame>>> = RefCell::new(None);
+    static CURRENT_SPAN: RefCell<Option<Span>> = RefCell::new(None);
 }
 
 fn set_stack_trace(trace: Vec<StackFrame>) {
@@ -3755,8 +3757,18 @@ fn set_stack_trace(trace: Vec<StackFrame>) {
     });
 }
 
+fn set_current_span(span: Option<Span>) {
+    CURRENT_SPAN.with(|cell| {
+        *cell.borrow_mut() = span;
+    });
+}
+
 fn current_stack_trace() -> Option<Vec<StackFrame>> {
     STACK_TRACE.with(|cell| cell.borrow().clone())
+}
+
+fn current_span() -> Option<Span> {
+    CURRENT_SPAN.with(|cell| *cell.borrow())
 }
 
 fn span_at(chunk: &Chunk, ip: usize) -> Option<Span> {
@@ -3764,6 +3776,7 @@ fn span_at(chunk: &Chunk, ip: usize) -> Option<Span> {
 }
 
 fn runtime_error_at(message: String, span: Option<Span>) -> VmError {
+    let span = span.or_else(current_span);
     VmError::Runtime {
         message,
         span,
