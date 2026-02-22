@@ -2344,6 +2344,29 @@ fn json_to_value(value: &JsonValue, ty: Option<&str>) -> Result<Value, String> {
             }
             Ok(Value::Array(Rc::new(values)))
         }
+        Some("map") => {
+            let obj = value
+                .as_object()
+                .ok_or_else(|| "expected map object".to_string())?;
+            let entries = obj
+                .get("entries")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| "map entries missing".to_string())?;
+            let mut values = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let entry_obj = entry
+                    .as_object()
+                    .ok_or_else(|| "map entry expects object".to_string())?;
+                let key = entry_obj
+                    .get("key")
+                    .ok_or_else(|| "map entry key missing".to_string())?;
+                let value = entry_obj
+                    .get("value")
+                    .ok_or_else(|| "map entry value missing".to_string())?;
+                values.push((json_to_value(key, None)?, json_to_value(value, None)?));
+            }
+            Ok(Value::Map(Rc::new(values)))
+        }
         Some("option") => {
             if value.is_null() {
                 Ok(Value::Option(None))
@@ -2409,6 +2432,19 @@ fn value_to_json(value: Value) -> JsonValue {
                 obj.insert(key.clone(), value_to_json(value.clone()));
             }
             JsonValue::Object(obj)
+        }
+        Value::Map(entries) => {
+            let mut items = Vec::with_capacity(entries.len());
+            for (key, value) in entries.iter() {
+                items.push(json!({
+                    "key": value_to_json(key.clone()),
+                    "value": value_to_json(value.clone())
+                }));
+            }
+            json!({
+                "kind": "map",
+                "entries": items
+            })
         }
         Value::Enum {
             name,

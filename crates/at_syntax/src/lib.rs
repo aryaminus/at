@@ -109,6 +109,20 @@ pub enum Expr {
         variant: Ident,
         payload: Option<Box<Expr>>,
     },
+    MapLiteral {
+        span: Span,
+        entries: Vec<(Expr, Expr)>,
+    },
+    As {
+        expr: Box<Expr>,
+        ty: TypeRef,
+        span: Span,
+    },
+    Is {
+        expr: Box<Expr>,
+        ty: TypeRef,
+        span: Span,
+    },
     Group {
         span: Span,
         expr: Box<Expr>,

@@ -16,6 +16,7 @@ enum SimpleType {
     Result(Box<SimpleType>, Box<SimpleType>),
     Function(Vec<SimpleType>, Box<SimpleType>),
     Tuple(Vec<SimpleType>),
+    Map(Box<SimpleType>, Box<SimpleType>),
     Custom(String, Vec<SimpleType>),
     Unknown,
 }
@@ -437,9 +438,61 @@ impl TypeChecker {
                 self.check_expr(value);
             }
             Stmt::SetIndex { base, index, value } => {
-                let _ = self.check_expr(base);
-                let _ = self.check_expr(index);
-                self.check_expr(value);
+                let base_ty = self.check_expr(base);
+                let index_ty = self.check_expr(index);
+                let value_ty = self.check_expr(value);
+                match base_ty {
+                    SimpleType::Array(inner) => {
+                        if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
+                            self.push_error(
+                                format!("set index expects int, got {}", format_type(&index_ty)),
+                                expr_span(index),
+                            );
+                        }
+                        self.check_compatible(
+                            &inner,
+                            &value_ty,
+                            "set index type mismatch",
+                            expr_span(value),
+                        );
+                    }
+                    SimpleType::Tuple(_) => {
+                        if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
+                            self.push_error(
+                                format!("set index expects int, got {}", format_type(&index_ty)),
+                                expr_span(index),
+                            );
+                        }
+                    }
+                    SimpleType::Map(key, inner) => {
+                        if !self.types_compatible(&key, &index_ty) {
+                            self.push_error(
+                                format!(
+                                    "map index expects {}, got {}",
+                                    format_type(&key),
+                                    format_type(&index_ty)
+                                ),
+                                expr_span(index),
+                            );
+                        }
+                        self.check_compatible(
+                            &inner,
+                            &value_ty,
+                            "set map value type mismatch",
+                            expr_span(value),
+                        );
+                    }
+                    SimpleType::Unknown => {}
+                    _ => {
+                        self.push_error(
+                            format!(
+                                "set index expects array, tuple, or map, got {}",
+                                format_type(&base_ty)
+                            ),
+                            expr_span(base),
+                        );
+                    }
+                }
             }
             Stmt::While {
                 while_span,
@@ -701,16 +754,46 @@ impl TypeChecker {
             Expr::Index { base, index, .. } => {
                 let base_ty = self.check_expr(base);
                 let index_ty = self.check_expr(index);
-                if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
-                    self.push_error(
-                        format!("index expects int, got {}", format_type(&index_ty)),
-                        expr_span(index),
-                    );
-                }
                 match base_ty {
-                    SimpleType::Array(inner) => (*inner).clone(),
+                    SimpleType::Array(inner) => {
+                        if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
+                            self.push_error(
+                                format!("index expects int, got {}", format_type(&index_ty)),
+                                expr_span(index),
+                            );
+                        }
+                        (*inner).clone()
+                    }
+                    SimpleType::Tuple(_items) => {
+                        if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
+                            self.push_error(
+                                format!("index expects int, got {}", format_type(&index_ty)),
+                                expr_span(index),
+                            );
+                        }
+                        SimpleType::Unknown
+                    }
+                    SimpleType::Map(key, value) => {
+                        if !self.types_compatible(&key, &index_ty) {
+                            self.push_error(
+                                format!(
+                                    "map index expects {}, got {}",
+                                    format_type(&key),
+                                    format_type(&index_ty)
+                                ),
+                                expr_span(index),
+                            );
+                        }
+                        (*value).clone()
+                    }
                     SimpleType::Unknown => SimpleType::Unknown,
                     _ => {
+                        if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
+                            self.push_error(
+                                format!("index expects int, got {}", format_type(&index_ty)),
+                                expr_span(index),
+                            );
+                        }
                         self.push_error(
                             format!("index expects array, got {}", format_type(&base_ty)),
                             expr_span(base),
@@ -725,6 +808,53 @@ impl TypeChecker {
                     tys.push(self.check_expr(item));
                 }
                 SimpleType::Tuple(tys)
+            }
+            Expr::MapLiteral { entries, .. } => {
+                let mut key_ty = SimpleType::Unknown;
+                let mut value_ty = SimpleType::Unknown;
+                for (key, value) in entries {
+                    let found_key = self.check_expr(key);
+                    if matches!(key_ty, SimpleType::Unknown) {
+                        key_ty = found_key;
+                    } else if !matches!(found_key, SimpleType::Unknown)
+                        && !self.types_compatible(&key_ty, &found_key)
+                    {
+                        self.push_error(
+                            format!(
+                                "map key type mismatch: expected {}, got {}",
+                                format_type(&key_ty),
+                                format_type(&found_key)
+                            ),
+                            expr_span(key),
+                        );
+                    }
+
+                    let found_value = self.check_expr(value);
+                    if matches!(value_ty, SimpleType::Unknown) {
+                        value_ty = found_value;
+                    } else if !matches!(found_value, SimpleType::Unknown)
+                        && !self.types_compatible(&value_ty, &found_value)
+                    {
+                        self.push_error(
+                            format!(
+                                "map value type mismatch: expected {}, got {}",
+                                format_type(&value_ty),
+                                format_type(&found_value)
+                            ),
+                            expr_span(value),
+                        );
+                    }
+                }
+                SimpleType::Map(Box::new(key_ty), Box::new(value_ty))
+            }
+            Expr::As { expr, ty, .. } => {
+                let _ = self.check_expr(expr);
+                self.type_from_ref(ty)
+            }
+            Expr::Is { expr, ty, .. } => {
+                let _ = self.check_expr(expr);
+                self.validate_type_ref(ty);
+                SimpleType::Bool
             }
             Expr::Range { start, end, .. } => {
                 self.check_expr(start);
@@ -1051,6 +1181,10 @@ impl TypeChecker {
             (SimpleType::Result(ok_left, err_left), SimpleType::Result(ok_right, err_right)) => {
                 self.types_compatible(ok_left, ok_right)
                     && self.types_compatible(err_left, err_right)
+            }
+            (SimpleType::Map(left_key, left_val), SimpleType::Map(right_key, right_val)) => {
+                self.types_compatible(left_key, right_key)
+                    && self.types_compatible(left_val, right_val)
             }
             (SimpleType::Tuple(left), SimpleType::Tuple(right)) => {
                 left.len() == right.len()
@@ -2793,6 +2927,17 @@ impl TypeChecker {
                             .unwrap_or(SimpleType::Unknown);
                         SimpleType::Result(Box::new(ok), Box::new(err))
                     }
+                    "map" => {
+                        let key = args
+                            .get(0)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        let value = args
+                            .get(1)
+                            .map(|arg| self.type_from_ref(arg))
+                            .unwrap_or(SimpleType::Unknown);
+                        SimpleType::Map(Box::new(key), Box::new(value))
+                    }
                     other => {
                         let args = args.iter().map(|arg| self.type_from_ref(arg)).collect();
                         SimpleType::Custom(other.to_string(), args)
@@ -2837,6 +2982,14 @@ impl TypeChecker {
                     if args.len() != 2 {
                         self.push_error(
                             format!("type result expects 2 arguments, got {}", args.len()),
+                            Some(name.span),
+                        );
+                    }
+                }
+                "map" => {
+                    if args.len() != 2 {
+                        self.push_error(
+                            format!("type map expects 2 arguments, got {}", args.len()),
                             Some(name.span),
                         );
                     }
@@ -2914,6 +3067,9 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Closure { span, .. } => Some(*span),
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
+        Expr::MapLiteral { span, .. } => Some(*span),
+        Expr::As { span, .. } => Some(*span),
+        Expr::Is { span, .. } => Some(*span),
         Expr::Group { span, .. } => Some(*span),
         Expr::Float(_, span) => Some(*span),
     }
@@ -2940,6 +3096,9 @@ fn format_type(ty: &SimpleType) -> String {
         SimpleType::Tuple(items) => {
             let inner = items.iter().map(format_type).collect::<Vec<_>>().join(", ");
             format!("({inner})")
+        }
+        SimpleType::Map(key, value) => {
+            format!("map<{}, {}>", format_type(key), format_type(value))
         }
         SimpleType::Custom(name, args) => {
             if args.is_empty() {
@@ -3039,6 +3198,23 @@ fn f() {
             inferred.get("f").map(String::as_str),
             Some("result<int, string>")
         );
+    }
+
+    #[test]
+    fn allows_map_literal_index_and_casts() {
+        let source = r#"
+fn f() {
+    let grades = map { "taylor": 3, "casey": 5 };
+    let taylor = grades["taylor"];
+    let count = taylor as int;
+    if taylor is int {
+        return count;
+    }
+    return 0;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
     }
 
     #[test]

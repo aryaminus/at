@@ -279,6 +279,20 @@ for value in values {
 - `slice(array, start, end)` — Returns sub-array from start (inclusive) to end (exclusive)
 - `array[index]` — Access element at index
 
+## Maps
+
+```
+let scores = map { "taylor": 3, "casey": 5 };
+let taylor = scores["taylor"];
+set scores["taylor"] = 4;
+```
+
+### Map Operations
+
+- `map { key: value, ... }` — Map literal
+- `map[key]` — Lookup value by key (runtime error if missing)
+- `set map[key] = value` — Insert or update a key
+
 ## Structs and Enums
 
 ```
@@ -312,7 +326,7 @@ Imports load modules and bind them to an alias. All imported names must be acces
 Highest to lowest precedence:
 
 ```
-postfix:  call ( ... ), member (.), index ([ ]), try (?)
+postfix:  call ( ... ), member (.), index ([ ]), try (?), is, as
 unary:    - !
 factor:   * / %
 term:     + -           (string + string for concatenation)
@@ -374,6 +388,15 @@ is_ok(value)
 is_err(value)
 ```
 
+### Casts and Type Checks
+
+```
+let count = value as int;
+if value is string {
+    print(value);
+}
+```
+
 ### Capabilities
 ```
 time.now()                    // Returns int (requires time capability)
@@ -430,11 +453,12 @@ comparison   ::= term { ("<" | "<=" | ">" | ">=") term }
 term         ::= factor { ("+" | "-") factor }
 factor       ::= unary { ("*" | "/" | "%") unary }
 unary        ::= ("-" | "!") unary | postfix
-postfix      ::= primary { ("." ident) | call | index | "?" }
+postfix      ::= primary { ("." ident) | call | index | "?" | "is" type | "as" type }
 call         ::= "(" [expr { "," expr }] ")"
 index        ::= "[" expr "]"
-primary      ::= int | float | string | "true" | "false" | ident | array | block | tuple | range | if | match | closure | struct_lit | enum_lit | "(" expr ")"
+primary      ::= int | float | string | "true" | "false" | ident | array | map_lit | block | tuple | range | if | match | closure | struct_lit | enum_lit | "(" expr ")"
 array        ::= "[" [expr { "," expr }] "]"
+map_lit      ::= "map" "{" [expr ":" expr { "," expr ":" expr }] "}"
 tuple        ::= "(" expr "," expr { "," expr } ")"
 range        ::= expr ".." expr
 closure      ::= "|" [ident { "," ident }] "|" expr

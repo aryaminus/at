@@ -622,6 +622,15 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(item, used);
             }
         }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                collect_used_capabilities_expr(key, used);
+                collect_used_capabilities_expr(value, used);
+            }
+        }
+        Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
+        }
         Expr::Range { start, end, .. } => {
             collect_used_capabilities_expr(start, used);
             collect_used_capabilities_expr(end, used);
@@ -781,6 +790,15 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
             for item in items {
                 lint_unused_match_bindings_expr(item, config, errors);
             }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                lint_unused_match_bindings_expr(key, config, errors);
+                lint_unused_match_bindings_expr(value, config, errors);
+            }
+        }
+        Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+            lint_unused_match_bindings_expr(expr, config, errors);
         }
         Expr::Range { start, end, .. } => {
             lint_unused_match_bindings_expr(start, config, errors);
@@ -1080,6 +1098,15 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(item, used);
             }
         }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                collect_local_uses_expr(key, used);
+                collect_local_uses_expr(value, used);
+            }
+        }
+        Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+            collect_local_uses_expr(expr, used);
+        }
         Expr::Range { start, end, .. } => {
             collect_local_uses_expr(start, used);
             collect_local_uses_expr(end, used);
@@ -1239,6 +1266,15 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(item, used);
             }
         }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                collect_alias_usage_expr(key, used);
+                collect_alias_usage_expr(value, used);
+            }
+        }
+        Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
+        }
         Expr::Range { start, end, .. } => {
             collect_alias_usage_expr(start, used);
             collect_alias_usage_expr(end, used);
@@ -1393,6 +1429,15 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
             for item in items {
                 collect_called_functions_expr(item, used);
             }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                collect_called_functions_expr(key, used);
+                collect_called_functions_expr(value, used);
+            }
+        }
+        Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+            collect_called_functions_expr(expr, used);
         }
         Expr::Range { start, end, .. } => {
             collect_called_functions_expr(start, used);

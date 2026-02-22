@@ -14,6 +14,7 @@ pub enum Value {
     Bool(bool),
     Array(Rc<Vec<Value>>),
     Tuple(Rc<Vec<Value>>),
+    Map(Rc<Vec<(Value, Value)>>),
     Struct(Rc<BTreeMap<String, Value>>),
     Enum {
         name: String,
@@ -48,6 +49,14 @@ pub fn format_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Value::Map(entries) => {
+            let items = entries
+                .iter()
+                .map(|(key, value)| format!("{}: {}", format_value(key), format_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("map {{{items}}}")
+        }
         Value::Struct(fields) => {
             let mut items = Vec::new();
             for (key, value) in fields.iter() {
@@ -111,6 +120,9 @@ pub enum Op {
     Closure(usize, usize),
     CallValue(usize),
     Range(bool),
+    Map(usize),
+    IsType(TypeCheck),
+    Cast(TypeCheck),
     Eq,
     Neq,
     Lt,
@@ -164,6 +176,22 @@ pub enum Builtin {
     Append,
     Contains,
     Slice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeCheck {
+    Int,
+    Float,
+    String,
+    Bool,
+    Unit,
+    Array,
+    Tuple,
+    Map,
+    Struct,
+    Option,
+    Result,
+    Enum(String),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -260,6 +288,8 @@ pub struct Compiler {
     functions: HashMap<String, usize>,
     function_arity: HashMap<String, usize>,
     function_needs: HashMap<String, Vec<String>>,
+    structs: HashSet<String>,
+    enums: HashSet<String>,
     current_function: Option<String>,
     loop_stack: Vec<LoopContext>,
     synthetic_id: usize,
@@ -433,6 +463,8 @@ impl Compiler {
             functions: HashMap::new(),
             function_arity: HashMap::new(),
             function_needs: HashMap::new(),
+            structs: HashSet::new(),
+            enums: HashSet::new(),
             current_function: None,
             loop_stack: Vec::new(),
             synthetic_id: 0,
@@ -447,9 +479,23 @@ impl Compiler {
         self.functions.clear();
         self.function_arity.clear();
         self.function_needs.clear();
+        self.structs.clear();
+        self.enums.clear();
         self.current_function = None;
         self.closure_chunks.clear();
         self.base_function_count = module.functions.len();
+
+        for stmt in &module.stmts {
+            match stmt {
+                Stmt::Struct { name, .. } => {
+                    self.structs.insert(name.name.clone());
+                }
+                Stmt::Enum { name, .. } => {
+                    self.enums.insert(name.name.clone());
+                }
+                _ => {}
+            }
+        }
 
         for func in &module.functions {
             let id = program.functions.len();
@@ -911,6 +957,23 @@ impl Compiler {
                     self.compile_expr(item, chunk)?;
                 }
                 chunk.push(Op::Tuple(items.len()), expr_span(expr));
+            }
+            Expr::MapLiteral { entries, .. } => {
+                for (key, value) in entries {
+                    self.compile_expr(key, chunk)?;
+                    self.compile_expr(value, chunk)?;
+                }
+                chunk.push(Op::Map(entries.len()), expr_span(expr));
+            }
+            Expr::As { expr, ty, .. } => {
+                self.compile_expr(expr, chunk)?;
+                let check = self.type_check_from_ref(ty)?;
+                chunk.push(Op::Cast(check), expr_span(expr));
+            }
+            Expr::Is { expr, ty, .. } => {
+                self.compile_expr(expr, chunk)?;
+                let check = self.type_check_from_ref(ty)?;
+                chunk.push(Op::IsType(check), expr_span(expr));
             }
             Expr::Range {
                 start,
@@ -1868,6 +1931,15 @@ impl Compiler {
                     self.collect_free_vars_expr(item, bound, captures, seen);
                 }
             }
+            Expr::MapLiteral { entries, .. } => {
+                for (key, value) in entries {
+                    self.collect_free_vars_expr(key, bound, captures, seen);
+                    self.collect_free_vars_expr(value, bound, captures, seen);
+                }
+            }
+            Expr::As { expr, .. } | Expr::Is { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
             Expr::Index { base, index, .. } => {
                 self.collect_free_vars_expr(base, bound, captures, seen);
                 self.collect_free_vars_expr(index, bound, captures, seen);
@@ -2063,6 +2135,40 @@ impl Compiler {
             }
         }
         None
+    }
+
+    fn type_check_from_ref(&self, ty: &at_syntax::TypeRef) -> Result<TypeCheck, VmError> {
+        match ty {
+            at_syntax::TypeRef::Named { name, .. } => match name.name.as_str() {
+                "int" => Ok(TypeCheck::Int),
+                "float" => Ok(TypeCheck::Float),
+                "string" => Ok(TypeCheck::String),
+                "bool" => Ok(TypeCheck::Bool),
+                "unit" => Ok(TypeCheck::Unit),
+                "array" => Ok(TypeCheck::Array),
+                "map" => Ok(TypeCheck::Map),
+                "tuple" => Ok(TypeCheck::Tuple),
+                "option" => Ok(TypeCheck::Option),
+                "result" => Ok(TypeCheck::Result),
+                other => {
+                    if self.enums.contains(other) {
+                        Ok(TypeCheck::Enum(other.to_string()))
+                    } else if self.structs.contains(other) {
+                        Ok(TypeCheck::Struct)
+                    } else {
+                        Err(compile_error(
+                            format!("unknown type: {other}"),
+                            Some(name.span),
+                        ))
+                    }
+                }
+            },
+            at_syntax::TypeRef::Tuple { .. } => Ok(TypeCheck::Tuple),
+            at_syntax::TypeRef::Function { .. } => Err(compile_error(
+                "cannot cast or check function type".to_string(),
+                None,
+            )),
+        }
     }
 }
 
@@ -3062,6 +3168,32 @@ impl Vm {
                     }
                     self.stack.push(Value::Array(Rc::new(items)));
                 }
+                Op::Map(count) => {
+                    if self.stack.len() < *count * 2 {
+                        return Err(runtime_error_at(
+                            "stack underflow".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    let mut entries = Vec::with_capacity(*count);
+                    for _ in 0..*count {
+                        let value = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                        let key = self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?;
+                        entries.push((key, value));
+                    }
+                    entries.reverse();
+                    self.stack.push(Value::Map(Rc::new(entries)));
+                }
                 Op::Index => {
                     let index_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -3069,38 +3201,56 @@ impl Vm {
                     let base_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
                     })?;
-                    let index = match index_value {
-                        Value::Int(value) => value,
+                    match base_value {
+                        Value::Array(items) | Value::Tuple(items) => {
+                            let index = match index_value {
+                                Value::Int(value) => value,
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "index expects int".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if index < 0 {
+                                return Err(runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let idx = index as usize;
+                            let value = items.get(idx).cloned().ok_or_else(|| {
+                                runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            self.stack.push(value);
+                        }
+                        Value::Map(entries) => {
+                            let mut found = None;
+                            for (key, value) in entries.iter() {
+                                if *key == index_value {
+                                    found = Some(value.clone());
+                                    break;
+                                }
+                            }
+                            if let Some(value) = found {
+                                self.stack.push(value);
+                            } else {
+                                return Err(runtime_error_at(
+                                    "map key not found".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                        }
                         _ => {
                             return Err(runtime_error_at(
-                                "index expects int".to_string(),
+                                "index expects array, tuple, or map".to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
-                    };
-                    if index < 0 {
-                        return Err(runtime_error_at(
-                            "index out of bounds".to_string(),
-                            span_at(chunk, frame_ip),
-                        ));
                     }
-                    let (items, idx) = match base_value {
-                        Value::Array(items) => (items, index as usize),
-                        Value::Tuple(items) => (items, index as usize),
-                        _ => {
-                            return Err(runtime_error_at(
-                                "index expects array or tuple".to_string(),
-                                span_at(chunk, frame_ip),
-                            ))
-                        }
-                    };
-                    let value = items.get(idx).cloned().ok_or_else(|| {
-                        runtime_error_at(
-                            "index out of bounds".to_string(),
-                            span_at(chunk, frame_ip),
-                        )
-                    })?;
-                    self.stack.push(value);
                 }
                 Op::StoreIndex => {
                     let value = self.stack.pop().ok_or_else(|| {
@@ -3112,23 +3262,23 @@ impl Vm {
                     let base_value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
                     })?;
-                    let index = match index_value {
-                        Value::Int(value) => value,
-                        _ => {
-                            return Err(runtime_error_at(
-                                "set index expects int".to_string(),
-                                span_at(chunk, frame_ip),
-                            ))
-                        }
-                    };
-                    if index < 0 {
-                        return Err(runtime_error_at(
-                            "index out of bounds".to_string(),
-                            span_at(chunk, frame_ip),
-                        ));
-                    }
                     match base_value {
                         Value::Array(items) => {
+                            let index = match index_value {
+                                Value::Int(value) => value,
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "set index expects int".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if index < 0 {
+                                return Err(runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                             let idx = index as usize;
                             if idx >= items.len() {
                                 return Err(runtime_error_at(
@@ -3141,6 +3291,21 @@ impl Vm {
                             self.stack.push(Value::Array(Rc::new(new_items)));
                         }
                         Value::Tuple(items) => {
+                            let index = match index_value {
+                                Value::Int(value) => value,
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "set index expects int".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if index < 0 {
+                                return Err(runtime_error_at(
+                                    "index out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
                             let idx = index as usize;
                             if idx >= items.len() {
                                 return Err(runtime_error_at(
@@ -3152,9 +3317,24 @@ impl Vm {
                             new_items[idx] = value;
                             self.stack.push(Value::Tuple(Rc::new(new_items)));
                         }
+                        Value::Map(entries) => {
+                            let mut new_entries = (*entries).clone();
+                            let mut updated = false;
+                            for (key, existing) in new_entries.iter_mut() {
+                                if *key == index_value {
+                                    *existing = value.clone();
+                                    updated = true;
+                                    break;
+                                }
+                            }
+                            if !updated {
+                                new_entries.push((index_value, value));
+                            }
+                            self.stack.push(Value::Map(Rc::new(new_entries)));
+                        }
                         _ => {
                             return Err(runtime_error_at(
-                                "set index expects array or tuple".to_string(),
+                                "set index expects array, tuple, or map".to_string(),
                                 span_at(chunk, frame_ip),
                             ))
                         }
@@ -3656,6 +3836,27 @@ impl Vm {
                         program,
                     ));
                 }
+                Op::IsType(check) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let result = value_matches_check(&value, check);
+                    self.stack.push(Value::Bool(result));
+                }
+                Op::Cast(check) => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    if value_matches_check(&value, check) {
+                        self.stack.push(value);
+                    } else {
+                        return Err(self.runtime_error(
+                            format!("cast failed: expected {}", check.describe()),
+                            self.current_span(program),
+                            program,
+                        ));
+                    }
+                }
                 Op::JumpIfFalse(target) => {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -3808,6 +4009,46 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::Closure { span, .. } => Some(*span),
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
+        Expr::MapLiteral { span, .. } => Some(*span),
+        Expr::As { span, .. } => Some(*span),
+        Expr::Is { span, .. } => Some(*span),
+    }
+}
+
+fn value_matches_check(value: &Value, check: &TypeCheck) -> bool {
+    match (value, check) {
+        (Value::Int(_), TypeCheck::Int) => true,
+        (Value::Float(_), TypeCheck::Float) => true,
+        (Value::String(_), TypeCheck::String) => true,
+        (Value::Bool(_), TypeCheck::Bool) => true,
+        (Value::Unit, TypeCheck::Unit) => true,
+        (Value::Array(_), TypeCheck::Array) => true,
+        (Value::Tuple(_), TypeCheck::Tuple) => true,
+        (Value::Map(_), TypeCheck::Map) => true,
+        (Value::Struct(_), TypeCheck::Struct) => true,
+        (Value::Option(_), TypeCheck::Option) => true,
+        (Value::Result(_), TypeCheck::Result) => true,
+        (Value::Enum { name, .. }, TypeCheck::Enum(expected)) => name == expected,
+        _ => false,
+    }
+}
+
+impl TypeCheck {
+    fn describe(&self) -> String {
+        match self {
+            TypeCheck::Int => "int".to_string(),
+            TypeCheck::Float => "float".to_string(),
+            TypeCheck::String => "string".to_string(),
+            TypeCheck::Bool => "bool".to_string(),
+            TypeCheck::Unit => "unit".to_string(),
+            TypeCheck::Array => "array".to_string(),
+            TypeCheck::Tuple => "tuple".to_string(),
+            TypeCheck::Map => "map".to_string(),
+            TypeCheck::Struct => "struct".to_string(),
+            TypeCheck::Option => "option".to_string(),
+            TypeCheck::Result => "result".to_string(),
+            TypeCheck::Enum(name) => format!("{name}"),
+        }
     }
 }
 

@@ -12,6 +12,7 @@ pub enum TokenKind {
     Tool,
     Import,
     As,
+    Is,
     Match,
     While,
     For,
@@ -1083,6 +1084,28 @@ impl<'a> Parser<'a> {
                 expr = Expr::Try(Box::new(expr));
                 continue;
             }
+            if self.current.kind == TokenKind::Is {
+                let span = self.current.span;
+                self.advance();
+                let ty = self.parse_type_ref()?;
+                expr = Expr::Is {
+                    expr: Box::new(expr),
+                    ty,
+                    span,
+                };
+                continue;
+            }
+            if self.current.kind == TokenKind::As {
+                let span = self.current.span;
+                self.advance();
+                let ty = self.parse_type_ref()?;
+                expr = Expr::As {
+                    expr: Box::new(expr),
+                    ty,
+                    span,
+                };
+                continue;
+            }
             break;
         }
         Ok(expr)
@@ -1138,6 +1161,9 @@ impl<'a> Parser<'a> {
                     span: self.current.span,
                 };
                 self.advance();
+                if ident.name == "map" && self.current.kind == TokenKind::LBrace {
+                    return self.parse_map_literal(ident.span);
+                }
                 if self.current.kind == TokenKind::ColonColon {
                     return self.parse_enum_literal(ident);
                 }
@@ -1208,6 +1234,36 @@ impl<'a> Parser<'a> {
                 span: self.current.span,
             }),
         }
+    }
+
+    fn parse_map_literal(&mut self, start_span: Span) -> Result<Expr, ParseError> {
+        let span_start = start_span.start;
+        self.expect(TokenKind::LBrace)?;
+        let mut entries = Vec::new();
+        if self.current.kind != TokenKind::RBrace {
+            loop {
+                let key = self.parse_expr()?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expr()?;
+                entries.push((key, value));
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+                if self.current.kind == TokenKind::RBrace {
+                    break;
+                }
+            }
+        }
+        let end_span = self.current.span;
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::MapLiteral {
+            span: Span {
+                start: span_start,
+                end: end_span.end,
+            },
+            entries,
+        })
     }
 
     fn parse_interpolated_string(&mut self, value: String, span: Span) -> Result<Expr, ParseError> {
@@ -2498,6 +2554,7 @@ impl<'a> Lexer<'a> {
             "tool" => TokenKind::Tool,
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
+            "is" => TokenKind::Is,
             "match" => TokenKind::Match,
             "while" => TokenKind::While,
             "for" => TokenKind::For,
@@ -2902,6 +2959,21 @@ fn sum(arr: array<int>) -> int {
         set total = total + item;
     }
     return total;
+}
+"#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_map_literal_and_casts() {
+        let source = r#"
+fn f() {
+    let grades = map { "taylor": 3, "casey": 5 };
+    let taylor = grades["taylor"];
+    let count = taylor as int;
+    if taylor is int {
+        print(count);
+    }
 }
 "#;
         assert!(parse_module(source).is_ok());

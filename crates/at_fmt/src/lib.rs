@@ -167,6 +167,9 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::Closure { span, .. } => Some(span.start),
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
+        Expr::MapLiteral { span, .. } => Some(span.start),
+        Expr::As { span, .. } => Some(span.start),
+        Expr::Is { span, .. } => Some(span.start),
         Expr::Group { span, .. } => Some(span.start),
     }
 }
@@ -209,6 +212,9 @@ fn expr_end(expr: &Expr) -> Option<usize> {
         Expr::Closure { span, .. } => Some(span.end),
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
+        Expr::MapLiteral { span, .. } => Some(span.end),
+        Expr::As { span, .. } => Some(span.end),
+        Expr::Is { span, .. } => Some(span.end),
         Expr::Group { span, .. } => Some(span.end),
     }
 }
@@ -726,6 +732,34 @@ fn format_expr_prec_indent(
             if let Some(string_end) = expr_end(expr) {
                 comment_state.emit_inline_between(out, string_end, string_end + 1);
             }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            out.push_str("map {");
+            if !entries.is_empty() {
+                out.push(' ');
+            }
+            for (idx, (key, value)) in entries.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                format_expr_prec_indent(key, out, 0, indent, comment_state);
+                out.push_str(": ");
+                format_expr_prec_indent(value, out, 0, indent, comment_state);
+            }
+            if !entries.is_empty() {
+                out.push(' ');
+            }
+            out.push('}');
+        }
+        Expr::As { expr, ty, .. } => {
+            format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);
+            out.push_str(" as ");
+            format_type_ref(ty, out);
+        }
+        Expr::Is { expr, ty, .. } => {
+            format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);
+            out.push_str(" is ");
+            format_type_ref(ty, out);
         }
         Expr::StructLiteral { name, fields, .. } => {
             out.push_str(&name.name);

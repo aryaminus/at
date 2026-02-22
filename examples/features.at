@@ -198,6 +198,24 @@ fn array_ops() -> int {
     return first;
 }
 
+// Map literals and casts
+fn map_literals_and_casts() {
+    let grades = map { "taylor": 3, "casey": 5 };
+    let taylor = grades["taylor"];
+    print("Taylor grade: ");
+    print(taylor);
+    set grades["taylor"] = 4;
+
+    let value = 42;
+    let count = value as int;
+    print("Count: ");
+    print(count);
+
+    if value is int {
+        print("value is int");
+    }
+}
+
 // Pattern matching with result
 fn safe_divide(a: int, b: int) -> result<int, string> {
     return if b == 0 {
@@ -369,6 +387,9 @@ fn main() {
     
     print("\n=== Array Operations ===");
     array_ops();
+
+    print("\n=== Map Literals and Casts ===");
+    map_literals_and_casts();
     
     print("\n=== Result Matching ===");
     print(match_result(10, 2));
