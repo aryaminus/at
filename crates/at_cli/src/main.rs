@@ -503,7 +503,14 @@ fn main() {
             print_lint_bucket("info", infos, &source, Some(path));
             std::process::exit(1);
         }
-        if let Err(errors) = at_check::typecheck_module(&module) {
+        let loaded = match load_module(path) {
+            Ok(module) => module,
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(errors) = at_check::typecheck_module(&loaded.module) {
             for error in errors {
                 eprintln!(
                     "{}",
@@ -512,13 +519,7 @@ fn main() {
             }
             std::process::exit(1);
         }
-        let module = match load_module(path) {
-            Ok(module) => module.module,
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-        };
+        let module = loaded.module;
         let mut compiler = Compiler::new();
         if let Err(err) = compiler.compile_module(&module) {
             eprintln!("{}", format_compile_error(&err, Some(&source), Some(path)));
