@@ -2606,6 +2606,7 @@ fn value_to_json(value: Value) -> JsonValue {
         }
         Value::Closure(_) => JsonValue::String("<closure>".to_string()),
         Value::Future(_) => JsonValue::String("<future>".to_string()),
+        Value::Generator(_) => JsonValue::String("<generator>".to_string()),
         Value::Option(Some(inner)) => value_to_json((*inner).clone()),
         Value::Option(None) => JsonValue::Null,
         Value::Result(Ok(inner)) => json!({

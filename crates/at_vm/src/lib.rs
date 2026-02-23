@@ -26,6 +26,7 @@ pub enum Value {
     Result(Result<Rc<Value>, Rc<Value>>),
     Closure(Rc<ClosureValue>),
     Future(Rc<FutureValue>),
+    Generator(Rc<RefCell<GeneratorValue>>),
     Unit,
 }
 
@@ -43,6 +44,17 @@ pub struct FutureValue {
     capabilities: HashSet<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratorValue {
+    func_id: usize,
+    captures: Vec<Value>,
+    args: Vec<Value>,
+    capabilities: HashSet<String>,
+    frames: Vec<Frame>,
+    stack: Vec<Value>,
+    done: bool,
+}
+
 pub fn format_value(value: &Value) -> String {
     match value {
         Value::Int(value) => value.to_string(),
@@ -52,6 +64,7 @@ pub fn format_value(value: &Value) -> String {
         Value::Unit => "unit".to_string(),
         Value::Closure(_) => "<closure>".to_string(),
         Value::Future(_) => "<future>".to_string(),
+        Value::Generator(_) => "<generator>".to_string(),
         Value::Array(items) => format!(
             "[{}]",
             items
@@ -111,6 +124,7 @@ pub enum Op {
     PopCapabilityScope,
     Call(usize, usize),
     CallAsync(usize, usize),
+    CallGenerator(usize, usize),
     Builtin(Builtin),
     Assert,
     Try,
@@ -137,6 +151,7 @@ pub enum Op {
     Closure(usize, usize),
     CallValue(usize),
     Await,
+    Yield,
     Range(bool),
     Map(usize),
     MapSpread(usize),
@@ -198,6 +213,7 @@ pub enum Builtin {
     Append,
     Contains,
     Slice,
+    Next,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +267,8 @@ pub struct FunctionChunk {
     pub locals: usize,
     pub needs: Vec<String>,
     pub is_async: bool,
+    pub is_generator: bool,
+    pub stmts: Vec<Stmt>,
     pub chunk: Chunk,
 }
 
@@ -323,6 +341,7 @@ pub struct Compiler {
     function_arity: HashMap<String, usize>,
     function_needs: HashMap<String, Vec<String>>,
     function_async: HashMap<String, bool>,
+    function_generator: HashMap<String, bool>,
     structs: HashSet<String>,
     enums: HashSet<String>,
     current_function: Option<String>,
@@ -501,6 +520,7 @@ impl Compiler {
             function_arity: HashMap::new(),
             function_needs: HashMap::new(),
             function_async: HashMap::new(),
+            function_generator: HashMap::new(),
             structs: HashSet::new(),
             enums: HashSet::new(),
             current_function: None,
@@ -518,6 +538,7 @@ impl Compiler {
         self.function_arity.clear();
         self.function_needs.clear();
         self.function_async.clear();
+        self.function_generator.clear();
         self.structs.clear();
         self.enums.clear();
         self.const_scopes.clear();
@@ -550,9 +571,19 @@ impl Compiler {
                 .insert(func.name.name.clone(), func.params.len());
             self.function_async
                 .insert(func.name.name.clone(), func.is_async);
+            let is_generator = func
+                .body
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Yield { .. }));
+            self.function_generator
+                .insert(func.name.name.clone(), is_generator);
             let needs: Vec<String> = func.needs.iter().map(|ident| ident.name.clone()).collect();
             self.function_needs
                 .insert(func.name.name.clone(), needs.clone());
+            let is_generator = func
+                .body
+                .iter()
+                .any(|stmt| matches!(stmt, Stmt::Yield { .. }));
             program.functions.push(FunctionChunk {
                 name: func.name.name.clone(),
                 params: func.params.len(),
@@ -560,6 +591,8 @@ impl Compiler {
                 locals: 0,
                 needs,
                 is_async: func.is_async,
+                is_generator,
+                stmts: func.body.clone(),
                 chunk: Chunk::default(),
             });
         }
@@ -672,6 +705,10 @@ impl Compiler {
         }
     }
 
+    fn function_is_generator(&self, name: &str) -> bool {
+        self.function_generator.get(name).copied().unwrap_or(false)
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt, chunk: &mut Chunk) -> Result<(), VmError> {
         match stmt {
             Stmt::Import { .. } => {}
@@ -712,10 +749,7 @@ impl Compiler {
             }
             Stmt::Yield { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
-                return Err(compile_error(
-                    "yield is not supported yet".to_string(),
-                    expr_span(expr),
-                ));
+                chunk.push(Op::Yield, expr_span(expr));
             }
             Stmt::Set { name, value, .. } => {
                 if self.is_const(&name.name) {
@@ -1388,6 +1422,17 @@ impl Compiler {
                         chunk.push(Op::Builtin(Builtin::Print), Some(ident.span));
                         return Ok(());
                     }
+                    if ident.name == "next" {
+                        if args.len() != 1 {
+                            return Err(compile_error(
+                                "wrong arity for next".to_string(),
+                                Some(ident.span),
+                            ));
+                        }
+                        self.compile_expr(&args[0], chunk)?;
+                        chunk.push(Op::Builtin(Builtin::Next), Some(ident.span));
+                        return Ok(());
+                    }
                     if ident.name == "len" {
                         if args.len() != 1 {
                             return Err(compile_error(
@@ -1552,6 +1597,8 @@ impl Compiler {
                         .unwrap_or(false)
                     {
                         Op::CallAsync(func_id, args.len())
+                    } else if self.function_is_generator(&ident.name) {
+                        Op::CallGenerator(func_id, args.len())
                     } else {
                         Op::Call(func_id, args.len())
                     };
@@ -2219,6 +2266,8 @@ impl Compiler {
             locals,
             needs: Vec::new(),
             is_async: false,
+            is_generator: false,
+            stmts: Vec::new(),
             chunk: closure_chunk,
         });
 
@@ -2686,6 +2735,7 @@ impl Compiler {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Frame {
     chunk_id: usize,
     ip: usize,
@@ -2704,6 +2754,12 @@ pub struct Vm {
     max_instructions: Option<usize>,
     max_frames: Option<usize>,
     output_buffer: Option<Rc<RefCell<Vec<String>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionMode {
+    RunToCompletion,
+    RunUntilYield,
 }
 
 impl Vm {
@@ -2756,12 +2812,75 @@ impl Vm {
             capability_scopes: Vec::new(),
         });
         let result = self
-            .run_with_existing_frames(program)?
+            .run_with_existing_frames(program, ExecutionMode::RunToCompletion)?
             .unwrap_or(Value::Unit);
 
         self.stack = saved_stack;
         self.frames = saved_frames;
         self.instruction_count = saved_instruction_count;
+        Ok(result)
+    }
+
+    fn run_generator(
+        &mut self,
+        program: &Program,
+        generator: &mut GeneratorValue,
+    ) -> Result<Option<Value>, VmError> {
+        let func = program.functions.get(generator.func_id).ok_or_else(|| {
+            self.runtime_error(
+                format!("invalid function id: {}", generator.func_id),
+                None,
+                program,
+            )
+        })?;
+        if func.is_async {
+            return Err(self.runtime_error(
+                "generator function cannot be async".to_string(),
+                None,
+                program,
+            ));
+        }
+        if generator.done {
+            return Ok(None);
+        }
+        if let Some(max) = self.max_frames {
+            if self.frames.len().saturating_add(generator.frames.len()) >= max {
+                return Err(self.runtime_error(
+                    format!("stack overflow: maximum call depth {} exceeded", max),
+                    None,
+                    program,
+                ));
+            }
+        }
+        let saved_stack = std::mem::take(&mut self.stack);
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_instruction_count = self.instruction_count;
+
+        self.stack = std::mem::take(&mut generator.stack);
+        self.frames = std::mem::take(&mut generator.frames);
+        for frame in &mut self.frames {
+            frame.capabilities = generator.capabilities.clone();
+        }
+        let result = self.run_with_existing_frames(program, ExecutionMode::RunUntilYield)?;
+        generator.stack = std::mem::take(&mut self.stack);
+        generator.frames = std::mem::take(&mut self.frames);
+        for frame in &mut generator.frames {
+            frame.capabilities = generator.capabilities.clone();
+        }
+
+        self.stack = saved_stack;
+        self.frames = saved_frames;
+        self.instruction_count = saved_instruction_count;
+
+        if generator.frames.is_empty() {
+            generator.done = true;
+            return Ok(None);
+        }
+
+        if result.is_none() {
+            generator.done = true;
+        }
+
         Ok(result)
     }
     fn runtime_error(&self, message: String, span: Option<Span>, program: &Program) -> VmError {
@@ -2885,10 +3004,14 @@ impl Vm {
             defers: Vec::new(),
             capability_scopes: Vec::new(),
         });
-        self.run_with_existing_frames(program)
+        self.run_with_existing_frames(program, ExecutionMode::RunToCompletion)
     }
 
-    fn run_with_existing_frames(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
+    fn run_with_existing_frames(
+        &mut self,
+        program: &Program,
+        mode: ExecutionMode,
+    ) -> Result<Option<Value>, VmError> {
         loop {
             // Check execution limit
             if let Some(max) = self.max_instructions {
@@ -2942,7 +3065,8 @@ impl Vm {
                             defers: Vec::new(),
                             capability_scopes: Vec::new(),
                         });
-                        let _ = self.run_with_existing_frames(program)?;
+                        let _ =
+                            self.run_with_existing_frames(program, ExecutionMode::RunToCompletion)?;
                     }
                 }
                 return Ok(result);
@@ -3194,6 +3318,72 @@ impl Vm {
                         capabilities: self.frames[frame_index].capabilities.clone(),
                     };
                     self.stack.push(Value::Future(Rc::new(future)));
+                }
+                Op::CallGenerator(func_id, arg_count) => {
+                    let mut args = Vec::with_capacity(*arg_count);
+                    let mut index = *arg_count;
+                    while index > 0 {
+                        index -= 1;
+                        args.push(self.stack.pop().ok_or_else(|| {
+                            runtime_error_at(
+                                "stack underflow".to_string(),
+                                span_at(chunk, frame_ip),
+                            )
+                        })?);
+                    }
+                    args.reverse();
+                    let func = program.functions.get(*func_id).ok_or_else(|| {
+                        runtime_error_at(
+                            format!("invalid function id: {func_id}"),
+                            span_at(chunk, frame_ip),
+                        )
+                    })?;
+                    if func.is_async {
+                        return Err(runtime_error_at(
+                            "generator function cannot be async".to_string(),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    if *arg_count != func.params {
+                        return Err(runtime_error_at(
+                            format!(
+                                "wrong arity: expected {} args, got {}",
+                                func.params, arg_count
+                            ),
+                            span_at(chunk, frame_ip),
+                        ));
+                    }
+                    for need in &func.needs {
+                        if !self.frames[frame_index].capabilities.contains(need) {
+                            return Err(runtime_error_at(
+                                format!("missing capability: {}", need),
+                                span_at(chunk, frame_ip),
+                            ));
+                        }
+                    }
+                    let required_locals = func.params + func.captures;
+                    let mut locals = self.take_locals(func.locals.max(required_locals));
+                    for (idx, value) in args.iter().cloned().enumerate() {
+                        locals[func.captures + idx] = value;
+                    }
+                    let generator = GeneratorValue {
+                        func_id: *func_id,
+                        captures: Vec::new(),
+                        args,
+                        capabilities: self.frames[frame_index].capabilities.clone(),
+                        frames: vec![Frame {
+                            chunk_id: *func_id,
+                            ip: 0,
+                            locals,
+                            capabilities: self.frames[frame_index].capabilities.clone(),
+                            defers: Vec::new(),
+                            capability_scopes: Vec::new(),
+                        }],
+                        stack: Vec::new(),
+                        done: false,
+                    };
+                    self.stack
+                        .push(Value::Generator(Rc::new(RefCell::new(generator))));
                 }
                 Op::Builtin(builtin) => {
                     let result = match builtin {
@@ -3510,6 +3700,29 @@ impl Vm {
                                 }
                             }
                         }
+                        Builtin::Next => {
+                            let gen = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let generator = match gen {
+                                Value::Generator(gen) => gen,
+                                _ => {
+                                    return Err(self.runtime_error(
+                                        "next expects generator".to_string(),
+                                        self.current_span(program),
+                                        program,
+                                    ))
+                                }
+                            };
+                            let mut generator = generator.borrow_mut();
+                            match self.run_generator(program, &mut generator)? {
+                                Some(value) => Value::Option(Some(Rc::new(value))),
+                                None => Value::Option(None),
+                            }
+                        }
                     };
                     self.stack.push(result);
                 }
@@ -3628,6 +3841,16 @@ impl Vm {
                             ))
                         }
                     }
+                }
+                Op::Yield => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    if mode == ExecutionMode::RunUntilYield {
+                        self.frames[frame_index].ip = frame_ip + 1;
+                        return Ok(Some(value));
+                    }
+                    self.stack.push(value);
                 }
                 Op::Add => {
                     let right = self.stack.pop().ok_or_else(|| {
@@ -5151,6 +5374,49 @@ fn sum(values: array<int>) -> int {
 }
 
 sum([1, 2, 3, 4]);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn generator_yields_values() {
+        let source = r#"
+fn gen() {
+    yield 1;
+    yield 2;
+}
+
+let g = gen();
+assert_eq(next(g), some(1));
+assert_eq(next(g), some(2));
+assert_eq(next(g), none());
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn generator_evaluates_yield_expression() {
+        let source = r#"
+fn gen() {
+    let value = 1 + 2;
+    yield value;
+}
+
+let g = gen();
+assert_eq(next(g), some(3));
+assert_eq(next(g), none());
 "#;
         let module = parse_module(source).expect("parse module");
         let program = Compiler::new()

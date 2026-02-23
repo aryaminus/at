@@ -17,6 +17,7 @@ enum SimpleType {
     Function(Vec<SimpleType>, Box<SimpleType>),
     Tuple(Vec<SimpleType>),
     Map(Box<SimpleType>, Box<SimpleType>),
+    Generator(Box<SimpleType>),
     Union(Vec<SimpleType>),
     Intersection(Vec<SimpleType>),
     Custom(String, Vec<SimpleType>),
@@ -110,6 +111,7 @@ struct TypeChecker {
     return_option_inner: Option<SimpleType>,
     return_result_ok: Option<SimpleType>,
     return_result_err: Option<SimpleType>,
+    return_generator_inner: Option<SimpleType>,
     inferred_returns: HashMap<String, String>,
     errors: Vec<TypeError>,
     last_option_inner: Option<SimpleType>,
@@ -138,6 +140,7 @@ impl TypeChecker {
             return_option_inner: None,
             return_result_ok: None,
             return_result_err: None,
+            return_generator_inner: None,
             inferred_returns: HashMap::new(),
             errors: Vec::new(),
             last_option_inner: None,
@@ -243,10 +246,18 @@ impl TypeChecker {
         self.return_option_inner = None;
         self.return_result_ok = None;
         self.return_result_err = None;
+        self.return_generator_inner = None;
         for stmt in &func.body {
             self.check_stmt(stmt);
         }
         self.current_is_async = false;
+        if let SimpleType::Generator(_) = &self.current_return {
+            let inner = self
+                .return_generator_inner
+                .clone()
+                .unwrap_or(SimpleType::Unknown);
+            self.current_return = SimpleType::Generator(Box::new(inner));
+        }
         // Check for missing return statement
         if self.current_return != SimpleType::Unit && self.current_return != SimpleType::Unknown {
             let has_return = func
@@ -767,8 +778,42 @@ impl TypeChecker {
                 self.pop_scope();
             }
             Stmt::Yield { expr, .. } => {
-                self.check_expr(expr);
-                self.push_error("yield is not supported yet".to_string(), expr_span(expr));
+                let value_ty = self.check_expr(expr);
+                if matches!(self.current_return, SimpleType::Unknown) {
+                    self.current_return = SimpleType::Generator(Box::new(SimpleType::Unknown));
+                }
+                if let SimpleType::Generator(inner) = &self.current_return {
+                    let existing = self.return_generator_inner.clone();
+                    match existing {
+                        Some(existing) => {
+                            if !self.types_compatible(&existing, &value_ty)
+                                && !matches!(value_ty, SimpleType::Unknown)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "yield type mismatch: expected {}, got {}",
+                                        format_type(&existing),
+                                        format_type(&value_ty)
+                                    ),
+                                    expr_span(expr),
+                                );
+                            }
+                        }
+                        None => {
+                            self.return_generator_inner = Some(value_ty.clone());
+                        }
+                    }
+                    if matches!(**inner, SimpleType::Unknown)
+                        && !matches!(value_ty, SimpleType::Unknown)
+                    {
+                        self.current_return = SimpleType::Generator(Box::new(value_ty));
+                    }
+                } else {
+                    self.push_error(
+                        "yield requires generator return type".to_string(),
+                        expr_span(expr),
+                    );
+                }
             }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
@@ -2529,6 +2574,26 @@ impl TypeChecker {
                 }
                 Some(SimpleType::Unit)
             }
+            "next" => {
+                self.check_arity(name, args, 1, span);
+                let mut inner = SimpleType::Unknown;
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    match arg_ty {
+                        SimpleType::Generator(gen_inner) => {
+                            inner = (*gen_inner).clone();
+                        }
+                        SimpleType::Unknown => {}
+                        other => {
+                            self.push_error(
+                                format!("next expects generator, got {}", format_type(&other)),
+                                expr_span(arg),
+                            );
+                        }
+                    }
+                }
+                Some(SimpleType::Option(Box::new(inner)))
+            }
             "len" => {
                 self.check_arity(name, args, 1, span);
                 if let Some(arg) = args.first() {
@@ -3195,6 +3260,13 @@ impl TypeChecker {
                     Some("result".to_string())
                 }
             }
+            SimpleType::Generator(_) => {
+                if let Some(inner) = &self.return_generator_inner {
+                    Some(format!("generator<{}>", format_type(inner)))
+                } else {
+                    Some("generator".to_string())
+                }
+            }
             SimpleType::Option(_) => {
                 if let Some(inner) = &self.return_option_inner {
                     Some(format!("option<{}>", format_type(inner)))
@@ -3628,6 +3700,7 @@ fn format_type(ty: &SimpleType) -> String {
         SimpleType::Map(key, value) => {
             format!("map<{}, {}>", format_type(key), format_type(value))
         }
+        SimpleType::Generator(inner) => format!("generator<{}>", format_type(inner)),
         SimpleType::Custom(name, args) => {
             if args.is_empty() {
                 name.clone()
@@ -4282,9 +4355,20 @@ fn f() {
     }
 
     #[test]
-    fn errors_on_yield() {
+    fn allows_yield_in_generator() {
         let source = r#"
 fn f() {
+    yield 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_yield_with_non_generator_return() {
+        let source = r#"
+fn f() -> int {
     yield 1;
 }
 "#;
@@ -4292,6 +4376,6 @@ fn f() {
         let errors = typecheck_module(&module).expect_err("expected type errors");
         assert!(errors
             .iter()
-            .any(|err| err.message.contains("yield is not supported")));
+            .any(|err| err.message.contains("yield requires generator return type")));
     }
 }
