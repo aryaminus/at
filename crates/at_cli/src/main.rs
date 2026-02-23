@@ -513,7 +513,27 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(errors) = at_check::typecheck_modules(&[loaded.module.clone()]) {
+        let mut modules = vec![loaded.raw_module.clone()];
+        let mut import_errors = Vec::new();
+        for import in &loaded.imports {
+            if import.starts_with("http://") || import.starts_with("https://") {
+                continue;
+            }
+            if import.starts_with("stdlib/") {
+                continue;
+            }
+            match load_module(import) {
+                Ok(imported) => modules.push(imported.raw_module),
+                Err(err) => import_errors.push(err),
+            }
+        }
+        if !import_errors.is_empty() {
+            for err in import_errors {
+                eprintln!("{err}");
+            }
+            std::process::exit(1);
+        }
+        if let Err(errors) = at_check::typecheck_modules(&modules) {
             for error in errors {
                 eprintln!(
                     "{}",
@@ -1133,6 +1153,7 @@ struct LoadedModule {
     module: Module,
     imports: Vec<String>,
     import_aliases: Vec<(String, String)>,
+    raw_module: Module,
 }
 
 fn load_module(path: &str) -> Result<LoadedModule, String> {
@@ -1155,6 +1176,13 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
             },
             imports: Vec::new(),
             import_aliases: Vec::new(),
+            raw_module: Module {
+                id: at_syntax::NodeId(0),
+                functions: Vec::new(),
+                stmts: Vec::new(),
+                comments: Vec::new(),
+                source_path: Some(normalized.display().to_string()),
+            },
         });
     }
 
@@ -1164,6 +1192,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
         format_parse_error(&err, &source, Some(&normalized.display().to_string()))
     })?;
     module.source_path = Some(normalized.display().to_string());
+    let raw_module = module.clone();
 
     let mut merged_functions = module.functions.clone();
     let mut merged_stmts = Vec::new();
@@ -1229,6 +1258,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
         },
         imports: merged_imports,
         import_aliases: merged_aliases,
+        raw_module,
     })
 }
 
