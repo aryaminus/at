@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use at_fmt::format_module;
 use at_mcp::{McpServer, Tool};
-use at_parser::parse_module;
+use at_parser::{parse_module_with_errors, ParseError};
 use at_syntax::{Module, Stmt, TypeRef};
 use at_vm::{compile_entry_with_imports, format_value, Chunk, Compiler, Op, Program, Value, Vm};
 use serde_json::{json, Value as JsonValue};
@@ -126,8 +126,14 @@ fn main() {
 
                 let mut chunk = Chunk::default();
                 for need in &exec.needs {
-                    chunk.code.push(Op::GrantCapability(need.clone()));
-                    chunk.spans.push(None);
+                    if let Some(index) = program
+                        .capability_names
+                        .iter()
+                        .position(|name| name == need)
+                    {
+                        chunk.code.push(Op::GrantCapability(index));
+                        chunk.spans.push(None);
+                    }
                 }
                 for value in args {
                     let index = chunk.constants.len();
@@ -146,6 +152,7 @@ fn main() {
                     main_locals: 0,
                     sources: program.sources.clone(),
                     entry: program.entry.clone(),
+                    capability_names: program.capability_names.clone(),
                 };
                 let mut vm = Vm::new();
                 let value = vm
@@ -328,6 +335,7 @@ fn main() {
                     main_locals: 0,
                     sources: program.sources.clone(),
                     entry: program.entry.clone(),
+                    capability_names: program.capability_names.clone(),
                 };
                 let mut vm = Vm::new();
                 match vm.run(&test_program) {
@@ -405,13 +413,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let mut module = match parse_module(&source) {
-            Ok(module) => module,
-            Err(err) => {
-                eprintln!("{}", format_parse_error(&err, &source, Some(path)));
-                std::process::exit(1);
-            }
-        };
+        let mut module = parse_module_or_exit(&source, Some(path));
         module.source_path = Some(path.to_string());
 
         let config_source = load_lint_config(path);
@@ -427,9 +429,13 @@ fn main() {
                 if fix_mode && fixable > 0 {
                     // Apply fixes
                     let fixed_source = at_lint::apply_fixes(&source, &errors);
+                    let formatted_source = match parse_module_with_errors(&fixed_source) {
+                        (module, parse_errors) if parse_errors.is_empty() => format_module(&module),
+                        _ => fixed_source.clone(),
+                    };
 
                     // Write back to file
-                    if let Err(err) = fs::write(path, &fixed_source) {
+                    if let Err(err) = fs::write(path, &formatted_source) {
                         eprintln!("error writing {path}: {err}");
                         std::process::exit(1);
                     }
@@ -437,13 +443,7 @@ fn main() {
                     println!("fixed {} issue(s)", fixable);
 
                     // Re-lint to check remaining issues
-                    let mut fixed_module = match parse_module(&fixed_source) {
-                        Ok(m) => m,
-                        Err(err) => {
-                            eprintln!("{}", format_parse_error(&err, &fixed_source, Some(path)));
-                            std::process::exit(1);
-                        }
-                    };
+                    let mut fixed_module = parse_module_or_exit(&formatted_source, Some(path));
                     fixed_module.source_path = Some(path.to_string());
 
                     if let Err(remaining) =
@@ -458,9 +458,9 @@ fn main() {
                                 remaining_fixable
                             );
                         }
-                        print_lint_bucket("error", errors, &fixed_source, Some(path));
-                        print_lint_bucket("warn", warnings, &fixed_source, Some(path));
-                        print_lint_bucket("info", infos, &fixed_source, Some(path));
+                        print_lint_bucket("error", errors, &formatted_source, Some(path));
+                        print_lint_bucket("warn", warnings, &formatted_source, Some(path));
+                        print_lint_bucket("info", infos, &formatted_source, Some(path));
                         if total > 0 {
                             println!("{} issue(s) require manual fix", total - remaining_fixable);
                         }
@@ -494,13 +494,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let mut module = match parse_module(&source) {
-            Ok(module) => module,
-            Err(err) => {
-                eprintln!("{}", format_parse_error(&err, &source, Some(path)));
-                std::process::exit(1);
-            }
-        };
+        let mut module = parse_module_or_exit(&source, Some(path));
         module.source_path = Some(path.to_string());
         let config_source = load_lint_config(path);
         if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
@@ -566,10 +560,7 @@ fn main() {
                 std::process::exit(1);
             });
         let parse_start = std::time::Instant::now();
-        let mut module = parse_module(&source).unwrap_or_else(|err| {
-            eprintln!("{}", format_parse_error(&err, &source, path.to_str()));
-            std::process::exit(1);
-        });
+        let mut module = parse_module_or_exit(&source, path.to_str());
         module.source_path = Some(path.display().to_string());
         let parse_time = parse_start.elapsed();
 
@@ -814,8 +805,8 @@ fn run_repl() {
             continue;
         }
 
-        match parse_module(&buffer) {
-            Ok(mut module) => {
+        match parse_module_with_errors(&buffer) {
+            (mut module, errors) if errors.is_empty() => {
                 module.source_path = None;
                 let mut compiler = Compiler::new();
                 let program = match compiler.compile_module(&module) {
@@ -833,8 +824,8 @@ fn run_repl() {
                     Err(err) => eprintln!("{}", format_runtime_error(&err, Some(&buffer))),
                 }
             }
-            Err(err) => {
-                eprintln!("{}", format_parse_error(&err, &buffer, None));
+            (_, errors) => {
+                print_parse_errors(&errors, &buffer, None);
             }
         }
 
@@ -959,6 +950,29 @@ fn format_parse_error(err: &at_parser::ParseError, source: &str, path: Option<&s
     }
 
     format!("{prefix}: {message}")
+}
+
+fn format_parse_errors(errors: &[ParseError], source: &str, path: Option<&str>) -> String {
+    let mut output = Vec::new();
+    for err in errors {
+        output.push(format_parse_error(err, source, path));
+    }
+    output.join("\n")
+}
+
+fn parse_module_or_exit(source: &str, path: Option<&str>) -> Module {
+    let (module, errors) = parse_module_with_errors(source);
+    if errors.is_empty() {
+        return module;
+    }
+    print_parse_errors(&errors, source, path);
+    std::process::exit(1);
+}
+
+fn print_parse_errors(errors: &[ParseError], source: &str, path: Option<&str>) {
+    for err in errors {
+        eprintln!("{}", format_parse_error(err, source, path));
+    }
 }
 
 fn load_lint_config(path: &str) -> Option<String> {
@@ -1153,9 +1167,15 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
 
     let source = fs::read_to_string(&normalized)
         .map_err(|err| format!("error reading {}: {err}", normalized.display()))?;
-    let mut module = parse_module(&source).map_err(|err| {
-        format_parse_error(&err, &source, Some(&normalized.display().to_string()))
-    })?;
+    let (module, errors) = parse_module_with_errors(&source);
+    if !errors.is_empty() {
+        return Err(format_parse_errors(
+            &errors,
+            &source,
+            Some(&normalized.display().to_string()),
+        ));
+    }
+    let mut module = module;
     module.source_path = Some(normalized.display().to_string());
     let raw_module = module.clone();
 
@@ -2583,8 +2603,15 @@ fn print_deps_tree(
     let source = fs::read_to_string(&normalized)
         .map_err(|err| format!("error reading {}: {err}", normalized.display()))?;
     let normalized_display = normalized.display().to_string();
-    let mut module = parse_module(&source)
-        .map_err(|err| format_parse_error(&err, &source, Some(&normalized_display)))?;
+    let (module, errors) = parse_module_with_errors(&source);
+    if !errors.is_empty() {
+        return Err(format_parse_errors(
+            &errors,
+            &source,
+            Some(&normalized_display),
+        ));
+    }
+    let mut module = module;
     module.source_path = Some(normalized_display.clone());
     let base_dir = normalized
         .parent()

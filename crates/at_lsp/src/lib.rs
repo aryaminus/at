@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use at_lint;
-use at_parser::{parse_module, ParseError};
+use at_parser::{parse_module, parse_module_with_errors, ParseError};
 use at_syntax::{Module, Span, TypeRef};
 use at_vm::Compiler;
 use lsp_server::{Connection, Message, Notification, Response};
@@ -991,19 +991,6 @@ fn provide_definition(
     let position = params.text_document_position_params.position;
     let offset = position_to_offset(text, position);
     let (name, qualifier) = ident_at_offset_with_qualifier(text, offset)?;
-    let functions = module
-        .map(collect_functions_with_inferred)
-        .or_else(|| collect_functions(text));
-    if let Some(functions) = functions {
-        if let Some(info) = functions.get(&name) {
-            let location = Location {
-                uri: url.clone(),
-                range: span_to_range(text, info.span),
-            };
-            return Some(GotoDefinitionResponse::Scalar(location));
-        }
-    }
-
     let imports = module
         .map(collect_imports_from_module)
         .or_else(|| collect_imports(text));
@@ -1018,6 +1005,19 @@ fn provide_definition(
                 };
                 return Some(GotoDefinitionResponse::Scalar(location));
             }
+        }
+    }
+
+    let functions = module
+        .map(collect_functions_with_inferred)
+        .or_else(|| collect_functions(text));
+    if let Some(functions) = functions {
+        if let Some(info) = functions.get(&name) {
+            let location = Location {
+                uri: url.clone(),
+                range: span_to_range(text, info.span),
+            };
+            return Some(GotoDefinitionResponse::Scalar(location));
         }
     }
 
@@ -1147,7 +1147,8 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
 
     let mut actions = Vec::new();
 
-    if let Err(lint_errors) = at_lint::lint_module(&module) {
+    let config_source = load_lint_config_for_uri(url);
+    if let Err(lint_errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
         let start = params.range.start;
         let end = params.range.end;
 
@@ -1371,6 +1372,23 @@ fn workspace_root() -> Option<std::path::PathBuf> {
         .get()
         .cloned()
         .or_else(|| std::env::current_dir().ok())
+}
+
+fn load_lint_config_for_uri(url: &Uri) -> Option<String> {
+    let path = uri_to_path(url)?;
+    let file_path = std::path::Path::new(&path);
+    let mut dir = file_path.parent()?;
+    loop {
+        let candidate = dir.join(".at-lint.toml");
+        if candidate.exists() {
+            return std::fs::read_to_string(candidate).ok();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    None
 }
 
 fn remote_pending_message(resolved: &str) -> Option<String> {
@@ -1740,32 +1758,48 @@ fn publish_diagnostics(
     module: Option<&Module>,
 ) -> Result<(), String> {
     let mut diagnostics = Vec::new();
-    if let Some(remote_message) = collect_remote_diagnostics(module, text, url) {
-        diagnostics.push(remote_message);
-    }
-    match module.cloned().or_else(|| parse_module(text).ok()) {
-        Some(module) => {
-            if let Err(errors) = at_check::typecheck_module(&module) {
-                for error in errors {
-                    diagnostics.push(type_error_to_diagnostic(text, error));
-                }
-            }
-            if let Err(errors) = at_lint::lint_module(&module) {
-                for error in errors {
-                    diagnostics.push(lint_error_to_diagnostic(text, error));
-                }
-            }
-            let mut compiler = Compiler::new();
-            if let Err(err) = compiler.compile_module(&module) {
-                diagnostics.extend(compile_error_to_diagnostic(text, err));
-            }
-        }
+    let (parsed_module, parse_errors) = match module.cloned() {
+        Some(module) => (Some(module), Vec::new()),
         None => {
-            if let Err(err) = parse_module(text) {
-                diagnostics.push(parse_error_to_diagnostic(text, err));
-            }
+            let (module, errors) = parse_module_with_errors(text);
+            (Some(module), errors)
         }
     };
+    if !parse_errors.is_empty() {
+        diagnostics.extend(
+            parse_errors
+                .into_iter()
+                .map(|err| parse_error_to_diagnostic(text, err)),
+        );
+        if let Some(module) = parsed_module.as_ref() {
+            if let Some(remote_message) = collect_remote_diagnostics(module, text, url) {
+                diagnostics.push(remote_message);
+            }
+        }
+    } else if let Some(module) = parsed_module {
+        if let Some(remote_message) = collect_remote_diagnostics(&module, text, url) {
+            diagnostics.push(remote_message);
+        }
+        let mut modules = vec![module.clone()];
+        if let Some(extra) = collect_import_modules(&module, url) {
+            modules.extend(extra);
+        }
+        if let Err(errors) = at_check::typecheck_modules(&modules) {
+            for error in errors {
+                diagnostics.push(type_error_to_diagnostic(text, error));
+            }
+        }
+        let config_source = load_lint_config_for_uri(url);
+        if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
+            for error in errors {
+                diagnostics.push(lint_error_to_diagnostic(text, error));
+            }
+        }
+        let mut compiler = Compiler::new();
+        if let Err(err) = compiler.compile_module(&module) {
+            diagnostics.extend(compile_error_to_diagnostic(text, err));
+        }
+    }
 
     let params = lsp_types::PublishDiagnosticsParams {
         uri: url.clone(),
@@ -1781,12 +1815,27 @@ fn publish_diagnostics(
     Ok(())
 }
 
-fn collect_remote_diagnostics(
-    module: Option<&Module>,
-    text: &str,
-    url: &Uri,
-) -> Option<Diagnostic> {
-    let module = module.cloned().or_else(|| parse_module(text).ok())?;
+fn collect_import_modules(module: &Module, base_uri: &Uri) -> Option<Vec<Module>> {
+    let mut modules = Vec::new();
+    for stmt in &module.stmts {
+        if let at_syntax::Stmt::Import { path, .. } = stmt {
+            let resolved = resolve_import_path(base_uri, path)?;
+            if resolved.starts_with("http://") || resolved.starts_with("https://") {
+                continue;
+            }
+            let path = std::path::Path::new(&resolved);
+            let source = std::fs::read_to_string(path).ok()?;
+            let (imported, errors) = parse_module_with_errors(&source);
+            if !errors.is_empty() {
+                continue;
+            }
+            modules.push(imported);
+        }
+    }
+    Some(modules)
+}
+
+fn collect_remote_diagnostics(module: &Module, text: &str, url: &Uri) -> Option<Diagnostic> {
     let base_uri = url;
     for stmt in &module.stmts {
         if let at_syntax::Stmt::Import { path, alias, .. } = stmt {

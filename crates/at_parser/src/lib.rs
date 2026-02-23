@@ -1999,23 +1999,6 @@ impl<'a> Parser<'a> {
                 items.push(self.parse_match_pattern()?);
             }
             self.expect(TokenKind::RParen)?;
-            for item in &items {
-                let ok = matches!(
-                    item,
-                    MatchPattern::Wildcard(_)
-                        | MatchPattern::Binding { .. }
-                        | MatchPattern::Int(_, _)
-                        | MatchPattern::Bool(_, _)
-                        | MatchPattern::String(_, _)
-                );
-                if !ok {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "tuple pattern".to_string(),
-                        found: self.current.kind.clone(),
-                        span: self.current.span,
-                    });
-                }
-            }
             return Ok(MatchPattern::Tuple {
                 id: self.alloc_id(),
                 items,

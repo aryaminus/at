@@ -300,6 +300,16 @@ import "https://example.com/lib.at" as lib;
 
 The first time this is encountered, the file is downloaded to `.at/cache/` and a reference is added to `.at/lock`.
 
+## Cache Policy
+
+Remote imports are cached by content hash. The cache is keyed by the SHA256 of the fetched contents, and the lockfile maps URLs to hashes. When a URL is imported, the CLI will:
+
+1. Look up the URL in `.at/lock`.
+2. If the lockfile has a hash, load the cached file from `.at/cache/<hash>.at`.
+3. If the lockfile has no entry, fetch the URL, store it as `.at/cache/<hash>.at`, and add the URL→hash mapping to the lockfile.
+
+The cache is content-addressed, so multiple URLs can map to the same cached file if their contents are identical. The CLI does not revalidate a cached URL on every run; use `at cache add <url>` to refresh a URL or `at cache prune` to clean up unused entries.
+
 ## Lockfile Format
 
 The lockfile (`.at/lock`) tracks remote imports:

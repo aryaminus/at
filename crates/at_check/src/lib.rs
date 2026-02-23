@@ -21,6 +21,7 @@ enum SimpleType {
     Union(Vec<SimpleType>),
     Intersection(Vec<SimpleType>),
     Custom(String, Vec<SimpleType>),
+    TypeParam(String),
     Unknown,
 }
 
@@ -29,6 +30,7 @@ struct FuncSig {
     params: Vec<SimpleType>,
     return_ty: SimpleType,
     is_async: bool,
+    type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,11 +102,9 @@ struct TypeChecker {
     structs: HashMap<String, (Vec<Ident>, Vec<StructField>)>,
     type_aliases: HashMap<String, TypeRef>,
     enums: HashMap<String, (Vec<Ident>, Vec<EnumVariant>)>,
+    type_params: Vec<HashSet<String>>,
     locals: Vec<HashMap<String, SimpleType>>,
     consts: Vec<HashSet<String>>,
-    option_inner: Vec<HashMap<String, SimpleType>>,
-    result_ok: Vec<HashMap<String, SimpleType>>,
-    result_err: Vec<HashMap<String, SimpleType>>,
     capabilities: Vec<HashSet<String>>,
     current_return: SimpleType,
     current_return_ref: Option<TypeRef>,
@@ -131,9 +131,7 @@ impl TypeChecker {
             enums: HashMap::new(),
             locals: Vec::new(),
             consts: Vec::new(),
-            option_inner: Vec::new(),
-            result_ok: Vec::new(),
-            result_err: Vec::new(),
+            type_params: Vec::new(),
             capabilities: Vec::new(),
             current_return: SimpleType::Unknown,
             current_return_ref: None,
@@ -174,14 +172,14 @@ impl TypeChecker {
                     param
                         .ty
                         .as_ref()
-                        .map(|ty| self.type_from_ref(ty))
+                        .map(|ty| self.type_from_ref_with_env(ty, None, None))
                         .unwrap_or(SimpleType::Unknown)
                 })
                 .collect();
             let return_ty = func
                 .return_ty
                 .as_ref()
-                .map(|ty| self.type_from_ref(ty))
+                .map(|ty| self.type_from_ref_with_env(ty, None, None))
                 .unwrap_or(SimpleType::Unknown);
             self.functions.insert(
                 func.name.name.clone(),
@@ -189,6 +187,11 @@ impl TypeChecker {
                     params,
                     return_ty,
                     is_async: func.is_async,
+                    type_params: func
+                        .type_params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect(),
                 },
             );
         }
@@ -199,6 +202,7 @@ impl TypeChecker {
         self.load_type_aliases(module);
         self.load_structs(module);
         self.load_enums(module);
+        self.type_params.clear();
         for func in &module.functions {
             self.check_function(func);
         }
@@ -215,14 +219,20 @@ impl TypeChecker {
     fn check_function(&mut self, func: &Function) {
         self.current_is_async = func.is_async;
         self.locals.clear();
-        self.option_inner.clear();
-        self.result_ok.clear();
-        self.result_err.clear();
         self.capabilities.clear();
+        self.type_params.clear();
         self.push_scope();
         for need in &func.needs {
             self.insert_capability(&need.name);
         }
+        if !func.type_params.is_empty() {
+            let mut params = HashSet::new();
+            for param in &func.type_params {
+                params.insert(param.name.clone());
+            }
+            self.type_params.push(params);
+        }
+        let current_params = self.current_type_params().cloned();
         for param in &func.params {
             if self.is_local_in_current_scope(&param.name.name) {
                 self.push_error(
@@ -233,14 +243,14 @@ impl TypeChecker {
             let ty = param
                 .ty
                 .as_ref()
-                .map(|ty| self.type_from_ref(ty))
+                .map(|ty| self.type_from_ref_with_env(ty, None, current_params.as_ref()))
                 .unwrap_or(SimpleType::Unknown);
             self.bind_local(&param.name, ty);
         }
         self.current_return = func
             .return_ty
             .as_ref()
-            .map(|ty| self.type_from_ref(ty))
+            .map(|ty| self.type_from_ref_with_env(ty, None, current_params.as_ref()))
             .unwrap_or(SimpleType::Unknown);
         self.current_return_ref = func.return_ty.clone();
         self.return_option_inner = None;
@@ -263,14 +273,11 @@ impl TypeChecker {
             && self.current_return != SimpleType::Unknown
             && !matches!(self.current_return, SimpleType::Generator(_))
         {
-            let has_return = func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, Stmt::Return { .. }));
+            let has_return = Self::block_terminates(&func.body);
             if !has_return {
                 self.push_error(
                     format!(
-                        "function '{}' declares return type '{}' but has no return statement",
+                        "function '{}' declares return type '{}' but not all paths return",
                         func.name.name,
                         format_type(&self.current_return)
                     ),
@@ -293,6 +300,42 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    fn stmt_returns(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } | Stmt::Throw { .. } => true,
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_returns = Self::block_terminates(then_branch);
+                let else_returns = else_branch
+                    .as_ref()
+                    .map(|branch| Self::block_terminates(branch))
+                    .unwrap_or(false);
+                then_returns && else_returns
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => Self::block_terminates(body),
+            _ => false,
+        }
+    }
+
+    fn block_terminates(stmts: &[Stmt]) -> bool {
+        for stmt in stmts {
+            if Self::stmt_returns(stmt) {
+                return true;
+            }
+            if matches!(stmt, Stmt::Break { .. } | Stmt::Continue { .. }) {
+                return false;
+            }
+        }
+        false
     }
 
     fn load_structs(&mut self, module: &Module) {
@@ -371,6 +414,10 @@ impl TypeChecker {
         }
     }
 
+    fn current_type_params(&self) -> Option<&HashSet<String>> {
+        self.type_params.last()
+    }
+
     fn validate_type_params(&mut self, params: &[Ident], span: Span, kind: &str) {
         let mut seen = HashSet::new();
         for param in params {
@@ -399,7 +446,9 @@ impl TypeChecker {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
                 let value_ty = self.check_expr(value);
-                let declared = ty.as_ref().map(|ty| self.type_from_ref(ty));
+                let declared = ty
+                    .as_ref()
+                    .map(|ty| self.type_from_ref_with_env(ty, None, None));
                 if let Some(expected) = declared.clone() {
                     self.check_compatible(
                         &expected,
@@ -425,7 +474,9 @@ impl TypeChecker {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
                 let value_ty = self.check_expr(value);
-                let declared = ty.as_ref().map(|ty| self.type_from_ref(ty));
+                let declared = ty
+                    .as_ref()
+                    .map(|ty| self.type_from_ref_with_env(ty, None, None));
                 if let Some(expected) = declared.clone() {
                     self.check_compatible(
                         &expected,
@@ -450,7 +501,9 @@ impl TypeChecker {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
                 let value_ty = self.check_expr(value);
-                let declared = ty.as_ref().map(|ty| self.type_from_ref(ty));
+                let declared = ty
+                    .as_ref()
+                    .map(|ty| self.type_from_ref_with_env(ty, None, None));
                 if let Some(expected) = declared.clone() {
                     self.check_compatible(
                         &expected,
@@ -851,12 +904,12 @@ impl TypeChecker {
                     );
                     SimpleType::Unknown
                 };
-                if matches!(ty, SimpleType::Option(_)) {
-                    self.last_option_inner = self.lookup_option_inner(&ident.name);
+                if let SimpleType::Option(inner) = &ty {
+                    self.last_option_inner = Some((**inner).clone());
                 }
-                if matches!(ty, SimpleType::Result(_, _)) {
-                    self.last_result_ok = self.lookup_result_ok(&ident.name);
-                    self.last_result_err = self.lookup_result_err(&ident.name);
+                if let SimpleType::Result(ok, err) = &ty {
+                    self.last_result_ok = Some((**ok).clone());
+                    self.last_result_err = Some((**err).clone());
                 }
                 ty
             }
@@ -930,14 +983,57 @@ impl TypeChecker {
             } => self.check_if(*if_span, condition, then_branch, else_branch.as_deref()),
             Expr::Member { base, name, .. } => {
                 let base_ty = self.check_expr(base);
-                if let SimpleType::Custom(struct_name, _) = base_ty {
-                    if let Some((_, fields)) = self.structs.get(&struct_name) {
+                if let SimpleType::Array(inner) = &base_ty {
+                    if name.name == "len" {
+                        return SimpleType::Int;
+                    }
+                    if name.name == "first" {
+                        return SimpleType::Option(Box::new((**inner).clone()));
+                    }
+                    if name.name == "last" {
+                        return SimpleType::Option(Box::new((**inner).clone()));
+                    }
+                }
+                if let SimpleType::Tuple(items) = &base_ty {
+                    if name.name == "len" {
+                        return SimpleType::Int;
+                    }
+                    if name.name == "first" {
+                        let inner = items.first().cloned().unwrap_or(SimpleType::Unknown);
+                        return SimpleType::Option(Box::new(inner));
+                    }
+                    if name.name == "last" {
+                        let inner = items.last().cloned().unwrap_or(SimpleType::Unknown);
+                        return SimpleType::Option(Box::new(inner));
+                    }
+                }
+                if let SimpleType::String = &base_ty {
+                    if name.name == "len" {
+                        return SimpleType::Int;
+                    }
+                }
+                if let SimpleType::Map(_, value) = &base_ty {
+                    if name.name == "len" {
+                        return SimpleType::Int;
+                    }
+                    if name.name == "values" {
+                        return SimpleType::Array(Box::new((**value).clone()));
+                    }
+                }
+                if let SimpleType::Custom(struct_name, args) = base_ty {
+                    if let Some((type_params, fields)) = self.structs.get(&struct_name).cloned() {
+                        let param_names = self.type_param_set(&type_params);
+                        let env = self.type_env_from_args(&type_params, &args, Some(name.span));
                         let field_ty = fields
                             .iter()
                             .find(|field| field.name.name == name.name)
                             .map(|field| field.ty.clone());
                         if let Some(field_ty) = field_ty {
-                            return self.type_from_ref(&field_ty);
+                            return self.type_from_ref_with_env(
+                                &field_ty,
+                                Some(&env),
+                                Some(&param_names),
+                            );
                         }
                         self.push_error(
                             format!("unknown field {} on struct {}", name.name, struct_name),
@@ -966,7 +1062,23 @@ impl TypeChecker {
                 }
                 let inner = self.check_expr(expr);
                 match &inner {
-                    SimpleType::Result(ok, _) => (**ok).clone(),
+                    SimpleType::Result(ok, err) => {
+                        if let SimpleType::Result(_, expected_err) = &self.current_return {
+                            if !self.types_compatible(expected_err, err)
+                                && !matches!(**expected_err, SimpleType::Unknown)
+                            {
+                                self.push_error(
+                                    format!(
+                                        "? error type mismatch: expected {}, got {}",
+                                        format_type(expected_err),
+                                        format_type(err)
+                                    ),
+                                    expr_span(expr),
+                                );
+                            }
+                        }
+                        (**ok).clone()
+                    }
                     SimpleType::Unknown => {
                         self.last_result_ok.clone().unwrap_or(SimpleType::Unknown)
                     }
@@ -1279,7 +1391,7 @@ impl TypeChecker {
             }
             Expr::As { expr, ty, .. } => {
                 let _ = self.check_expr(expr);
-                self.type_from_ref(ty)
+                self.type_from_ref_with_env(ty, None, None)
             }
             Expr::Is { expr, ty, .. } => {
                 let _ = self.check_expr(expr);
@@ -1321,6 +1433,12 @@ impl TypeChecker {
                 if enum_variants.is_none() {
                     self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
                 }
+                let mut env = HashMap::new();
+                let mut param_names = HashSet::new();
+                if let Some((type_params, _)) = enum_variants.as_ref() {
+                    param_names = self.type_param_set(type_params);
+                    env = self.type_env_from_args(type_params, &[], Some(name.span));
+                }
                 if let Some((_, enum_variants)) = enum_variants {
                     if let Some(expected) = enum_variants
                         .iter()
@@ -1329,7 +1447,30 @@ impl TypeChecker {
                         match (&expected.payload, payload) {
                             (Some(expected_ty), Some(expr)) => {
                                 let value_ty = self.check_expr(expr);
-                                let expected_ty = self.type_from_ref(expected_ty);
+                                if let Some(param_name) =
+                                    self.infer_type_param_name(expected_ty, &param_names)
+                                {
+                                    let entry =
+                                        env.entry(param_name).or_insert(SimpleType::Unknown);
+                                    if matches!(entry, SimpleType::Unknown) {
+                                        *entry = value_ty.clone();
+                                    } else {
+                                        self.check_compatible(
+                                            entry,
+                                            &value_ty,
+                                            &format!(
+                                                "type mismatch for enum {}::{}",
+                                                name.name, variant.name
+                                            ),
+                                            Some(variant.span),
+                                        );
+                                    }
+                                }
+                                let expected_ty = self.type_from_ref_with_env(
+                                    expected_ty,
+                                    Some(&env),
+                                    Some(&param_names),
+                                );
                                 self.check_compatible(
                                     &expected_ty,
                                     &value_ty,
@@ -1366,7 +1507,16 @@ impl TypeChecker {
                 } else if let Some(expr) = payload {
                     self.check_expr(expr);
                 }
-                SimpleType::Custom(name.name.clone(), Vec::new())
+                let mut enum_args = Vec::new();
+                if !param_names.is_empty() {
+                    if let Some((params, _)) = self.enums.get(&name.name) {
+                        for param in params {
+                            let ty = env.get(&param.name).cloned().unwrap_or(SimpleType::Unknown);
+                            enum_args.push(ty);
+                        }
+                    }
+                }
+                SimpleType::Custom(name.name.clone(), enum_args)
             }
             Expr::Group { expr, .. } => self.check_expr(expr),
             Expr::StructLiteral { name, fields, .. } => {
@@ -1375,6 +1525,13 @@ impl TypeChecker {
                     self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
                 }
                 let mut provided = HashSet::new();
+                let mut struct_args = Vec::new();
+                let mut param_names = HashSet::new();
+                let mut env = HashMap::new();
+                if let Some((type_params, _)) = struct_fields.as_ref() {
+                    param_names = self.type_param_set(type_params);
+                    env = self.type_env_from_args(type_params, &[], Some(name.span));
+                }
                 for field in fields {
                     if !provided.insert(field.name.name.clone()) {
                         self.push_error(
@@ -1388,7 +1545,26 @@ impl TypeChecker {
                             .iter()
                             .find(|entry| entry.name.name == field.name.name)
                         {
-                            let expected_ty = self.type_from_ref(&expected.ty);
+                            if let Some(param_name) =
+                                self.infer_type_param_name(&expected.ty, &param_names)
+                            {
+                                let entry = env.entry(param_name).or_insert(SimpleType::Unknown);
+                                if matches!(entry, SimpleType::Unknown) {
+                                    *entry = value_ty.clone();
+                                } else {
+                                    self.check_compatible(
+                                        entry,
+                                        &value_ty,
+                                        &format!("type mismatch for field {}", field.name.name),
+                                        Some(field.name.span),
+                                    );
+                                }
+                            }
+                            let expected_ty = self.type_from_ref_with_env(
+                                &expected.ty,
+                                Some(&env),
+                                Some(&param_names),
+                            );
                             self.check_compatible(
                                 &expected_ty,
                                 &value_ty,
@@ -1419,7 +1595,15 @@ impl TypeChecker {
                         }
                     }
                 }
-                SimpleType::Custom(name.name.clone(), Vec::new())
+                if !param_names.is_empty() {
+                    if let Some((params, _)) = struct_fields.as_ref() {
+                        for param in params {
+                            let ty = env.get(&param.name).cloned().unwrap_or(SimpleType::Unknown);
+                            struct_args.push(ty);
+                        }
+                    }
+                }
+                SimpleType::Custom(name.name.clone(), struct_args)
             }
         }
     }
@@ -1601,6 +1785,10 @@ impl TypeChecker {
         if matches!(expected, SimpleType::Unknown) || matches!(found, SimpleType::Unknown) {
             return true;
         }
+        if matches!(expected, SimpleType::TypeParam(_)) || matches!(found, SimpleType::TypeParam(_))
+        {
+            return true;
+        }
         match (expected, found) {
             (SimpleType::Array(left), SimpleType::Array(right)) => {
                 self.types_compatible(left, right)
@@ -1687,19 +1875,18 @@ impl TypeChecker {
         self.push_scope();
         if let Some(narrow) = option_narrow.clone() {
             if narrow.then_branch {
-                if let Some(scope) = self.option_inner.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), narrow.inner);
-                }
+                self.bind_or_refine_local(
+                    &narrow.ident,
+                    SimpleType::Option(Box::new(narrow.inner.clone())),
+                );
             }
         }
         if let Some(narrow) = result_narrow.clone() {
             if narrow.then_branch {
-                if let Some(scope) = self.result_ok.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), narrow.ok);
-                }
-                if let Some(scope) = self.result_err.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), narrow.err);
-                }
+                self.bind_or_refine_local(
+                    &narrow.ident,
+                    SimpleType::Result(Box::new(narrow.ok.clone()), Box::new(narrow.err.clone())),
+                );
             }
         }
         let then_ty = self.check_expr(then_branch);
@@ -1714,28 +1901,18 @@ impl TypeChecker {
         self.push_scope();
         if let Some(narrow) = option_narrow.clone() {
             if !narrow.then_branch {
-                let inner_value = self
-                    .lookup_option_inner(&narrow.ident.name)
-                    .unwrap_or(narrow.inner);
-                if let Some(scope) = self.option_inner.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), inner_value);
-                }
+                self.bind_or_refine_local(
+                    &narrow.ident,
+                    SimpleType::Option(Box::new(narrow.inner.clone())),
+                );
             }
         }
         if let Some(narrow) = result_narrow.clone() {
             if !narrow.then_branch {
-                let ok_value = self
-                    .lookup_result_ok(&narrow.ident.name)
-                    .unwrap_or(narrow.ok);
-                let err_value = self
-                    .lookup_result_err(&narrow.ident.name)
-                    .unwrap_or(narrow.err);
-                if let Some(scope) = self.result_ok.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), ok_value);
-                }
-                if let Some(scope) = self.result_err.last_mut() {
-                    scope.insert(narrow.ident.name.clone(), err_value);
-                }
+                self.bind_or_refine_local(
+                    &narrow.ident,
+                    SimpleType::Result(Box::new(narrow.ok.clone()), Box::new(narrow.err.clone())),
+                );
             }
         }
         let else_ty = if let Some(else_expr) = else_branch {
@@ -1880,13 +2057,6 @@ impl TypeChecker {
             let then_branch = if is_some_call { for_then } else { !for_then };
             if let Some(arg) = args.first() {
                 if let Expr::Ident(arg_ident) = arg {
-                    if let Some(inner) = self.lookup_option_inner(&arg_ident.name) {
-                        return Some(OptionNarrow {
-                            ident: arg_ident.clone(),
-                            inner,
-                            then_branch,
-                        });
-                    }
                     if let Some(ty) = self.resolve_local(arg_ident) {
                         if let SimpleType::Option(inner) = ty {
                             return Some(OptionNarrow {
@@ -1946,16 +2116,6 @@ impl TypeChecker {
             let then_branch = if is_ok_call { for_then } else { !for_then };
             if let Some(arg) = args.first() {
                 if let Expr::Ident(arg_ident) = arg {
-                    let ok = self.lookup_result_ok(&arg_ident.name);
-                    let err = self.lookup_result_err(&arg_ident.name);
-                    if let (Some(ok), Some(err)) = (ok, err) {
-                        return Some(ResultNarrow {
-                            ident: arg_ident.clone(),
-                            ok,
-                            err,
-                            then_branch,
-                        });
-                    }
                     if let Some(ty) = self.resolve_local(arg_ident) {
                         if let SimpleType::Result(ok, err) = ty {
                             return Some(ResultNarrow {
@@ -2007,60 +2167,40 @@ impl TypeChecker {
     }
 
     fn merge_assigned_inners(&mut self, name: &Ident, ty: &SimpleType, span: Span) {
-        let scope_index = self.find_local_scope_index(&name.name);
-        if matches!(ty, SimpleType::Option(_)) {
-            let existing = self.lookup_option_inner(&name.name);
+        if let SimpleType::Option(inner) = ty {
             let current = self.last_option_inner.clone();
             self.last_option_inner = self.merge_inner(
-                existing,
+                Some((**inner).clone()),
                 current,
                 &format!("option inner mismatch for {}", name.name),
                 Some(span),
             );
             if let Some(inner) = self.last_option_inner.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.option_inner.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.option_inner.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
+                self.bind_or_refine_local(name, SimpleType::Option(Box::new(inner)));
             }
         }
-        if matches!(ty, SimpleType::Result(_, _)) {
-            let existing_ok = self.lookup_result_ok(&name.name);
+        if let SimpleType::Result(ok, err) = ty {
             let current_ok = self.last_result_ok.clone();
             self.last_result_ok = self.merge_inner(
-                existing_ok,
+                Some((**ok).clone()),
                 current_ok,
                 &format!("result ok inner mismatch for {}", name.name),
                 Some(span),
             );
-            let existing_err = self.lookup_result_err(&name.name);
             let current_err = self.last_result_err.clone();
             self.last_result_err = self.merge_inner(
-                existing_err,
+                Some((**err).clone()),
                 current_err,
                 &format!("result err inner mismatch for {}", name.name),
                 Some(span),
             );
-            if let Some(inner) = self.last_result_ok.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.result_ok.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.result_ok.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
-            }
-            if let Some(inner) = self.last_result_err.clone() {
-                if let Some(index) = scope_index {
-                    if let Some(scope) = self.result_err.get_mut(index) {
-                        scope.insert(name.name.clone(), inner);
-                    }
-                } else if let Some(scope) = self.result_err.last_mut() {
-                    scope.insert(name.name.clone(), inner);
-                }
+            if let (Some(ok_inner), Some(err_inner)) =
+                (self.last_result_ok.clone(), self.last_result_err.clone())
+            {
+                self.bind_or_refine_local(
+                    name,
+                    SimpleType::Result(Box::new(ok_inner), Box::new(err_inner)),
+                );
             }
         }
     }
@@ -2075,16 +2215,33 @@ impl TypeChecker {
         let mut option_inner = self.last_option_inner.take();
         let mut result_ok = self.last_result_ok.take();
         let mut result_err = self.last_result_err.take();
+        let enum_name = match &value_ty {
+            SimpleType::Custom(name, _) => Some(name.clone()),
+            _ => None,
+        };
+        let mut matched_enum_variants: HashSet<String> = HashSet::new();
 
         if let Expr::Ident(ident) = value {
             if option_inner.is_none() {
-                option_inner = self.lookup_option_inner(&ident.name);
+                if let Some(ty) = self.resolve_local(ident) {
+                    if let SimpleType::Option(inner) = ty {
+                        option_inner = Some((*inner).clone());
+                    }
+                }
             }
             if result_ok.is_none() {
-                result_ok = self.lookup_result_ok(&ident.name);
+                if let Some(ty) = self.resolve_local(ident) {
+                    if let SimpleType::Result(ok, _) = ty {
+                        result_ok = Some((*ok).clone());
+                    }
+                }
             }
             if result_err.is_none() {
-                result_err = self.lookup_result_err(&ident.name);
+                if let Some(ty) = self.resolve_local(ident) {
+                    if let SimpleType::Result(_, err) = ty {
+                        result_err = Some((*err).clone());
+                    }
+                }
             }
         }
         let mut result_ty = SimpleType::Unknown;
@@ -2093,210 +2250,62 @@ impl TypeChecker {
         let mut has_some = false;
         let mut has_none = false;
         let mut has_wildcard = false;
+        let mut matched_ints = HashSet::new();
+        let mut matched_strings = HashSet::new();
         let mut inferred_ok = None;
         let mut inferred_err = None;
         let mut inferred_opt = None;
 
         for arm in arms {
             self.push_scope();
-            match &arm.pattern {
-                at_syntax::MatchPattern::Int(_, _) => {
-                    if value_ty != SimpleType::Int && value_ty != SimpleType::Unknown {
-                        self.push_error("match expects int value".to_string(), Some(match_span));
+            let coverage_pattern = self.unwrap_binding_pattern(&arm.pattern);
+            if arm.guard.is_none() {
+                match coverage_pattern {
+                    at_syntax::MatchPattern::Int(value, _) => {
+                        matched_ints.insert(*value);
                     }
-                }
-                at_syntax::MatchPattern::Bool(_, _) => {
-                    if value_ty != SimpleType::Bool && value_ty != SimpleType::Unknown {
-                        self.push_error("match expects bool value".to_string(), Some(match_span));
+                    at_syntax::MatchPattern::String(value, _) => {
+                        matched_strings.insert(value.clone());
                     }
-                }
-                at_syntax::MatchPattern::String(_, _) => {
-                    if value_ty != SimpleType::String && value_ty != SimpleType::Unknown {
-                        self.push_error("match expects string value".to_string(), Some(match_span));
+                    at_syntax::MatchPattern::ResultOk(_, _) => {
+                        has_ok = true;
                     }
-                }
-                at_syntax::MatchPattern::Tuple { items, .. } => {
-                    if let SimpleType::Tuple(inner_items) = &value_ty {
-                        if inner_items.len() != items.len() {
-                            self.push_error(
-                                "match expects tuple with matching length".to_string(),
-                                Some(match_span),
-                            );
-                        } else {
-                            for (item, inner_ty) in items.iter().zip(inner_items.iter()) {
-                                if let at_syntax::MatchPattern::Binding { name, .. } = item {
-                                    self.bind_local(name, inner_ty.clone());
-                                }
-                            }
-                        }
-                    } else if value_ty != SimpleType::Unknown {
-                        self.push_error("match expects tuple value".to_string(), Some(match_span));
+                    at_syntax::MatchPattern::ResultErr(_, _) => {
+                        has_err = true;
                     }
-                }
-                at_syntax::MatchPattern::Struct { name, fields, .. } => {
-                    let struct_fields = self.structs.get(&name.name).cloned();
-                    if struct_fields.is_none() {
-                        self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
+                    at_syntax::MatchPattern::OptionSome(_, _) => {
+                        has_some = true;
                     }
-                    if let SimpleType::Custom(struct_name, _) = &value_ty {
-                        if struct_name != &name.name {
-                            self.push_error(
-                                format!("match expects struct {}, got {}", name.name, struct_name),
-                                Some(match_span),
-                            );
-                        }
-                    } else if value_ty != SimpleType::Unknown {
-                        self.push_error(
-                            format!(
-                                "match expects struct {}, got {}",
-                                name.name,
-                                format_type(&value_ty)
-                            ),
-                            Some(match_span),
-                        );
+                    at_syntax::MatchPattern::OptionNone(_) => {
+                        has_none = true;
                     }
-
-                    if let Some((_, struct_fields)) = struct_fields {
-                        for field in fields {
-                            let binding = field.binding.as_ref().unwrap_or(&field.name);
-                            if binding.name != "_" {
-                                if let Some(expected) = struct_fields
-                                    .iter()
-                                    .find(|entry| entry.name.name == field.name.name)
-                                {
-                                    let expected_ty = self.type_from_ref(&expected.ty);
-                                    self.bind_local(binding, expected_ty);
-                                } else {
-                                    self.push_error(
-                                        format!(
-                                            "unknown field {} on struct {}",
-                                            field.name.name, name.name
-                                        ),
-                                        Some(field.name.span),
-                                    );
-                                }
-                            }
-                        }
+                    at_syntax::MatchPattern::Enum { variant, .. } => {
+                        matched_enum_variants.insert(variant.name.clone());
                     }
-                }
-                at_syntax::MatchPattern::Enum {
-                    name,
-                    variant,
-                    binding,
-                    ..
-                } => {
-                    let enum_variants = self.enums.get(&name.name).cloned();
-                    if enum_variants.is_none() {
-                        self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
+                    at_syntax::MatchPattern::Wildcard(_) => {
+                        has_wildcard = true;
                     }
-                    if let SimpleType::Custom(enum_name, _) = &value_ty {
-                        if enum_name != &name.name {
-                            self.push_error(
-                                format!("match expects enum {}, got {}", name.name, enum_name),
-                                Some(match_span),
-                            );
-                        }
-                    } else if value_ty != SimpleType::Unknown {
-                        self.push_error(
-                            format!(
-                                "match expects enum {}, got {}",
-                                name.name,
-                                format_type(&value_ty)
-                            ),
-                            Some(match_span),
-                        );
-                    }
-
-                    if let Some((_, enum_variants)) = enum_variants {
-                        if let Some(expected) = enum_variants
-                            .iter()
-                            .find(|entry| entry.name.name == variant.name)
-                        {
-                            match (&expected.payload, binding) {
-                                (Some(expected_ty), Some(binding)) => {
-                                    let expected_ty = self.type_from_ref(expected_ty);
-                                    self.bind_local(binding, expected_ty);
-                                }
-                                (None, Some(binding)) => {
-                                    self.push_error(
-                                        format!(
-                                            "enum {}::{} does not take a value",
-                                            name.name, variant.name
-                                        ),
-                                        Some(binding.span),
-                                    );
-                                }
-                                (Some(_), None) => {
-                                    self.push_error(
-                                        format!(
-                                            "enum {}::{} expects a value",
-                                            name.name, variant.name
-                                        ),
-                                        Some(variant.span),
-                                    );
-                                }
-                                (None, None) => {}
-                            }
-                        } else {
-                            self.push_error(
-                                format!("unknown variant {}::{}", name.name, variant.name),
-                                Some(variant.span),
-                            );
-                        }
-                    }
-                }
-                at_syntax::MatchPattern::ResultOk(ident, _) => {
-                    has_ok = true;
-                    if !matches!(value_ty, SimpleType::Result(_, _))
-                        && value_ty != SimpleType::Unknown
-                    {
-                        self.push_error("match expects result value".to_string(), Some(match_span));
-                    }
-                    let ty = result_ok.clone().unwrap_or(SimpleType::Unknown);
-                    self.bind_local(ident, ty);
-                }
-                at_syntax::MatchPattern::ResultErr(ident, _) => {
-                    has_err = true;
-                    if !matches!(value_ty, SimpleType::Result(_, _))
-                        && value_ty != SimpleType::Unknown
-                    {
-                        self.push_error("match expects result value".to_string(), Some(match_span));
-                    }
-                    let ty = result_err.clone().unwrap_or(SimpleType::Unknown);
-                    self.bind_local(ident, ty);
-                }
-                at_syntax::MatchPattern::OptionSome(ident, _) => {
-                    has_some = true;
-                    if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
-                    {
-                        self.push_error("match expects option value".to_string(), Some(match_span));
-                    }
-                    let ty = option_inner.clone().unwrap_or(SimpleType::Unknown);
-                    self.bind_local(ident, ty);
-                }
-                at_syntax::MatchPattern::OptionNone(_) => {
-                    has_none = true;
-                    if !matches!(value_ty, SimpleType::Option(_)) && value_ty != SimpleType::Unknown
-                    {
-                        self.push_error("match expects option value".to_string(), Some(match_span));
-                    }
-                }
-                at_syntax::MatchPattern::Binding { name, pattern, .. } => {
-                    self.bind_local(name, value_ty.clone());
-                    if let at_syntax::MatchPattern::Tuple { items, .. } = pattern.as_ref() {
+                    at_syntax::MatchPattern::Tuple { items, .. } => {
                         if let SimpleType::Tuple(inner_items) = &value_ty {
-                            for (item, inner_ty) in items.iter().zip(inner_items.iter()) {
-                                if let at_syntax::MatchPattern::Binding { name, .. } = item {
-                                    self.bind_local(name, inner_ty.clone());
-                                }
+                            if items.len() == inner_items.len()
+                                && items.iter().all(|item| self.pattern_is_catch_all(item))
+                            {
+                                has_wildcard = true;
                             }
                         }
                     }
-                }
-                at_syntax::MatchPattern::Wildcard(_) => {
-                    has_wildcard = true;
+                    _ => {}
                 }
             }
+
+            self.check_match_pattern(
+                &arm.pattern,
+                &value_ty,
+                match_span,
+                option_inner.as_ref(),
+                result_ok.as_ref(),
+                result_err.as_ref(),
+            );
             if let Some(guard) = &arm.guard {
                 let guard_ty = self.check_expr(guard);
                 if guard_ty != SimpleType::Bool && guard_ty != SimpleType::Unknown {
@@ -2376,6 +2385,47 @@ impl TypeChecker {
                     Some(match_span),
                 );
             }
+            if let Some(enum_name) = enum_name {
+                if let Some((_, variants)) = self.enums.get(&enum_name) {
+                    if matched_enum_variants.len() != variants.len() {
+                        self.push_error(
+                            format!("non-exhaustive match for enum {}", enum_name),
+                            Some(match_span),
+                        );
+                    }
+                }
+            }
+            if value_ty == SimpleType::Bool {
+                let mut has_true = false;
+                let mut has_false = false;
+                for arm in arms {
+                    if arm.guard.is_none() {
+                        let coverage_pattern = self.unwrap_binding_pattern(&arm.pattern);
+                        if let at_syntax::MatchPattern::Bool(value, _) = coverage_pattern {
+                            if *value {
+                                has_true = true;
+                            } else {
+                                has_false = true;
+                            }
+                        }
+                    }
+                }
+                if !(has_true && has_false) {
+                    self.push_error(
+                        "non-exhaustive match for bool".to_string(),
+                        Some(match_span),
+                    );
+                }
+            }
+            if matches!(value_ty, SimpleType::Int) {
+                self.push_error("non-exhaustive match for int".to_string(), Some(match_span));
+            }
+            if matches!(value_ty, SimpleType::String) {
+                self.push_error(
+                    "non-exhaustive match for string".to_string(),
+                    Some(match_span),
+                );
+            }
         }
 
         if let SimpleType::Result(ok, err) = &result_ty {
@@ -2403,11 +2453,24 @@ impl TypeChecker {
                 if !sig.is_async {
                     self.check_function_needs(&ident.name, Some(ident.span));
                 }
+                let mut env = HashMap::new();
+                if !sig.type_params.is_empty() {
+                    for (arg, expected) in args.iter().zip(sig.params.iter()) {
+                        if let Some((param, ty)) = self.infer_type_param(expected, arg) {
+                            env.entry(param).or_insert(ty);
+                        }
+                    }
+                }
                 self.check_call_args(&ident.name, &sig, args, Some(ident.span));
+                let return_ty = if sig.type_params.is_empty() {
+                    sig.return_ty
+                } else {
+                    self.apply_type_params(&sig.return_ty, &env)
+                };
                 return if sig.is_async {
                     SimpleType::Unknown
                 } else {
-                    sig.return_ty
+                    return_ty
                 };
             }
             self.push_error(
@@ -2444,11 +2507,24 @@ impl TypeChecker {
                     if !sig.is_async {
                         self.check_function_needs(&func_name, Some(name.span));
                     }
+                    let mut env = HashMap::new();
+                    if !sig.type_params.is_empty() {
+                        for (arg, expected) in args.iter().zip(sig.params.iter()) {
+                            if let Some((param, ty)) = self.infer_type_param(expected, arg) {
+                                env.entry(param).or_insert(ty);
+                            }
+                        }
+                    }
                     self.check_call_args(&func_name, &sig, args, Some(name.span));
+                    let return_ty = if sig.type_params.is_empty() {
+                        sig.return_ty
+                    } else {
+                        self.apply_type_params(&sig.return_ty, &env)
+                    };
                     return if sig.is_async {
                         SimpleType::Unknown
                     } else {
-                        sig.return_ty
+                        return_ty
                     };
                 }
                 self.push_error(format!("unknown function: {func_name}"), Some(name.span));
@@ -2508,6 +2584,286 @@ impl TypeChecker {
         }
     }
 
+    fn unwrap_binding_pattern<'a>(
+        &self,
+        pattern: &'a at_syntax::MatchPattern,
+    ) -> &'a at_syntax::MatchPattern {
+        match pattern {
+            at_syntax::MatchPattern::Binding { pattern, .. } => {
+                self.unwrap_binding_pattern(pattern)
+            }
+            _ => pattern,
+        }
+    }
+
+    fn pattern_is_catch_all(&self, pattern: &at_syntax::MatchPattern) -> bool {
+        match pattern {
+            at_syntax::MatchPattern::Wildcard(_) => true,
+            at_syntax::MatchPattern::Binding { pattern, .. } => self.pattern_is_catch_all(pattern),
+            at_syntax::MatchPattern::Tuple { items, .. } => {
+                items.iter().all(|item| self.pattern_is_catch_all(item))
+            }
+            _ => false,
+        }
+    }
+
+    fn check_match_pattern(
+        &mut self,
+        pattern: &at_syntax::MatchPattern,
+        expected: &SimpleType,
+        match_span: Span,
+        option_inner: Option<&SimpleType>,
+        result_ok: Option<&SimpleType>,
+        result_err: Option<&SimpleType>,
+    ) {
+        match pattern {
+            at_syntax::MatchPattern::Int(_, _) => {
+                if *expected != SimpleType::Int && *expected != SimpleType::Unknown {
+                    self.push_error("match expects int value".to_string(), Some(match_span));
+                }
+            }
+            at_syntax::MatchPattern::Bool(_, _) => {
+                if *expected != SimpleType::Bool && *expected != SimpleType::Unknown {
+                    self.push_error("match expects bool value".to_string(), Some(match_span));
+                }
+            }
+            at_syntax::MatchPattern::String(_, _) => {
+                if *expected != SimpleType::String && *expected != SimpleType::Unknown {
+                    self.push_error("match expects string value".to_string(), Some(match_span));
+                }
+            }
+            at_syntax::MatchPattern::ResultOk(ident, _) => {
+                if !matches!(expected, SimpleType::Result(_, _)) && *expected != SimpleType::Unknown
+                {
+                    self.push_error("match expects result value".to_string(), Some(match_span));
+                }
+                let ty = match expected {
+                    SimpleType::Result(ok, _) => (**ok).clone(),
+                    SimpleType::Unknown => result_ok.cloned().unwrap_or(SimpleType::Unknown),
+                    _ => SimpleType::Unknown,
+                };
+                self.bind_local(ident, ty);
+            }
+            at_syntax::MatchPattern::ResultErr(ident, _) => {
+                if !matches!(expected, SimpleType::Result(_, _)) && *expected != SimpleType::Unknown
+                {
+                    self.push_error("match expects result value".to_string(), Some(match_span));
+                }
+                let ty = match expected {
+                    SimpleType::Result(_, err) => (**err).clone(),
+                    SimpleType::Unknown => result_err.cloned().unwrap_or(SimpleType::Unknown),
+                    _ => SimpleType::Unknown,
+                };
+                self.bind_local(ident, ty);
+            }
+            at_syntax::MatchPattern::OptionSome(ident, _) => {
+                if !matches!(expected, SimpleType::Option(_)) && *expected != SimpleType::Unknown {
+                    self.push_error("match expects option value".to_string(), Some(match_span));
+                }
+                let ty = match expected {
+                    SimpleType::Option(inner) => (**inner).clone(),
+                    SimpleType::Unknown => option_inner.cloned().unwrap_or(SimpleType::Unknown),
+                    _ => SimpleType::Unknown,
+                };
+                self.bind_local(ident, ty);
+            }
+            at_syntax::MatchPattern::OptionNone(_) => {
+                if !matches!(expected, SimpleType::Option(_)) && *expected != SimpleType::Unknown {
+                    self.push_error("match expects option value".to_string(), Some(match_span));
+                }
+            }
+            at_syntax::MatchPattern::Tuple { items, .. } => {
+                if let SimpleType::Tuple(inner_items) = expected {
+                    if inner_items.len() != items.len() {
+                        self.push_error(
+                            "match expects tuple with matching length".to_string(),
+                            Some(match_span),
+                        );
+                    } else {
+                        for (item, inner_ty) in items.iter().zip(inner_items.iter()) {
+                            self.check_match_pattern(item, inner_ty, match_span, None, None, None);
+                        }
+                    }
+                } else if *expected != SimpleType::Unknown {
+                    self.push_error("match expects tuple value".to_string(), Some(match_span));
+                } else {
+                    for item in items {
+                        self.check_match_pattern(
+                            item,
+                            &SimpleType::Unknown,
+                            match_span,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                }
+            }
+            at_syntax::MatchPattern::Struct { name, fields, .. } => {
+                let struct_fields = self.structs.get(&name.name).cloned();
+                if struct_fields.is_none() {
+                    self.push_error(format!("unknown struct: {}", name.name), Some(name.span));
+                }
+                let mut env = HashMap::new();
+                let mut param_names = HashSet::new();
+                if let (Some((type_params, _)), SimpleType::Custom(struct_name, args)) =
+                    (&struct_fields, expected)
+                {
+                    if struct_name != &name.name {
+                        self.push_error(
+                            format!("match expects struct {}, got {}", name.name, struct_name),
+                            Some(match_span),
+                        );
+                    }
+                    param_names = self.type_param_set(type_params);
+                    env = self.type_env_from_args(type_params, args, Some(name.span));
+                } else if let SimpleType::Custom(struct_name, _) = expected {
+                    if struct_name != &name.name {
+                        self.push_error(
+                            format!("match expects struct {}, got {}", name.name, struct_name),
+                            Some(match_span),
+                        );
+                    }
+                } else if *expected != SimpleType::Unknown {
+                    self.push_error(
+                        format!(
+                            "match expects struct {}, got {}",
+                            name.name,
+                            format_type(expected)
+                        ),
+                        Some(match_span),
+                    );
+                }
+
+                if let Some((type_params, struct_fields)) = struct_fields {
+                    if param_names.is_empty() {
+                        param_names = self.type_param_set(&type_params);
+                    }
+                    for field in fields {
+                        let binding = field.binding.as_ref().unwrap_or(&field.name);
+                        if binding.name == "_" {
+                            continue;
+                        }
+                        if let Some(expected_field) = struct_fields
+                            .iter()
+                            .find(|entry| entry.name.name == field.name.name)
+                        {
+                            let expected_ty = self.type_from_ref_with_env(
+                                &expected_field.ty,
+                                Some(&env),
+                                Some(&param_names),
+                            );
+                            self.bind_local(binding, expected_ty);
+                        } else {
+                            self.push_error(
+                                format!(
+                                    "unknown field {} on struct {}",
+                                    field.name.name, name.name
+                                ),
+                                Some(field.name.span),
+                            );
+                        }
+                    }
+                }
+            }
+            at_syntax::MatchPattern::Enum {
+                name,
+                variant,
+                binding,
+                ..
+            } => {
+                let enum_variants = self.enums.get(&name.name).cloned();
+                if enum_variants.is_none() {
+                    self.push_error(format!("unknown enum: {}", name.name), Some(name.span));
+                }
+                let mut env = HashMap::new();
+                let mut param_names = HashSet::new();
+                if let (Some((type_params, _)), SimpleType::Custom(enum_name, args)) =
+                    (&enum_variants, expected)
+                {
+                    if enum_name != &name.name {
+                        self.push_error(
+                            format!("match expects enum {}, got {}", name.name, enum_name),
+                            Some(match_span),
+                        );
+                    }
+                    param_names = self.type_param_set(type_params);
+                    env = self.type_env_from_args(type_params, args, Some(name.span));
+                } else if let SimpleType::Custom(enum_name, _) = expected {
+                    if enum_name != &name.name {
+                        self.push_error(
+                            format!("match expects enum {}, got {}", name.name, enum_name),
+                            Some(match_span),
+                        );
+                    }
+                } else if *expected != SimpleType::Unknown {
+                    self.push_error(
+                        format!(
+                            "match expects enum {}, got {}",
+                            name.name,
+                            format_type(expected)
+                        ),
+                        Some(match_span),
+                    );
+                }
+
+                if let Some((type_params, enum_variants)) = enum_variants {
+                    if param_names.is_empty() {
+                        param_names = self.type_param_set(&type_params);
+                    }
+                    if let Some(expected_variant) = enum_variants
+                        .iter()
+                        .find(|entry| entry.name.name == variant.name)
+                    {
+                        match (&expected_variant.payload, binding) {
+                            (Some(expected_ty), Some(binding)) => {
+                                let expected_ty = self.type_from_ref_with_env(
+                                    expected_ty,
+                                    Some(&env),
+                                    Some(&param_names),
+                                );
+                                self.bind_local(binding, expected_ty);
+                            }
+                            (None, Some(binding)) => {
+                                self.push_error(
+                                    format!(
+                                        "enum {}::{} does not take a value",
+                                        name.name, variant.name
+                                    ),
+                                    Some(binding.span),
+                                );
+                            }
+                            (Some(_), None) => {
+                                self.push_error(
+                                    format!("enum {}::{} expects a value", name.name, variant.name),
+                                    Some(variant.span),
+                                );
+                            }
+                            (None, None) => {}
+                        }
+                    } else {
+                        self.push_error(
+                            format!("unknown variant {}::{}", name.name, variant.name),
+                            Some(variant.span),
+                        );
+                    }
+                }
+            }
+            at_syntax::MatchPattern::Binding { name, pattern, .. } => {
+                self.bind_local(name, expected.clone());
+                self.check_match_pattern(
+                    pattern,
+                    expected,
+                    match_span,
+                    option_inner,
+                    result_ok,
+                    result_err,
+                );
+            }
+            at_syntax::MatchPattern::Wildcard(_) => {}
+        }
+    }
+
     fn check_call_args(&mut self, name: &str, sig: &FuncSig, args: &[Expr], span: Option<Span>) {
         if sig.params.len() != args.len() {
             self.push_error(
@@ -2533,11 +2889,147 @@ impl TypeChecker {
         }
     }
 
+    fn infer_type_param(
+        &mut self,
+        expected: &SimpleType,
+        arg: &Expr,
+    ) -> Option<(String, SimpleType)> {
+        let arg_ty = self.check_expr(arg);
+        match expected {
+            SimpleType::TypeParam(name) => Some((name.clone(), arg_ty)),
+            SimpleType::Option(inner) => {
+                if let SimpleType::Option(found_inner) = arg_ty {
+                    if let SimpleType::TypeParam(name) = inner.as_ref() {
+                        return Some((name.clone(), (*found_inner).clone()));
+                    }
+                }
+                None
+            }
+            SimpleType::Result(ok, err) => {
+                if let SimpleType::Result(found_ok, found_err) = arg_ty {
+                    if let SimpleType::TypeParam(name) = ok.as_ref() {
+                        return Some((name.clone(), (*found_ok).clone()));
+                    }
+                    if let SimpleType::TypeParam(name) = err.as_ref() {
+                        return Some((name.clone(), (*found_err).clone()));
+                    }
+                }
+                None
+            }
+            SimpleType::Array(inner) => {
+                if let SimpleType::Array(found_inner) = arg_ty {
+                    if let SimpleType::TypeParam(name) = inner.as_ref() {
+                        return Some((name.clone(), (*found_inner).clone()));
+                    }
+                }
+                None
+            }
+            SimpleType::Map(key, value) => {
+                if let SimpleType::Map(found_key, found_value) = arg_ty {
+                    if let SimpleType::TypeParam(name) = key.as_ref() {
+                        return Some((name.clone(), (*found_key).clone()));
+                    }
+                    if let SimpleType::TypeParam(name) = value.as_ref() {
+                        return Some((name.clone(), (*found_value).clone()));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn apply_type_params(&self, ty: &SimpleType, env: &HashMap<String, SimpleType>) -> SimpleType {
+        match ty {
+            SimpleType::TypeParam(name) => env.get(name).cloned().unwrap_or(SimpleType::Unknown),
+            SimpleType::Array(inner) => {
+                SimpleType::Array(Box::new(self.apply_type_params(inner, env)))
+            }
+            SimpleType::Option(inner) => {
+                SimpleType::Option(Box::new(self.apply_type_params(inner, env)))
+            }
+            SimpleType::Result(ok, err) => SimpleType::Result(
+                Box::new(self.apply_type_params(ok, env)),
+                Box::new(self.apply_type_params(err, env)),
+            ),
+            SimpleType::Function(params, ret) => SimpleType::Function(
+                params
+                    .iter()
+                    .map(|param| self.apply_type_params(param, env))
+                    .collect(),
+                Box::new(self.apply_type_params(ret, env)),
+            ),
+            SimpleType::Tuple(items) => SimpleType::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.apply_type_params(item, env))
+                    .collect(),
+            ),
+            SimpleType::Map(key, value) => SimpleType::Map(
+                Box::new(self.apply_type_params(key, env)),
+                Box::new(self.apply_type_params(value, env)),
+            ),
+            SimpleType::Union(types) => SimpleType::Union(
+                types
+                    .iter()
+                    .map(|ty| self.apply_type_params(ty, env))
+                    .collect(),
+            ),
+            SimpleType::Intersection(types) => SimpleType::Intersection(
+                types
+                    .iter()
+                    .map(|ty| self.apply_type_params(ty, env))
+                    .collect(),
+            ),
+            SimpleType::Custom(name, args) => SimpleType::Custom(
+                name.clone(),
+                args.iter()
+                    .map(|arg| self.apply_type_params(arg, env))
+                    .collect(),
+            ),
+            SimpleType::Generator(inner) => {
+                SimpleType::Generator(Box::new(self.apply_type_params(inner, env)))
+            }
+            SimpleType::Int
+            | SimpleType::Float
+            | SimpleType::Bool
+            | SimpleType::String
+            | SimpleType::Unit
+            | SimpleType::Unknown => ty.clone(),
+        }
+    }
+
     fn bind_or_refine_local(&mut self, name: &Ident, ty: SimpleType) {
         for scope in self.locals.iter_mut().rev() {
             if let Some(existing) = scope.get_mut(&name.name) {
                 if matches!(*existing, SimpleType::Unknown) && !matches!(ty, SimpleType::Unknown) {
                     *existing = ty;
+                    return;
+                }
+                match (&mut *existing, &ty) {
+                    (SimpleType::Option(existing_inner), SimpleType::Option(new_inner)) => {
+                        if matches!(**existing_inner, SimpleType::Unknown)
+                            && !matches!(**new_inner, SimpleType::Unknown)
+                        {
+                            *existing_inner = Box::new((**new_inner).clone());
+                        }
+                    }
+                    (
+                        SimpleType::Result(existing_ok, existing_err),
+                        SimpleType::Result(new_ok, new_err),
+                    ) => {
+                        if matches!(**existing_ok, SimpleType::Unknown)
+                            && !matches!(**new_ok, SimpleType::Unknown)
+                        {
+                            *existing_ok = Box::new((**new_ok).clone());
+                        }
+                        if matches!(**existing_err, SimpleType::Unknown)
+                            && !matches!(**new_err, SimpleType::Unknown)
+                        {
+                            *existing_err = Box::new((**new_err).clone());
+                        }
+                    }
+                    _ => {}
                 }
                 return;
             }
@@ -3182,18 +3674,12 @@ impl TypeChecker {
     fn push_scope(&mut self) {
         self.locals.push(HashMap::new());
         self.consts.push(HashSet::new());
-        self.option_inner.push(HashMap::new());
-        self.result_ok.push(HashMap::new());
-        self.result_err.push(HashMap::new());
         self.capabilities.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.locals.pop();
         self.consts.pop();
-        self.option_inner.pop();
-        self.result_ok.pop();
-        self.result_err.pop();
         self.capabilities.pop();
     }
 
@@ -3243,56 +3729,7 @@ impl TypeChecker {
             .any(|scope| scope.contains(&name.name))
     }
 
-    fn bind_inner_types(&mut self, name: &Ident, ty: &SimpleType) {
-        if let SimpleType::Option(inner) = ty {
-            if let Some(scope) = self.option_inner.last_mut() {
-                scope.insert(name.name.clone(), (**inner).clone());
-            }
-        }
-        if let SimpleType::Result(ok, err) = ty {
-            if let Some(scope) = self.result_ok.last_mut() {
-                scope.insert(name.name.clone(), (**ok).clone());
-            }
-            if let Some(scope) = self.result_err.last_mut() {
-                scope.insert(name.name.clone(), (**err).clone());
-            }
-        }
-    }
-
-    fn find_local_scope_index(&self, name: &str) -> Option<usize> {
-        self.locals
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, scope)| scope.contains_key(name).then_some(index))
-    }
-
-    fn lookup_option_inner(&self, name: &str) -> Option<SimpleType> {
-        for scope in self.option_inner.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
-
-    fn lookup_result_ok(&self, name: &str) -> Option<SimpleType> {
-        for scope in self.result_ok.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
-
-    fn lookup_result_err(&self, name: &str) -> Option<SimpleType> {
-        for scope in self.result_err.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
+    fn bind_inner_types(&mut self, _name: &Ident, _ty: &SimpleType) {}
 
     fn update_return_option_inner(&mut self, span: Option<Span>) {
         if let Some(inner) = self.last_option_inner.clone() {
@@ -3399,7 +3836,10 @@ impl TypeChecker {
             _ => return,
         };
         if matches!(self.current_return, SimpleType::Option(_)) {
-            if let Some(inner) = self.lookup_option_inner(&ident.name) {
+            if let Some(inner) = self.resolve_local(ident).and_then(|ty| match ty {
+                SimpleType::Option(inner) => Some((*inner).clone()),
+                _ => None,
+            }) {
                 let existing = self.return_option_inner.clone();
                 if let Some(existing) = existing {
                     self.check_inner_compatible(
@@ -3414,7 +3854,10 @@ impl TypeChecker {
             }
         }
         if matches!(self.current_return, SimpleType::Result(_, _)) {
-            if let Some(inner) = self.lookup_result_ok(&ident.name) {
+            if let Some(inner) = self.resolve_local(ident).and_then(|ty| match ty {
+                SimpleType::Result(ok, _) => Some((*ok).clone()),
+                _ => None,
+            }) {
                 let existing = self.return_result_ok.clone();
                 if let Some(existing) = existing {
                     self.check_inner_compatible(
@@ -3427,7 +3870,10 @@ impl TypeChecker {
                     self.return_result_ok = Some(inner);
                 }
             }
-            if let Some(inner) = self.lookup_result_err(&ident.name) {
+            if let Some(inner) = self.resolve_local(ident).and_then(|ty| match ty {
+                SimpleType::Result(_, err) => Some((*err).clone()),
+                _ => None,
+            }) {
                 let existing = self.return_result_err.clone();
                 if let Some(existing) = existing {
                     self.check_inner_compatible(
@@ -3451,7 +3897,7 @@ impl TypeChecker {
                 if name.name != "option" || args.len() != 1 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[0]))
+                Some(self.type_from_ref_with_env(&args[0], None, None))
             }
             _ => None,
         }
@@ -3464,7 +3910,7 @@ impl TypeChecker {
                 if name.name != "option" || args.len() != 1 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[0]))
+                Some(self.type_from_ref_with_env(&args[0], None, None))
             }
             _ => None,
         }
@@ -3478,7 +3924,7 @@ impl TypeChecker {
                 if name.name != "result" || args.len() != 2 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[0]))
+                Some(self.type_from_ref_with_env(&args[0], None, None))
             }
             _ => None,
         }
@@ -3491,7 +3937,7 @@ impl TypeChecker {
                 if name.name != "result" || args.len() != 2 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[0]))
+                Some(self.type_from_ref_with_env(&args[0], None, None))
             }
             _ => None,
         }
@@ -3505,7 +3951,7 @@ impl TypeChecker {
                 if name.name != "result" || args.len() != 2 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[1]))
+                Some(self.type_from_ref_with_env(&args[1], None, None))
             }
             _ => None,
         }
@@ -3518,7 +3964,7 @@ impl TypeChecker {
                 if name.name != "result" || args.len() != 2 {
                     return None;
                 }
-                Some(self.type_from_ref(&args[1]))
+                Some(self.type_from_ref_with_env(&args[1], None, None))
             }
             _ => None,
         }
@@ -3527,12 +3973,14 @@ impl TypeChecker {
     fn infer_inner_from_expr(&mut self, expr: &Expr, ty: &SimpleType) {
         match expr {
             Expr::Ident(ident) => {
-                if matches!(ty, SimpleType::Option(_)) {
-                    self.last_option_inner = self.lookup_option_inner(&ident.name);
-                }
-                if matches!(ty, SimpleType::Result(_, _)) {
-                    self.last_result_ok = self.lookup_result_ok(&ident.name);
-                    self.last_result_err = self.lookup_result_err(&ident.name);
+                if let Some(ty) = self.resolve_local(ident) {
+                    if let SimpleType::Option(ref inner) = ty {
+                        self.last_option_inner = Some((**inner).clone());
+                    }
+                    if let SimpleType::Result(ref ok, ref err) = ty {
+                        self.last_result_ok = Some((**ok).clone());
+                        self.last_result_err = Some((**err).clone());
+                    }
                 }
             }
             Expr::Match { .. } => {
@@ -3575,13 +4023,31 @@ impl TypeChecker {
             .unwrap_or(false)
     }
 
-    fn type_from_ref(&mut self, ty: &TypeRef) -> SimpleType {
+    fn type_from_ref_with_env(
+        &mut self,
+        ty: &TypeRef,
+        env: Option<&HashMap<String, SimpleType>>,
+        params: Option<&HashSet<String>>,
+    ) -> SimpleType {
         self.validate_type_ref(ty);
         match ty {
-            TypeRef::Qualified { ty, .. } => self.type_from_ref(ty),
+            TypeRef::Qualified { ty, .. } => self.type_from_ref_with_env(ty, env, params),
             TypeRef::Named { name, args } => {
+                if let Some(params) = params {
+                    if params.contains(&name.name) {
+                        if let Some(env) = env {
+                            return env.get(&name.name).cloned().unwrap_or(SimpleType::Unknown);
+                        }
+                        return SimpleType::TypeParam(name.name.clone());
+                    }
+                }
                 if let Some(alias) = self.resolve_alias(name) {
-                    return self.type_from_ref(&alias);
+                    return self.type_from_ref_with_env(&alias, env, params);
+                }
+                if let Some(current) = self.current_type_params() {
+                    if current.contains(&name.name) {
+                        return SimpleType::TypeParam(name.name.clone());
+                    }
                 }
                 match name.name.as_str() {
                     "int" => SimpleType::Int,
@@ -3592,63 +4058,112 @@ impl TypeChecker {
                     "array" => {
                         let inner = args
                             .get(0)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         SimpleType::Array(Box::new(inner))
                     }
                     "option" => {
                         let inner = args
                             .get(0)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         SimpleType::Option(Box::new(inner))
                     }
                     "result" => {
                         let ok = args
                             .get(0)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         let err = args
                             .get(1)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         SimpleType::Result(Box::new(ok), Box::new(err))
                     }
                     "map" => {
                         let key = args
                             .get(0)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         let value = args
                             .get(1)
-                            .map(|arg| self.type_from_ref(arg))
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
                             .unwrap_or(SimpleType::Unknown);
                         SimpleType::Map(Box::new(key), Box::new(value))
                     }
                     other => {
-                        let args = args.iter().map(|arg| self.type_from_ref(arg)).collect();
+                        let args = args
+                            .iter()
+                            .map(|arg| self.type_from_ref_with_env(arg, env, params))
+                            .collect();
                         SimpleType::Custom(other.to_string(), args)
                     }
                 }
             }
-            TypeRef::Union { types } => {
-                SimpleType::Union(types.iter().map(|ty| self.type_from_ref(ty)).collect())
-            }
-            TypeRef::Intersection { types } => {
-                SimpleType::Intersection(types.iter().map(|ty| self.type_from_ref(ty)).collect())
-            }
-            TypeRef::Tuple { items, .. } => {
-                SimpleType::Tuple(items.iter().map(|item| self.type_from_ref(item)).collect())
-            }
-            TypeRef::Function {
-                params, return_ty, ..
-            } => SimpleType::Function(
-                params
+            TypeRef::Union { types } => SimpleType::Union(
+                types
                     .iter()
-                    .map(|param| self.type_from_ref(param))
+                    .map(|ty| self.type_from_ref_with_env(ty, env, params))
                     .collect(),
-                Box::new(self.type_from_ref(return_ty)),
             ),
+            TypeRef::Intersection { types } => SimpleType::Intersection(
+                types
+                    .iter()
+                    .map(|ty| self.type_from_ref_with_env(ty, env, params))
+                    .collect(),
+            ),
+            TypeRef::Tuple { items, .. } => SimpleType::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.type_from_ref_with_env(item, env, params))
+                    .collect(),
+            ),
+            TypeRef::Function {
+                params: params_ref,
+                return_ty,
+                ..
+            } => SimpleType::Function(
+                params_ref
+                    .iter()
+                    .map(|param| self.type_from_ref_with_env(param, env, params))
+                    .collect(),
+                Box::new(self.type_from_ref_with_env(return_ty, env, params)),
+            ),
+        }
+    }
+
+    fn type_param_set(&self, params: &[Ident]) -> HashSet<String> {
+        params.iter().map(|param| param.name.clone()).collect()
+    }
+
+    fn type_env_from_args(
+        &mut self,
+        params: &[Ident],
+        args: &[SimpleType],
+        span: Option<Span>,
+    ) -> HashMap<String, SimpleType> {
+        let mut env = HashMap::new();
+        if params.len() != args.len() && !args.is_empty() {
+            self.push_error(
+                format!(
+                    "type argument count mismatch: expected {}, got {}",
+                    params.len(),
+                    args.len()
+                ),
+                span,
+            );
+        }
+        for (param, arg) in params.iter().zip(args.iter()) {
+            env.insert(param.name.clone(), arg.clone());
+        }
+        env
+    }
+
+    fn infer_type_param_name(&self, ty: &TypeRef, params: &HashSet<String>) -> Option<String> {
+        match ty {
+            TypeRef::Named { name, .. } if params.contains(&name.name) => Some(name.name.clone()),
+            TypeRef::Qualified { ty, .. } => self.infer_type_param_name(ty, params),
+            _ => None,
         }
     }
 
@@ -3824,6 +4339,7 @@ fn format_type(ty: &SimpleType) -> String {
                 format!("{}<{}>", name, args)
             }
         }
+        SimpleType::TypeParam(name) => name.clone(),
         SimpleType::Unknown => "unknown".to_string(),
     }
 }

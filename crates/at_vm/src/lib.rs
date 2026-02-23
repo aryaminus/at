@@ -7,6 +7,7 @@ use at_parser::parse_module;
 use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
 use ureq;
 use uuid::Uuid;
 
@@ -44,7 +45,7 @@ pub struct FutureValue {
     func_id: usize,
     captures: Vec<Value>,
     args: Vec<Value>,
-    capabilities: HashSet<String>,
+    capabilities: HashSet<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,7 +53,7 @@ pub struct GeneratorValue {
     func_id: usize,
     captures: Vec<Value>,
     args: Vec<Value>,
-    capabilities: HashSet<String>,
+    capabilities: HashSet<usize>,
     frames: Vec<Frame>,
     stack: Vec<Value>,
     done: bool,
@@ -122,7 +123,7 @@ pub enum Op {
     Const(usize),
     LoadLocal(usize),
     StoreLocal(usize),
-    GrantCapability(String),
+    GrantCapability(usize),
     PushCapabilityScope,
     PopCapabilityScope,
     Call(usize, usize),
@@ -269,6 +270,37 @@ impl Chunk {
         self.constants.push(value);
         index
     }
+
+    fn rewrite_jumps(&mut self, mapping: &[usize]) {
+        for op in &mut self.code {
+            match op {
+                Op::Jump(target) | Op::JumpIfFalse(target) => {
+                    let mapped = mapping.get(*target).copied().unwrap_or(*target);
+                    *target = mapped;
+                }
+                Op::MatchResultOk(target)
+                | Op::MatchResultErr(target)
+                | Op::MatchOptionSome(target)
+                | Op::MatchOptionNone(target) => {
+                    let mapped = mapping.get(*target).copied().unwrap_or(*target);
+                    *target = mapped;
+                }
+                Op::MatchStruct(_, target)
+                | Op::MatchInt(_, target)
+                | Op::MatchBool(_, target)
+                | Op::MatchString(_, target)
+                | Op::MatchTuple(_, target) => {
+                    let mapped = mapping.get(*target).copied().unwrap_or(*target);
+                    *target = mapped;
+                }
+                Op::MatchEnum { target, .. } => {
+                    let mapped = mapping.get(*target).copied().unwrap_or(*target);
+                    *target = mapped;
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,7 +309,7 @@ pub struct FunctionChunk {
     pub params: usize,
     pub captures: usize,
     pub locals: usize,
-    pub needs: Vec<String>,
+    pub needs: Vec<usize>,
     pub is_async: bool,
     pub is_generator: bool,
     pub stmts: Vec<Stmt>,
@@ -291,6 +323,7 @@ pub struct Program {
     pub main_locals: usize,
     pub sources: HashMap<String, String>,
     pub entry: Option<String>,
+    pub capability_names: Vec<String>,
 }
 
 impl Program {
@@ -303,6 +336,220 @@ impl Program {
     }
 }
 
+fn optimize_program(program: &mut Program) {
+    optimize_chunk(&mut program.main);
+    for func in &mut program.functions {
+        optimize_chunk(&mut func.chunk);
+    }
+    ensure_capability_order(program);
+}
+
+fn optimize_chunk(chunk: &mut Chunk) {
+    simplify_jump_chains(chunk);
+    remove_noop_jumps(chunk);
+    remove_dead_code(chunk);
+    remove_trailing_unreachable(chunk);
+}
+
+fn remove_trailing_unreachable(chunk: &mut Chunk) {
+    let mut new_len = chunk.code.len();
+    for (idx, op) in chunk.code.iter().enumerate() {
+        if matches!(op, Op::Return | Op::Halt) {
+            new_len = idx + 1;
+            break;
+        }
+    }
+    chunk.code.truncate(new_len);
+    chunk.spans.truncate(new_len);
+}
+
+fn remove_dead_code(chunk: &mut Chunk) {
+    let len = chunk.code.len();
+    if len == 0 {
+        return;
+    }
+    let mut reachable = vec![false; len];
+    let mut work = vec![0usize];
+    while let Some(ip) = work.pop() {
+        if ip >= len || reachable[ip] {
+            continue;
+        }
+        reachable[ip] = true;
+        match &chunk.code[ip] {
+            Op::Jump(target)
+            | Op::JumpIfFalse(target)
+            | Op::MatchResultOk(target)
+            | Op::MatchResultErr(target)
+            | Op::MatchOptionSome(target)
+            | Op::MatchOptionNone(target)
+            | Op::MatchStruct(_, target)
+            | Op::MatchInt(_, target)
+            | Op::MatchBool(_, target)
+            | Op::MatchString(_, target)
+            | Op::MatchTuple(_, target) => {
+                work.push(*target);
+                work.push(ip + 1);
+            }
+            Op::MatchEnum { target, .. } => {
+                work.push(*target);
+                work.push(ip + 1);
+            }
+            Op::Return | Op::Halt => {}
+            _ => {
+                work.push(ip + 1);
+            }
+        }
+    }
+
+    if reachable.iter().all(|flag| *flag) {
+        return;
+    }
+
+    let mut mapping = vec![0usize; len];
+    let mut new_code = Vec::with_capacity(len);
+    let mut new_spans = Vec::with_capacity(len);
+    let mut next_index = 0usize;
+    for (idx, is_live) in reachable.iter().enumerate() {
+        if *is_live {
+            mapping[idx] = next_index;
+            next_index += 1;
+            new_code.push(chunk.code[idx].clone());
+            new_spans.push(chunk.spans[idx]);
+        } else {
+            mapping[idx] = next_index.saturating_sub(1);
+        }
+    }
+    chunk.code = new_code;
+    chunk.spans = new_spans;
+    chunk.rewrite_jumps(&mapping);
+}
+
+fn simplify_jump_chains(chunk: &mut Chunk) {
+    let len = chunk.code.len();
+    if len == 0 {
+        return;
+    }
+    let mut resolved = Vec::with_capacity(len);
+    for op in &chunk.code {
+        if let Op::Jump(target) = op {
+            resolved.push(resolve_jump_target(&chunk.code, *target));
+        } else {
+            resolved.push(usize::MAX);
+        }
+    }
+    for (op, target) in chunk.code.iter_mut().zip(resolved.into_iter()) {
+        if let Op::Jump(current) = op {
+            if target != usize::MAX {
+                *current = target;
+            }
+        }
+    }
+}
+
+fn resolve_jump_target(code: &[Op], mut target: usize) -> usize {
+    let len = code.len();
+    let mut hops = 0usize;
+    while target < len {
+        match code.get(target) {
+            Some(Op::Jump(next)) => {
+                if *next == target {
+                    break;
+                }
+                target = *next;
+                hops += 1;
+                if hops > len {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    target
+}
+
+fn remove_noop_jumps(chunk: &mut Chunk) {
+    let len = chunk.code.len();
+    if len == 0 {
+        return;
+    }
+    let mut mapping = vec![0usize; len + 1];
+    let mut new_code = Vec::with_capacity(len);
+    let mut new_spans = Vec::with_capacity(len);
+    let mut next_index = 0usize;
+    for (idx, op) in chunk.code.iter().enumerate() {
+        let remove = matches!(op, Op::Jump(target) if *target == idx + 1);
+        if remove {
+            mapping[idx] = next_index;
+            continue;
+        }
+        mapping[idx] = next_index;
+        next_index += 1;
+        new_code.push(op.clone());
+        new_spans.push(chunk.spans[idx]);
+    }
+    mapping[len] = next_index;
+    if new_code.len() == len {
+        return;
+    }
+    chunk.code = new_code;
+    chunk.spans = new_spans;
+    chunk.rewrite_jumps(&mapping);
+}
+
+fn ensure_capability_order(program: &mut Program) {
+    let preferred = ["time", "rng"];
+    if preferred.len() <= 1 || program.capability_names.is_empty() {
+        return;
+    }
+    let mut mapping = Vec::with_capacity(program.capability_names.len());
+    let mut new_names = Vec::with_capacity(program.capability_names.len());
+    let mut assigned = HashMap::new();
+    let mut next_index = 0usize;
+    for name in preferred {
+        if let Some(index) = program.capability_names.iter().position(|n| n == name) {
+            assigned.insert(index, next_index);
+            new_names.push(name.to_string());
+            next_index += 1;
+        }
+    }
+    for (index, name) in program.capability_names.iter().enumerate() {
+        if assigned.contains_key(&index) {
+            continue;
+        }
+        assigned.insert(index, next_index);
+        new_names.push(name.clone());
+        next_index += 1;
+    }
+    mapping.resize(program.capability_names.len(), 0);
+    for (old, new) in assigned {
+        if old < mapping.len() {
+            mapping[old] = new;
+        }
+    }
+    program.capability_names = new_names;
+    for func in &mut program.functions {
+        for need in &mut func.needs {
+            if let Some(mapped) = mapping.get(*need) {
+                *need = *mapped;
+            }
+        }
+    }
+    for chunk in program
+        .functions
+        .iter_mut()
+        .map(|func| &mut func.chunk)
+        .chain(std::iter::once(&mut program.main))
+    {
+        for op in &mut chunk.code {
+            if let Op::GrantCapability(id) = op {
+                if let Some(mapped) = mapping.get(*id) {
+                    *id = *mapped;
+                }
+            }
+        }
+    }
+}
+
 impl Default for Program {
     fn default() -> Self {
         Self {
@@ -311,6 +558,7 @@ impl Default for Program {
             main_locals: 0,
             sources: HashMap::new(),
             entry: None,
+            capability_names: Vec::new(),
         }
     }
 }
@@ -359,6 +607,19 @@ pub enum VmError {
     },
 }
 
+impl fmt::Display for VmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VmError::StackUnderflow => write!(f, "stack underflow"),
+            VmError::Compile { message, .. } => write!(f, "compile error: {message}"),
+            VmError::Runtime { message, .. } => write!(f, "runtime error: {message}"),
+            VmError::ExecutionLimit { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for VmError {}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StackFrame {
     pub name: String,
@@ -375,7 +636,7 @@ pub struct Compiler {
     next_local: usize,
     functions: HashMap<String, usize>,
     function_arity: HashMap<String, usize>,
-    function_needs: HashMap<String, Vec<String>>,
+    function_needs: HashMap<String, Vec<usize>>,
     function_async: HashMap<String, bool>,
     function_generator: HashMap<String, bool>,
     structs: HashSet<String>,
@@ -385,6 +646,8 @@ pub struct Compiler {
     synthetic_id: usize,
     base_function_count: usize,
     closure_chunks: Vec<FunctionChunk>,
+    capability_ids: HashMap<String, usize>,
+    capability_names: Vec<String>,
 }
 
 impl Compiler {
@@ -564,6 +827,8 @@ impl Compiler {
             synthetic_id: 0,
             base_function_count: 0,
             closure_chunks: Vec::new(),
+            capability_ids: HashMap::new(),
+            capability_names: Vec::new(),
         }
     }
 
@@ -583,6 +848,8 @@ impl Compiler {
         self.current_function = None;
         self.closure_chunks.clear();
         self.base_function_count = module.functions.len();
+        self.capability_ids.clear();
+        self.capability_names.clear();
 
         for stmt in &module.stmts {
             match stmt {
@@ -621,7 +888,11 @@ impl Compiler {
                 .any(|stmt| matches!(stmt, Stmt::Yield { .. }));
             self.function_generator
                 .insert(func.name.name.clone(), is_generator);
-            let needs: Vec<String> = func.needs.iter().map(|ident| ident.name.clone()).collect();
+            let needs: Vec<usize> = func
+                .needs
+                .iter()
+                .map(|ident| self.capability_id(&ident.name))
+                .collect();
             self.function_needs
                 .insert(func.name.name.clone(), needs.clone());
             let is_generator = func
@@ -663,43 +934,52 @@ impl Compiler {
         }
 
         self.propagate_transitive_needs(&mut program);
+        optimize_program(&mut program);
+        program.capability_names = self.capability_names.clone();
 
         Ok(program)
     }
 
+    fn capability_id(&mut self, name: &str) -> usize {
+        if let Some(existing) = self.capability_ids.get(name) {
+            return *existing;
+        }
+        let id = self.capability_names.len();
+        self.capability_names.push(name.to_string());
+        self.capability_ids.insert(name.to_string(), id);
+        id
+    }
+
     fn propagate_transitive_needs(&mut self, program: &mut Program) {
+        let mut needs_sets: Vec<std::collections::HashSet<usize>> = program
+            .functions
+            .iter()
+            .map(|func| func.needs.iter().cloned().collect())
+            .collect();
         loop {
             let mut changed = false;
-            let functions_needs: Vec<(usize, Vec<String>)> = program
-                .functions
-                .iter()
-                .enumerate()
-                .map(|(id, func)| {
-                    let mut needs = func.needs.clone();
-                    for op in &func.chunk.code {
-                        if let Op::Call(func_id, _) = op {
-                            if *func_id < program.functions.len() {
-                                let callee_needs = &program.functions[*func_id].needs;
-                                for need in callee_needs {
-                                    if !needs.contains(need) {
-                                        needs.push(need.clone());
-                                    }
-                                }
-                            }
+            for (id, func) in program.functions.iter().enumerate() {
+                let mut updated = needs_sets[id].clone();
+                for op in &func.chunk.code {
+                    if let Op::Call(func_id, _) = op {
+                        if *func_id < needs_sets.len() {
+                            updated.extend(needs_sets[*func_id].iter().cloned());
                         }
                     }
-                    (id, needs)
-                })
-                .collect();
-            for (id, needs) in functions_needs {
-                if needs != program.functions[id].needs {
-                    program.functions[id].needs = needs;
+                }
+                if updated.len() != needs_sets[id].len() {
+                    needs_sets[id] = updated;
                     changed = true;
                 }
             }
             if !changed {
                 break;
             }
+        }
+        for (id, set) in needs_sets.into_iter().enumerate() {
+            let mut needs: Vec<usize> = set.into_iter().collect();
+            needs.sort();
+            program.functions[id].needs = needs;
         }
     }
 
@@ -774,7 +1054,8 @@ impl Compiler {
                 self.compile_expr(value, chunk)?;
                 let slot = self.bind_local_checked(&name.name, name.span)?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
-                chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
+                let cap_id = self.capability_id(&name.name);
+                chunk.push(Op::GrantCapability(cap_id), Some(name.span));
             }
             Stmt::With {
                 name, value, body, ..
@@ -783,7 +1064,8 @@ impl Compiler {
                 self.compile_expr(value, chunk)?;
                 let slot = self.bind_local_checked(&name.name, name.span)?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
-                chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
+                let cap_id = self.capability_id(&name.name);
+                chunk.push(Op::GrantCapability(cap_id), Some(name.span));
                 self.push_scope();
                 for stmt in body {
                     self.compile_stmt(stmt, chunk)?;
@@ -2935,16 +3217,16 @@ struct Frame {
     chunk_id: usize,
     ip: usize,
     locals: Vec<Value>,
-    capabilities: HashSet<String>,
+    capabilities: HashSet<usize>,
     defers: Vec<usize>,
-    capability_scopes: Vec<Vec<String>>,
+    capability_scopes: Vec<Vec<usize>>,
 }
 
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     locals_pool: Vec<Vec<Value>>,
-    initial_capabilities: HashSet<String>,
+    initial_capabilities: HashSet<usize>,
     instruction_count: usize,
     max_instructions: Option<usize>,
     max_frames: Option<usize>,
@@ -2959,6 +3241,14 @@ enum ExecutionMode {
 }
 
 impl Vm {
+    fn capability_id_for_name(name: &str) -> Option<usize> {
+        match name {
+            "time" => Some(0),
+            "rng" => Some(1),
+            _ => None,
+        }
+    }
+
     fn run_future(&mut self, program: &Program, future: &FutureValue) -> Result<Value, VmError> {
         let func = program.functions.get(future.func_id).ok_or_else(|| {
             self.runtime_error(
@@ -3119,11 +3409,17 @@ impl Vm {
     }
 
     pub fn with_capabilities(capabilities: HashSet<String>) -> Self {
+        let mut ids = HashSet::new();
+        for capability in capabilities {
+            if let Some(id) = Self::capability_id_for_name(&capability) {
+                ids.insert(id);
+            }
+        }
         Self {
             stack: Vec::with_capacity(256),
             frames: Vec::with_capacity(64),
             locals_pool: Vec::new(),
-            initial_capabilities: capabilities,
+            initial_capabilities: ids,
             instruction_count: 0,
             max_instructions: None,
             max_frames: None,
@@ -3328,9 +3624,9 @@ impl Vm {
                     self.frames[frame_index].locals[*slot] = value;
                 }
                 Op::GrantCapability(name) => {
-                    self.frames[frame_index].capabilities.insert(name.clone());
+                    self.frames[frame_index].capabilities.insert(*name);
                     if let Some(scope) = self.frames[frame_index].capability_scopes.last_mut() {
-                        scope.push(name.clone());
+                        scope.push(*name);
                     }
                 }
                 Op::PushCapabilityScope => {
@@ -3380,8 +3676,13 @@ impl Vm {
                     }
                     for need in &func.needs {
                         if !self.frames[frame_index].capabilities.contains(need) {
+                            let label = program
+                                .capability_names
+                                .get(*need)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".to_string());
                             return Err(runtime_error_at(
-                                format!("missing capability: {}", need),
+                                format!("missing capability: {}", label),
                                 span_at(chunk, frame_ip),
                             ));
                         }
@@ -3572,8 +3873,13 @@ impl Vm {
                     }
                     for need in &func.needs {
                         if !self.frames[frame_index].capabilities.contains(need) {
+                            let label = program
+                                .capability_names
+                                .get(*need)
+                                .cloned()
+                                .unwrap_or_else(|| "unknown".to_string());
                             return Err(runtime_error_at(
-                                format!("missing capability: {}", need),
+                                format!("missing capability: {}", label),
                                 span_at(chunk, frame_ip),
                             ));
                         }
@@ -3605,7 +3911,11 @@ impl Vm {
                 Op::Builtin(builtin) => {
                     let result = match builtin {
                         Builtin::TimeNow => {
-                            if !self.frames[frame_index].capabilities.contains("time") {
+                            let time_id = Vm::capability_id_for_name("time");
+                            if time_id
+                                .map(|id| !self.frames[frame_index].capabilities.contains(&id))
+                                .unwrap_or(true)
+                            {
                                 return Err(runtime_error_at(
                                     "missing capability: time".to_string(),
                                     span_at(chunk, frame_ip),
@@ -3644,7 +3954,11 @@ impl Vm {
                             }
                         }
                         Builtin::RngUuid => {
-                            if !self.frames[frame_index].capabilities.contains("rng") {
+                            let rng_id = Vm::capability_id_for_name("rng");
+                            if rng_id
+                                .map(|id| !self.frames[frame_index].capabilities.contains(&id))
+                                .unwrap_or(true)
+                            {
                                 return Err(runtime_error_at(
                                     "missing capability: rng".to_string(),
                                     span_at(chunk, frame_ip),

@@ -28,6 +28,7 @@ pub enum LintRule {
     UnusedImportAlias,
     DuplicateImportPath,
     ImportOrder,
+    MissingImportPath,
     DuplicateFunction,
     UnusedFunction,
     UnusedLocal,
@@ -37,6 +38,14 @@ pub enum LintRule {
     ShadowedBinding,
     MissingReturn,
     DeadBranch,
+    NamingConvention,
+    UnusedSetTarget,
+    InfiniteLoop,
+    BooleanLiteralComparison,
+    EmptyBody,
+    FunctionLength,
+    NestingDepth,
+    CyclomaticComplexity,
 }
 
 impl LintRule {
@@ -46,6 +55,7 @@ impl LintRule {
             "unused_import_alias" => Some(LintRule::UnusedImportAlias),
             "duplicate_import_path" => Some(LintRule::DuplicateImportPath),
             "import_order" => Some(LintRule::ImportOrder),
+            "missing_import_path" => Some(LintRule::MissingImportPath),
             "duplicate_function" => Some(LintRule::DuplicateFunction),
             "unused_function" => Some(LintRule::UnusedFunction),
             "unused_local" => Some(LintRule::UnusedLocal),
@@ -55,6 +65,14 @@ impl LintRule {
             "shadowed_binding" => Some(LintRule::ShadowedBinding),
             "missing_return" => Some(LintRule::MissingReturn),
             "dead_branch" => Some(LintRule::DeadBranch),
+            "naming_convention" => Some(LintRule::NamingConvention),
+            "unused_set_target" => Some(LintRule::UnusedSetTarget),
+            "infinite_loop" => Some(LintRule::InfiniteLoop),
+            "boolean_literal_comparison" => Some(LintRule::BooleanLiteralComparison),
+            "empty_body" => Some(LintRule::EmptyBody),
+            "function_length" => Some(LintRule::FunctionLength),
+            "nesting_depth" => Some(LintRule::NestingDepth),
+            "cyclomatic_complexity" => Some(LintRule::CyclomaticComplexity),
             _ => None,
         }
     }
@@ -64,6 +82,7 @@ impl LintRule {
 struct LintConfig {
     enabled: HashSet<LintRule>,
     severity: HashMap<LintRule, LintSeverity>,
+    suppressions: LintSuppressions,
 }
 
 impl LintConfig {
@@ -73,6 +92,7 @@ impl LintConfig {
             LintRule::UnusedImportAlias,
             LintRule::DuplicateImportPath,
             LintRule::ImportOrder,
+            LintRule::MissingImportPath,
             LintRule::DuplicateFunction,
             LintRule::UnusedFunction,
             LintRule::UnusedLocal,
@@ -82,6 +102,14 @@ impl LintConfig {
             LintRule::ShadowedBinding,
             LintRule::MissingReturn,
             LintRule::DeadBranch,
+            LintRule::NamingConvention,
+            LintRule::UnusedSetTarget,
+            LintRule::InfiniteLoop,
+            LintRule::BooleanLiteralComparison,
+            LintRule::EmptyBody,
+            LintRule::FunctionLength,
+            LintRule::NestingDepth,
+            LintRule::CyclomaticComplexity,
         ];
         let mut enabled = HashSet::new();
         let mut severity = HashMap::new();
@@ -95,13 +123,25 @@ impl LintConfig {
                 | LintRule::UnnecessaryNeeds
                 | LintRule::ShadowedBinding
                 | LintRule::MissingReturn
-                | LintRule::DeadBranch => LintSeverity::Warn,
+                | LintRule::DeadBranch
+                | LintRule::NamingConvention
+                | LintRule::UnusedSetTarget
+                | LintRule::InfiniteLoop
+                | LintRule::BooleanLiteralComparison
+                | LintRule::EmptyBody => LintSeverity::Warn,
                 LintRule::ImportOrder => LintSeverity::Info,
+                LintRule::FunctionLength
+                | LintRule::NestingDepth
+                | LintRule::CyclomaticComplexity => LintSeverity::Info,
                 _ => LintSeverity::Error,
             };
             severity.insert(rule, level);
         }
-        Self { enabled, severity }
+        Self {
+            enabled,
+            severity,
+            suppressions: LintSuppressions::default(),
+        }
     }
 
     fn load(source: &str) -> Self {
@@ -150,11 +190,48 @@ impl LintConfig {
         config
     }
 
-    fn with_suppressions(mut self, suppressed: &HashSet<LintRule>) -> Self {
-        for rule in suppressed {
-            self.enabled.remove(rule);
-        }
+    fn with_suppressions(mut self, suppressions: LintSuppressions) -> Self {
+        self.suppressions = suppressions;
         self
+    }
+
+    fn is_suppressed(&self, rule: LintRule, span: Option<Span>) -> bool {
+        self.suppressions.matches(rule, span)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct LintSuppressions {
+    global_all: bool,
+    global: HashSet<LintRule>,
+    spans: Vec<LintSuppression>,
+}
+
+#[derive(Debug, Clone)]
+struct LintSuppression {
+    span: Span,
+    rules: Option<HashSet<LintRule>>,
+}
+
+impl LintSuppressions {
+    fn matches(&self, rule: LintRule, span: Option<Span>) -> bool {
+        if self.global_all || self.global.contains(&rule) {
+            return true;
+        }
+        let Some(span) = span else {
+            return false;
+        };
+        for suppression in &self.spans {
+            if spans_overlap(span, suppression.span)
+                && suppression
+                    .rules
+                    .as_ref()
+                    .map_or(true, |rules| rules.contains(&rule))
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -203,14 +280,23 @@ impl LintError {
         fix_description: impl Into<String>,
         replacement: impl Into<String>,
     ) -> Self {
+        let Some(span) = span else {
+            return Self {
+                message: message.into(),
+                span: None,
+                severity: LintSeverity::Error,
+                rule: None,
+                fix: None,
+            };
+        };
         Self {
             message: message.into(),
-            span,
+            span: Some(span),
             severity: LintSeverity::Error,
             rule: None,
             fix: Some(LintFix {
                 description: fix_description.into(),
-                span: span.unwrap_or(Span::new(0, 0)),
+                span,
                 replacement: replacement.into(),
             }),
         }
@@ -224,14 +310,23 @@ impl LintError {
         fix_description: impl Into<String>,
         replacement: impl Into<String>,
     ) -> Self {
+        let Some(span) = span else {
+            return Self {
+                message: message.into(),
+                span: None,
+                severity,
+                rule: Some(rule),
+                fix: None,
+            };
+        };
         Self {
             message: message.into(),
-            span,
+            span: Some(span),
             severity,
             rule: Some(rule),
             fix: Some(LintFix {
                 description: fix_description.into(),
-                span: span.unwrap_or(Span::new(0, 0)),
+                span,
                 replacement: replacement.into(),
             }),
         }
@@ -282,11 +377,11 @@ pub fn lint_module_with_config(
     module: &Module,
     config_source: Option<&str>,
 ) -> Result<(), Vec<LintError>> {
-    let suppressed = collect_lint_suppressions(module);
     let config = config_source
         .map(LintConfig::load)
         .unwrap_or_else(LintConfig::default);
-    let config = config.with_suppressions(&suppressed);
+    let suppressions = collect_lint_suppressions(module);
+    let config = config.with_suppressions(suppressions);
     let mut errors = Vec::new();
     let mut aliases: Vec<Ident> = Vec::new();
     let mut import_paths: Vec<(String, Ident)> = Vec::new();
@@ -335,6 +430,32 @@ pub fn lint_module_with_config(
     let mut seen_paths: HashMap<String, Ident> = HashMap::new();
     let mut import_order_check: Vec<(String, Span)> = Vec::new();
     for (path, alias) in import_paths {
+        if !path.starts_with("http://")
+            && !path.starts_with("https://")
+            && path != "std"
+            && path != "std.at"
+        {
+            let base = module
+                .source_path
+                .as_deref()
+                .and_then(|path| std::path::Path::new(path).parent());
+            if let Some(base) = base {
+                let candidate = if std::path::Path::new(&path).is_absolute() {
+                    std::path::PathBuf::from(&path)
+                } else {
+                    base.join(&path)
+                };
+                if !candidate.exists() {
+                    push_rule(
+                        &config,
+                        &mut errors,
+                        LintRule::MissingImportPath,
+                        format!("import path does not exist: {}", path),
+                        Some(alias.span),
+                    );
+                }
+            }
+        }
         if let Some(existing) = seen_paths.get(&path) {
             if existing.name != alias.name {
                 push_rule(
@@ -417,6 +538,12 @@ pub fn lint_module_with_config(
     lint_shadowed_bindings(module, &config, &mut errors);
     lint_missing_returns(module, &config, &mut errors);
     lint_dead_branches(module, &config, &mut errors);
+    lint_naming_conventions(module, &config, &mut errors);
+    lint_unused_set_targets(module, &config, &mut errors);
+    lint_infinite_loops(module, &config, &mut errors);
+    lint_boolean_literal_comparisons(module, &config, &mut errors);
+    lint_empty_bodies(module, &config, &mut errors);
+    lint_function_metrics(module, &config, &mut errors);
 
     let mut result = LintResult::new();
     for error in errors {
@@ -453,6 +580,637 @@ fn lint_shadowed_bindings(module: &Module, config: &LintConfig, errors: &mut Vec
     let mut scopes: Vec<HashSet<String>> = Vec::new();
     scopes.push(HashSet::new());
     check_shadowed_stmt(&module.stmts, &mut scopes, config, errors);
+}
+
+fn lint_naming_conventions(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        if !func.is_tool && !is_snake_case(&func.name.name) {
+            push_rule(
+                config,
+                errors,
+                LintRule::NamingConvention,
+                format!("function name should be snake_case: {}", func.name.name),
+                Some(func.name.span),
+            );
+        }
+        for param in &func.params {
+            if !should_ignore_name(&param.name.name) && !is_snake_case(&param.name.name) {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::NamingConvention,
+                    format!("parameter name should be snake_case: {}", param.name.name),
+                    Some(param.name.span),
+                );
+            }
+        }
+    }
+    for stmt in &module.stmts {
+        match stmt {
+            Stmt::Struct { name, .. } | Stmt::Enum { name, .. } | Stmt::TypeAlias { name, .. } => {
+                if !is_pascal_case(&name.name) {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::NamingConvention,
+                        format!("type name should be PascalCase: {}", name.name),
+                        Some(name.span),
+                    );
+                }
+            }
+            Stmt::Let { name, .. }
+            | Stmt::Const { name, .. }
+            | Stmt::Using { name, .. }
+            | Stmt::Set { name, .. }
+            | Stmt::With { name, .. } => {
+                if !should_ignore_name(&name.name) && !is_snake_case(&name.name) {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::NamingConvention,
+                        format!("name should be snake_case: {}", name.name),
+                        Some(name.span),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lint_unused_set_targets(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        let mut reads = HashSet::new();
+        for stmt in &func.body {
+            collect_local_uses_stmt(stmt, &mut reads);
+        }
+        check_unused_set_stmts(&func.body, &reads, config, errors);
+    }
+}
+
+fn check_unused_set_stmts(
+    stmts: &[Stmt],
+    reads: &HashSet<String>,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Set { name, .. } => {
+                if !should_ignore_name(&name.name) && !reads.contains(&name.name) {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::UnusedSetTarget,
+                        format!("value assigned but never read: {}", name.name),
+                        Some(name.span),
+                    );
+                }
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                check_unused_set_stmts(then_branch, reads, config, errors);
+                if let Some(else_branch) = else_branch {
+                    check_unused_set_stmts(else_branch, reads, config, errors);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => {
+                check_unused_set_stmts(body, reads, config, errors);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lint_infinite_loops(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        check_infinite_loop_stmts(&func.body, config, errors);
+    }
+    check_infinite_loop_stmts(&module.stmts, config, errors);
+}
+
+fn check_infinite_loop_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::While {
+                condition,
+                body,
+                while_span,
+                ..
+            } => {
+                if eval_bool_literal(condition) == Some(true) && !contains_termination(body) {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::InfiniteLoop,
+                        "infinite loop (while true without break/return)".to_string(),
+                        Some(*while_span),
+                    );
+                }
+                check_infinite_loop_stmts(body, config, errors);
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                check_infinite_loop_stmts(then_branch, config, errors);
+                if let Some(else_branch) = else_branch {
+                    check_infinite_loop_stmts(else_branch, config, errors);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::With { body, .. } | Stmt::Block { stmts: body, .. } => {
+                check_infinite_loop_stmts(body, config, errors);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lint_boolean_literal_comparisons(
+    module: &Module,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    check_boolean_literal_exprs(&module.stmts, config, errors);
+    for func in &module.functions {
+        check_boolean_literal_exprs(&func.body, config, errors);
+    }
+}
+
+fn check_boolean_literal_exprs(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Expr { expr, .. }
+            | Stmt::Return {
+                expr: Some(expr), ..
+            }
+            | Stmt::Throw { expr, .. }
+            | Stmt::Defer { expr, .. }
+            | Stmt::Yield { expr, .. }
+            | Stmt::Set { value: expr, .. } => check_boolean_literal_expr(expr, config, errors),
+            Stmt::SetMember { base, value, .. } => {
+                check_boolean_literal_expr(base, config, errors);
+                check_boolean_literal_expr(value, config, errors);
+            }
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
+                check_boolean_literal_expr(base, config, errors);
+                check_boolean_literal_expr(index, config, errors);
+                check_boolean_literal_expr(value, config, errors);
+            }
+            Stmt::Let { value, .. }
+            | Stmt::Const { value, .. }
+            | Stmt::Using { value, .. }
+            | Stmt::With { value, .. } => check_boolean_literal_expr(value, config, errors),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                check_boolean_literal_expr(condition, config, errors);
+                check_boolean_literal_exprs(then_branch, config, errors);
+                if let Some(else_branch) = else_branch {
+                    check_boolean_literal_exprs(else_branch, config, errors);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                check_boolean_literal_expr(condition, config, errors);
+                check_boolean_literal_exprs(body, config, errors);
+            }
+            Stmt::For { iter, body, .. } => {
+                check_boolean_literal_expr(iter, config, errors);
+                check_boolean_literal_exprs(body, config, errors);
+            }
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                check_boolean_literal_exprs(stmts, config, errors)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn check_boolean_literal_expr(expr: &Expr, config: &LintConfig, errors: &mut Vec<LintError>) {
+    match expr {
+        Expr::Binary {
+            left, op, right, ..
+        } => {
+            if matches!(op, at_syntax::BinaryOp::Eq | at_syntax::BinaryOp::Neq)
+                && (matches!(**left, Expr::Bool(_, ..)) || matches!(**right, Expr::Bool(_, ..)))
+            {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::BooleanLiteralComparison,
+                    "boolean literal comparison can be simplified".to_string(),
+                    expr_span(expr),
+                );
+            }
+            check_boolean_literal_expr(left, config, errors);
+            check_boolean_literal_expr(right, config, errors);
+        }
+        Expr::Unary { expr, .. } | Expr::Await { expr, .. } | Expr::Try(expr, ..) => {
+            check_boolean_literal_expr(expr, config, errors)
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            check_boolean_literal_expr(condition, config, errors);
+            check_boolean_literal_expr(then_branch, config, errors);
+            if let Some(else_branch) = else_branch {
+                check_boolean_literal_expr(else_branch, config, errors);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            check_boolean_literal_expr(callee, config, errors);
+            for arg in args {
+                check_boolean_literal_expr(arg, config, errors);
+            }
+        }
+        Expr::Member { base, .. } => check_boolean_literal_expr(base, config, errors),
+        Expr::Index { base, index, .. } => {
+            check_boolean_literal_expr(base, config, errors);
+            check_boolean_literal_expr(index, config, errors);
+        }
+        Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
+            for item in items {
+                check_boolean_literal_expr(item, config, errors);
+            }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                check_boolean_literal_expr(key, config, errors);
+                check_boolean_literal_expr(value, config, errors);
+            }
+        }
+        Expr::MapSpread { expr, .. }
+        | Expr::ArraySpread { expr, .. }
+        | Expr::Group { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::Is { expr, .. } => check_boolean_literal_expr(expr, config, errors),
+        Expr::Match { value, arms, .. } => {
+            check_boolean_literal_expr(value, config, errors);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    check_boolean_literal_expr(guard, config, errors);
+                }
+                check_boolean_literal_expr(&arm.body, config, errors);
+            }
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            check_boolean_literal_expr(try_block, config, errors);
+            if let Some(catch) = catch_block {
+                check_boolean_literal_expr(catch, config, errors);
+            }
+            if let Some(finally) = finally_block {
+                check_boolean_literal_expr(finally, config, errors);
+            }
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                check_boolean_literal_expr(&field.value, config, errors);
+            }
+        }
+        Expr::EnumLiteral { payload, .. } => {
+            if let Some(payload) = payload {
+                check_boolean_literal_expr(payload, config, errors);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            check_boolean_literal_expr(start, config, errors);
+            check_boolean_literal_expr(end, config, errors);
+        }
+        Expr::Block { stmts, tail, .. } => {
+            check_boolean_literal_exprs(stmts, config, errors);
+            if let Some(tail) = tail {
+                check_boolean_literal_expr(tail, config, errors);
+            }
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let at_syntax::InterpPart::Expr(expr, _) = part {
+                    check_boolean_literal_expr(expr, config, errors);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => check_boolean_literal_expr(body, config, errors),
+        _ => {}
+    }
+}
+
+fn lint_empty_bodies(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        if func.body.is_empty() {
+            push_rule(
+                config,
+                errors,
+                LintRule::EmptyBody,
+                format!("empty function body: {}", func.name.name),
+                Some(func.name.span),
+            );
+        }
+        for stmt in &func.body {
+            check_empty_body_stmt(stmt, config, errors);
+        }
+    }
+    for stmt in &module.stmts {
+        check_empty_body_stmt(stmt, config, errors);
+    }
+}
+
+fn check_empty_body_stmt(stmt: &Stmt, config: &LintConfig, errors: &mut Vec<LintError>) {
+    match stmt {
+        Stmt::If {
+            then_branch,
+            else_branch,
+            if_span,
+            ..
+        } => {
+            if then_branch.is_empty() {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::EmptyBody,
+                    "empty if body".to_string(),
+                    Some(*if_span),
+                );
+            }
+            if let Some(else_branch) = else_branch {
+                if else_branch.is_empty() {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::EmptyBody,
+                        "empty else body".to_string(),
+                        Some(*if_span),
+                    );
+                }
+            }
+        }
+        Stmt::While {
+            body, while_span, ..
+        } => {
+            if body.is_empty() {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::EmptyBody,
+                    "empty while body".to_string(),
+                    Some(*while_span),
+                );
+            }
+        }
+        Stmt::For { body, for_span, .. } => {
+            if body.is_empty() {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::EmptyBody,
+                    "empty for body".to_string(),
+                    Some(*for_span),
+                );
+            }
+        }
+        Stmt::Block { stmts, .. } => {
+            if stmts.is_empty() {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::EmptyBody,
+                    "empty block".to_string(),
+                    stmt_span(stmt),
+                );
+            }
+        }
+        Stmt::Test { body, .. } => {
+            if body.is_empty() {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::EmptyBody,
+                    "empty test body".to_string(),
+                    stmt_span(stmt),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lint_function_metrics(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    const MAX_STMTS: usize = 200;
+    const MAX_NESTING: usize = 6;
+    const MAX_COMPLEXITY: usize = 20;
+    for func in &module.functions {
+        let stmt_count = count_stmts(&func.body);
+        if stmt_count > MAX_STMTS {
+            push_rule(
+                config,
+                errors,
+                LintRule::FunctionLength,
+                format!(
+                    "function too long: {} has {} statements",
+                    func.name.name, stmt_count
+                ),
+                Some(func.name.span),
+            );
+        }
+        let nesting = max_nesting(&func.body, 0);
+        if nesting > MAX_NESTING {
+            push_rule(
+                config,
+                errors,
+                LintRule::NestingDepth,
+                format!("function nesting too deep: {}", func.name.name),
+                Some(func.name.span),
+            );
+        }
+        let complexity = cyclomatic_complexity(&func.body);
+        if complexity > MAX_COMPLEXITY {
+            push_rule(
+                config,
+                errors,
+                LintRule::CyclomaticComplexity,
+                format!("function complexity too high: {}", func.name.name),
+                Some(func.name.span),
+            );
+        }
+    }
+}
+
+fn count_stmts(stmts: &[Stmt]) -> usize {
+    let mut count = 0;
+    for stmt in stmts {
+        count += 1;
+        match stmt {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                count += count_stmts(then_branch);
+                if let Some(else_branch) = else_branch {
+                    count += count_stmts(else_branch);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => {
+                count += count_stmts(body);
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn max_nesting(stmts: &[Stmt], depth: usize) -> usize {
+    let mut max_depth = depth;
+    for stmt in stmts {
+        let next = match stmt {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_depth = max_nesting(then_branch, depth + 1);
+                let else_depth = else_branch
+                    .as_ref()
+                    .map(|branch| max_nesting(branch, depth + 1))
+                    .unwrap_or(depth + 1);
+                then_depth.max(else_depth)
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => max_nesting(body, depth + 1),
+            _ => depth,
+        };
+        if next > max_depth {
+            max_depth = next;
+        }
+    }
+    max_depth
+}
+
+fn cyclomatic_complexity(stmts: &[Stmt]) -> usize {
+    let mut score = 1;
+    for stmt in stmts {
+        match stmt {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                score += 1;
+                score += cyclomatic_complexity(then_branch) - 1;
+                if let Some(else_branch) = else_branch {
+                    score += cyclomatic_complexity(else_branch) - 1;
+                }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                score += 1;
+                score += cyclomatic_complexity(body) - 1;
+            }
+            Stmt::Block { stmts, .. } | Stmt::With { body: stmts, .. } => {
+                score += cyclomatic_complexity(stmts) - 1;
+            }
+            Stmt::Test { body, .. } => {
+                score += cyclomatic_complexity(body) - 1;
+            }
+            _ => {}
+        }
+    }
+    score
+}
+
+fn is_snake_case(value: &str) -> bool {
+    let mut prev_underscore = false;
+    for (idx, ch) in value.chars().enumerate() {
+        if ch == '_' {
+            if idx == 0 || prev_underscore {
+                return false;
+            }
+            prev_underscore = true;
+            continue;
+        }
+        prev_underscore = false;
+        if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() {
+            return false;
+        }
+    }
+    !value.is_empty() && !value.ends_with('_')
+}
+
+fn is_pascal_case(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    for ch in chars {
+        if ch == '_' || (!ch.is_ascii_alphanumeric()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn contains_termination(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Break { .. } | Stmt::Return { .. } | Stmt::Throw { .. } => return true,
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if contains_termination(then_branch) {
+                    return true;
+                }
+                if let Some(else_branch) = else_branch {
+                    if contains_termination(else_branch) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::With { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => {
+                if contains_termination(body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn check_shadowed_stmt(
@@ -587,7 +1345,7 @@ fn check_dead_branches(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<Lin
                 ..
             } => {
                 if let Some(value) = eval_bool_literal(condition) {
-                    let span = expr_span(condition).unwrap_or(Span::new(0, 0));
+                    let span = expr_span(condition).or_else(|| stmt_span(stmt));
                     let message = if value {
                         "else branch is unreachable"
                     } else {
@@ -598,7 +1356,7 @@ fn check_dead_branches(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<Lin
                         errors,
                         LintRule::DeadBranch,
                         message.to_string(),
-                        Some(span),
+                        span,
                     );
                 }
                 check_dead_branches(then_branch, config, errors);
@@ -610,13 +1368,13 @@ fn check_dead_branches(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<Lin
                 condition, body, ..
             } => {
                 if let Some(false) = eval_bool_literal(condition) {
-                    let span = expr_span(condition).unwrap_or(Span::new(0, 0));
+                    let span = expr_span(condition).or_else(|| stmt_span(stmt));
                     push_rule(
                         config,
                         errors,
                         LintRule::DeadBranch,
                         "while body is unreachable".to_string(),
-                        Some(span),
+                        span,
                     );
                 }
                 check_dead_branches(body, config, errors);
@@ -769,7 +1527,7 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
             }
             Stmt::Yield { .. } => {
                 if unreachable_start.is_none() {
-                    unreachable_start = Some(Span::new(0, 0));
+                    unreachable_start = stmt_span(stmt);
                 }
             }
             _ => {
@@ -1545,6 +2303,9 @@ fn push_rule(
     if !config.enabled.contains(&rule) {
         return;
     }
+    if config.is_suppressed(rule, span) {
+        return;
+    }
     let severity = *config.severity.get(&rule).unwrap_or(&LintSeverity::Error);
     errors.push(LintError::with_rule(rule, message, span, severity));
 }
@@ -2210,26 +2971,108 @@ pub fn apply_fixes(source: &str, errors: &[LintError]) -> String {
     result
 }
 
-fn collect_lint_suppressions(module: &Module) -> HashSet<LintRule> {
-    let mut rules = HashSet::new();
+fn collect_lint_suppressions(module: &Module) -> LintSuppressions {
+    let mut suppressions = LintSuppressions::default();
+    let mut next_spans = Vec::new();
+    collect_next_stmt_spans(module, &mut next_spans);
     for comment in &module.comments {
-        if let Some(rest) = comment.text.trim().strip_prefix("@lint-ignore") {
-            let list = rest.trim();
-            if list.is_empty() {
-                continue;
+        let text = comment.text.trim();
+        if let Some(rest) = text.strip_prefix("@lint-ignore-next") {
+            let rules = parse_suppression_rules(rest.trim());
+            if let Some(span) = next_spans
+                .iter()
+                .find(|span| span.start >= comment.span.end)
+                .copied()
+            {
+                suppressions.spans.push(LintSuppression { span, rules });
             }
-            for rule in list.split(',') {
-                let name = rule.trim();
-                if name.is_empty() {
-                    continue;
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("@lint-ignore-line") {
+            let rules = parse_suppression_rules(rest.trim());
+            let span = Span::new(comment.span.start, comment.span.end);
+            suppressions.spans.push(LintSuppression { span, rules });
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("@lint-ignore") {
+            let rules = parse_suppression_rules(rest.trim());
+            match rules {
+                None => {
+                    suppressions.global_all = true;
                 }
-                if let Some(rule) = LintRule::from_str(name) {
-                    rules.insert(rule);
+                Some(rules) => {
+                    suppressions.global.extend(rules);
                 }
             }
         }
     }
-    rules
+    suppressions
+}
+
+fn parse_suppression_rules(list: &str) -> Option<HashSet<LintRule>> {
+    if list.is_empty() {
+        return None;
+    }
+    let mut rules = HashSet::new();
+    for entry in list.split(',') {
+        let name = entry.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(rule) = LintRule::from_str(name) {
+            rules.insert(rule);
+        }
+    }
+    if rules.is_empty() {
+        None
+    } else {
+        Some(rules)
+    }
+}
+
+fn collect_next_stmt_spans(module: &Module, spans: &mut Vec<Span>) {
+    for func in &module.functions {
+        collect_next_stmt_spans_from_stmts(&func.body, spans);
+    }
+    collect_next_stmt_spans_from_stmts(&module.stmts, spans);
+    spans.sort_by_key(|span| span.start);
+}
+
+fn collect_next_stmt_spans_from_stmts(stmts: &[Stmt], spans: &mut Vec<Span>) {
+    for stmt in stmts {
+        if let Some(span) = stmt_span(stmt) {
+            spans.push(span);
+        }
+        match stmt {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_next_stmt_spans_from_stmts(then_branch, spans);
+                if let Some(branch) = else_branch {
+                    collect_next_stmt_spans_from_stmts(branch, spans);
+                }
+            }
+            Stmt::While { body, .. } => {
+                collect_next_stmt_spans_from_stmts(body, spans);
+            }
+            Stmt::For { body, .. } => {
+                collect_next_stmt_spans_from_stmts(body, spans);
+            }
+            Stmt::With { body, .. } => {
+                collect_next_stmt_spans_from_stmts(body, spans);
+            }
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                collect_next_stmt_spans_from_stmts(stmts, spans);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn spans_overlap(a: Span, b: Span) -> bool {
+    a.start < b.end && b.start < a.end
 }
 
 /// Get the number of errors that have auto-fixes available
@@ -2241,6 +3084,7 @@ pub fn count_fixable(errors: &[LintError]) -> usize {
 mod tests {
     use super::lint_module;
     use at_parser::parse_module;
+    use at_parser::parse_module_with_errors;
 
     #[test]
     fn detects_unused_function() {
@@ -2330,5 +3174,48 @@ f(1, 2);
 "#;
         let module = parse_module(source).expect("parse module");
         assert!(lint_module(&module).is_ok());
+    }
+
+    #[test]
+    fn dead_branch_span_is_real() {
+        let source = r#"
+fn f() {
+    if true {
+        let x = 1;
+    } else {
+        let y = 2;
+    }
+}
+"#;
+        let (module, errors) = parse_module_with_errors(source);
+        assert!(errors.is_empty());
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        let dead_branch = errors
+            .iter()
+            .find(|err| err.message.contains("branch is unreachable"))
+            .expect("dead branch lint");
+        let span = dead_branch.span.expect("span");
+        assert_ne!(span.start, 0);
+        assert_ne!(span.end, 0);
+    }
+
+    #[test]
+    fn unreachable_after_yield_has_span() {
+        let source = r#"
+fn f() {
+    yield 1;
+    let x = 2;
+}
+"#;
+        let (module, errors) = parse_module_with_errors(source);
+        assert!(errors.is_empty());
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        let unreachable = errors
+            .iter()
+            .find(|err| err.message.contains("unreachable code"))
+            .expect("unreachable lint");
+        let span = unreachable.span.expect("span");
+        assert_ne!(span.start, 0);
+        assert_ne!(span.end, 0);
     }
 }

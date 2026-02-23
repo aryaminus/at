@@ -4,6 +4,9 @@ use std::rc::Rc;
 
 use serde_json::{json, Value as JsonValue};
 
+const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
+const SUPPORTED_PROTOCOL_VERSION: &str = "2024-11-05";
+
 #[derive(Clone)]
 pub struct McpServer {
     name: String,
@@ -14,9 +17,13 @@ pub struct McpServer {
     resources: Vec<Resource>,
     prompts: Vec<Prompt>,
     client_initialized: Cell<bool>,
+    completion_handler: Option<Rc<CompletionHandler>>,
+    sample_handler: Option<Rc<SampleHandler>>,
 }
 
 pub type ToolHandler = dyn Fn(&str, &JsonValue) -> Result<JsonValue, String>;
+pub type CompletionHandler = dyn Fn(&str, &JsonValue) -> Result<Vec<String>, String>;
+pub type SampleHandler = dyn Fn(&JsonValue) -> Result<JsonValue, String>;
 
 #[derive(Debug, Clone)]
 pub struct Tool {
@@ -89,6 +96,8 @@ impl McpServer {
             resources: Vec::new(),
             prompts: Vec::new(),
             client_initialized: Cell::new(false),
+            completion_handler: None,
+            sample_handler: None,
         }
     }
 
@@ -148,12 +157,42 @@ impl McpServer {
         self
     }
 
+    pub fn with_completion_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&str, &JsonValue) -> Result<Vec<String>, String> + 'static,
+    {
+        self.completion_handler = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn with_sample_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&JsonValue) -> Result<JsonValue, String> + 'static,
+    {
+        self.sample_handler = Some(Rc::new(handler));
+        self
+    }
+
     pub fn run<R: BufRead, W: Write>(&self, mut reader: R, mut writer: W) -> std::io::Result<()> {
         let mut line = String::new();
         loop {
             line.clear();
             if reader.read_line(&mut line)? == 0 {
                 return Ok(());
+            }
+            if line.len() > MAX_REQUEST_LINE_BYTES {
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": {
+                        "code": -32600,
+                        "message": "Invalid Request: request too large"
+                    }
+                });
+                let response_line = serde_json::to_string(&response).unwrap_or_default();
+                writeln!(writer, "{}", response_line)?;
+                writer.flush()?;
+                continue;
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -207,7 +246,7 @@ impl McpServer {
                         eprintln!("[at-mcp] client initialized");
                     }
                     _ => {
-                        // Silently ignore other notifications
+                        eprintln!("[at-mcp] ignoring notification: {}", method);
                     }
                 }
                 continue;
@@ -219,7 +258,7 @@ impl McpServer {
                         if let Some(client_version) =
                             params.get("protocolVersion").and_then(|v| v.as_str())
                         {
-                            if client_version != "2024-11-05" {
+                            if client_version != SUPPORTED_PROTOCOL_VERSION {
                                 json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
@@ -228,7 +267,10 @@ impl McpServer {
                                         "message": format!(
                                             "Unsupported protocol version: {}",
                                             client_version
-                                        )
+                                        ),
+                                        "data": {
+                                            "supportedVersions": [SUPPORTED_PROTOCOL_VERSION]
+                                        }
                                     }
                                 })
                             } else {
@@ -236,7 +278,7 @@ impl McpServer {
                                     "jsonrpc": "2.0",
                                     "id": id,
                                     "result": {
-                                        "protocolVersion": "2024-11-05",
+                                        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                                         "serverInfo": {
                                             "name": self.name,
                                             "version": self.version,
@@ -244,6 +286,8 @@ impl McpServer {
                                         "capabilities": {
                                             "tools": {},
                                             "roots": {},
+                                            "completion": {},
+                                            "sampling": {},
                                         }
                                     }
                                 });
@@ -260,7 +304,7 @@ impl McpServer {
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "result": {
-                                    "protocolVersion": "2024-11-05",
+                                    "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                                     "serverInfo": {
                                         "name": self.name,
                                         "version": self.version,
@@ -268,6 +312,8 @@ impl McpServer {
                                     "capabilities": {
                                         "tools": {},
                                         "roots": {},
+                                        "completion": {},
+                                        "sampling": {},
                                     }
                                 }
                             });
@@ -284,7 +330,7 @@ impl McpServer {
                             "jsonrpc": "2.0",
                             "id": id,
                             "result": {
-                                "protocolVersion": "2024-11-05",
+                                "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                                 "serverInfo": {
                                     "name": self.name,
                                     "version": self.version,
@@ -294,6 +340,8 @@ impl McpServer {
                                     "roots": {},
                                     "resources": {},
                                     "prompts": {},
+                                    "completion": {},
+                                    "sampling": {},
                                 }
                             }
                         });
@@ -418,56 +466,61 @@ impl McpServer {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "tools": self.tools.iter().map(|tool| json!({
-                            "name": tool.name,
-                            "description": tool.description,
-                            "inputSchema": {
-                                "allOf": [
-                                    tool.input_schema.clone(),
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "x-at-needs": {
-                                                "type": "array",
-                                                "items": { "type": "string" },
-                                                "default": tool.needs,
-                                            }
-                                            ,
-                                            "x-at-imports": {
-                                                "type": "array",
-                                                "items": { "type": "string" },
-                                                "default": tool.imports,
-                                            }
-                                            ,
-                                            "x-at-import-aliases": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "alias": { "type": "string" },
-                                                        "path": { "type": "string" }
+                        "tools": self.tools.iter().map(|tool| {
+                            let mut value = json!({
+                                "name": tool.name,
+                                "description": tool.description,
+                                "inputSchema": {
+                                    "allOf": [
+                                        tool.input_schema.clone(),
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "x-at-needs": {
+                                                    "type": "array",
+                                                    "items": { "type": "string" },
+                                                    "default": tool.needs,
+                                                }
+                                                ,
+                                                "x-at-imports": {
+                                                    "type": "array",
+                                                    "items": { "type": "string" },
+                                                    "default": tool.imports,
+                                                }
+                                                ,
+                                                "x-at-import-aliases": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "alias": { "type": "string" },
+                                                            "path": { "type": "string" }
+                                                        },
+                                                        "required": ["alias", "path"],
+                                                        "additionalProperties": false
                                                     },
-                                                    "required": ["alias", "path"],
-                                                    "additionalProperties": false
-                                                },
-                                                "default": tool
-                                                    .import_aliases
-                                                    .iter()
-                                                    .map(|(alias, path)| {
-                                                        json!({
-                                                            "alias": alias,
-                                                            "path": path
+                                                    "default": tool
+                                                        .import_aliases
+                                                        .iter()
+                                                        .map(|(alias, path)| {
+                                                            json!({
+                                                                "alias": alias,
+                                                                "path": path
+                                                            })
                                                         })
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            }
-                                        },
-                                        "additionalProperties": true
-                                    }
-                                ]
-                            },
-                            "outputSchema": tool.output_schema,
-                        })).collect::<Vec<_>>(),
+                                                        .collect::<Vec<_>>()
+                                                }
+                                            },
+                                            "additionalProperties": true
+                                        }
+                                    ]
+                                }
+                            });
+                            if let Some(schema) = &tool.output_schema {
+                                value["outputSchema"] = schema.clone();
+                            }
+                            value
+                        }).collect::<Vec<_>>(),
                     }
                 }),
                 "tools/call" => {
@@ -586,6 +639,107 @@ impl McpServer {
                                 }
                             }
                         }
+                    }
+                }
+                "completion/complete" => {
+                    let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
+                    if !params.is_object() {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32602,
+                                "message": "Invalid params: expected object"
+                            }
+                        })
+                    } else {
+                        let name = params.get("name").and_then(|value| value.as_str());
+                        if name.is_none() {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {
+                                    "code": -32602,
+                                    "message": "Invalid params: name must be a string"
+                                }
+                            })
+                        } else {
+                            let arguments = params
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| json!({}));
+                            if !arguments.is_object() {
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {
+                                        "code": -32602,
+                                        "message": "Invalid params: arguments must be an object"
+                                    }
+                                })
+                            } else {
+                                match (name, &self.completion_handler) {
+                                    (Some(name), Some(handler)) => {
+                                        match handler(name, &arguments) {
+                                            Ok(items) => json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "result": {
+                                                    "items": items
+                                                }
+                                            }),
+                                            Err(message) => json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "error": { "code": -32000, "message": message }
+                                            }),
+                                        }
+                                    }
+                                    _ => json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": { "items": [] }
+                                    }),
+                                }
+                            }
+                        }
+                    }
+                }
+                "sampling/sample" => {
+                    let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
+                    if !params.is_object() {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32602,
+                                "message": "Invalid params: expected object"
+                            }
+                        })
+                    } else if let Some(handler) = &self.sample_handler {
+                        match handler(&params) {
+                            Ok(result) => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": result
+                            }),
+                            Err(message) => json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32000, "message": message }
+                            }),
+                        }
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "sampling not supported"}
+                                ],
+                                "isError": true
+                            }
+                        })
                     }
                 }
                 "ping" => json!({
