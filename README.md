@@ -15,7 +15,7 @@
 **All core features implemented:**
 
 - Types: `int`, `float`, `bool`, `string`, `unit`, `array<T>`, `option<T>`, `result<T,E>`
-- Control flow: `if` (expression, requires else), `while`, `for`, `break`, `continue`
+- Control flow: `if` (expression, optional else), `while`, `for`, `break`, `continue`
 - Pattern matching: `match` with `ok`, `err`, `some`, `none`, `_` patterns
 - Error handling: `?` (try) operator, `option`, `result`
 - Effects: `needs`/`using` for capability management

@@ -2702,6 +2702,113 @@ impl TypeChecker {
                     array_inner.unwrap_or(SimpleType::Unknown),
                 )))
             }
+            "split" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("split expects string".to_string(), expr_span(arg));
+                    }
+                }
+                if let Some(delim) = args.get(1) {
+                    let delim_ty = self.check_expr(delim);
+                    if delim_ty != SimpleType::String && delim_ty != SimpleType::Unknown {
+                        self.push_error(
+                            "split expects string delimiter".to_string(),
+                            expr_span(delim),
+                        );
+                    }
+                }
+                Some(SimpleType::Array(Box::new(SimpleType::String)))
+            }
+            "trim" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("trim expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "substring" => {
+                self.check_arity(name, args, 3, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("substring expects string".to_string(), expr_span(arg));
+                    }
+                }
+                if let Some(start) = args.get(1) {
+                    let start_ty = self.check_expr(start);
+                    if start_ty != SimpleType::Int && start_ty != SimpleType::Unknown {
+                        self.push_error(
+                            "substring expects int bounds".to_string(),
+                            expr_span(start),
+                        );
+                    }
+                }
+                if let Some(end) = args.get(2) {
+                    let end_ty = self.check_expr(end);
+                    if end_ty != SimpleType::Int && end_ty != SimpleType::Unknown {
+                        self.push_error("substring expects int bounds".to_string(), expr_span(end));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "char_at" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("char_at expects string".to_string(), expr_span(arg));
+                    }
+                }
+                if let Some(index) = args.get(1) {
+                    let index_ty = self.check_expr(index);
+                    if index_ty != SimpleType::Int && index_ty != SimpleType::Unknown {
+                        self.push_error("char_at expects int".to_string(), expr_span(index));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "to_upper" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("to_upper expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "to_lower" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("to_lower expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "parse_int" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let arg_ty = self.check_expr(arg);
+                    if arg_ty != SimpleType::String && arg_ty != SimpleType::Unknown {
+                        self.push_error("parse_int expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Option(Box::new(SimpleType::Int)))
+            }
+            "to_string" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    self.check_expr(arg);
+                }
+                Some(SimpleType::String)
+            }
             "map" => {
                 self.check_arity(name, args, 2, span);
                 let mut array_inner = None;

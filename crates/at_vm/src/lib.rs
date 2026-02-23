@@ -3,8 +3,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use at_parser::parse_module;
 use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use ureq;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,7 +129,6 @@ pub enum Op {
     CallAsync(usize, usize),
     CallGenerator(usize, usize),
     Builtin(Builtin),
-    Assert,
     Try,
     Throw,
     Defer,
@@ -170,6 +172,7 @@ pub enum Op {
     Shr,
     Neg,
     Not,
+    ToBool,
     MatchResultOk(usize),
     MatchResultErr(usize),
     MatchOptionSome(usize),
@@ -199,6 +202,7 @@ pub enum Builtin {
     TimeFixed,
     RngDeterministic,
     RngUuid,
+    Assert,
     AssertEq,
     OptionSome,
     OptionNone,
@@ -214,6 +218,14 @@ pub enum Builtin {
     Contains,
     Slice,
     Next,
+    Split,
+    Trim,
+    Substring,
+    CharAt,
+    ToUpper,
+    ToLower,
+    ParseInt,
+    ToString,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,11 +284,13 @@ pub struct FunctionChunk {
     pub chunk: Chunk,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<FunctionChunk>,
     pub main: Chunk,
     pub main_locals: usize,
+    pub sources: HashMap<String, String>,
+    pub entry: Option<String>,
 }
 
 impl Program {
@@ -289,10 +303,28 @@ impl Program {
     }
 }
 
+impl Default for Program {
+    fn default() -> Self {
+        Self {
+            functions: Vec::new(),
+            main: Chunk::default(),
+            main_locals: 0,
+            sources: HashMap::new(),
+            entry: None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct LoopContext {
     breaks: Vec<usize>,
     continues: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedModule {
+    module: Module,
+    imports: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -331,6 +363,10 @@ pub enum VmError {
 pub struct StackFrame {
     pub name: String,
     pub span: Option<Span>,
+}
+
+pub trait DebuggerHook {
+    fn before_op(&mut self, program: &Program, chunk_id: usize, ip: usize, op: Option<&Op>);
 }
 
 pub struct Compiler {
@@ -533,6 +569,8 @@ impl Compiler {
 
     pub fn compile_module(&mut self, module: &Module) -> Result<Program, VmError> {
         let mut program = Program::default();
+        program.sources.clear();
+        program.entry = module.source_path.clone();
 
         self.functions.clear();
         self.function_arity.clear();
@@ -555,6 +593,12 @@ impl Compiler {
                     self.enums.insert(name.name.clone());
                 }
                 _ => {}
+            }
+        }
+
+        if let Some(path) = module.source_path.as_ref() {
+            if let Ok(source) = std::fs::read_to_string(path) {
+                program.sources.insert(path.clone(), source);
             }
         }
 
@@ -955,8 +999,7 @@ impl Compiler {
 
     fn compile_to_bool(&mut self, expr: &Expr, chunk: &mut Chunk) -> Result<(), VmError> {
         self.compile_expr(expr, chunk)?;
-        chunk.push(Op::Not, expr_span(expr));
-        chunk.push(Op::Not, expr_span(expr));
+        chunk.push(Op::ToBool, expr_span(expr));
         Ok(())
     }
 
@@ -1358,6 +1401,13 @@ impl Compiler {
                     ));
                 }
                 if let Expr::Ident(ident) = callee.as_ref() {
+                    if let Some(builtin) = map_builtin("", &ident.name, args.len()) {
+                        for arg in args {
+                            self.compile_expr(arg, chunk)?;
+                        }
+                        chunk.push(Op::Builtin(builtin), Some(ident.span));
+                        return Ok(());
+                    }
                     if ident.name == "map" {
                         if args.len() != 2 {
                             return Err(compile_error(
@@ -1386,99 +1436,6 @@ impl Compiler {
                             ));
                         }
                         self.compile_reduce_expr(&args[0], &args[1], &args[2], ident.span, chunk)?;
-                        return Ok(());
-                    }
-                    if ident.name == "assert" {
-                        if args.len() != 1 {
-                            return Err(compile_error(
-                                "wrong arity for assert".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        chunk.push(Op::Assert, Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "assert_eq" {
-                        if args.len() != 2 {
-                            return Err(compile_error(
-                                "wrong arity for assert_eq".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        self.compile_expr(&args[1], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::AssertEq), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "print" {
-                        if args.len() != 1 {
-                            return Err(compile_error(
-                                "wrong arity for print".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Print), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "next" {
-                        if args.len() != 1 {
-                            return Err(compile_error(
-                                "wrong arity for next".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Next), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "len" {
-                        if args.len() != 1 {
-                            return Err(compile_error(
-                                "wrong arity for len".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Len), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "append" {
-                        if args.len() != 2 {
-                            return Err(compile_error(
-                                "wrong arity for append".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        self.compile_expr(&args[1], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Append), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "contains" {
-                        if args.len() != 2 {
-                            return Err(compile_error(
-                                "wrong arity for contains".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        self.compile_expr(&args[1], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Contains), Some(ident.span));
-                        return Ok(());
-                    }
-                    if ident.name == "slice" {
-                        if args.len() != 3 {
-                            return Err(compile_error(
-                                "wrong arity for slice".to_string(),
-                                Some(ident.span),
-                            ));
-                        }
-                        self.compile_expr(&args[0], chunk)?;
-                        self.compile_expr(&args[1], chunk)?;
-                        self.compile_expr(&args[2], chunk)?;
-                        chunk.push(Op::Builtin(Builtin::Slice), Some(ident.span));
                         return Ok(());
                     }
                     if ident.name == "some" {
@@ -2733,6 +2690,244 @@ impl Compiler {
             )),
         }
     }
+
+    pub fn compile_module_with_sources(
+        &mut self,
+        module: &Module,
+        sources: HashMap<String, String>,
+        entry: Option<String>,
+    ) -> Result<Program, VmError> {
+        let mut program = self.compile_module(module)?;
+        program.sources = sources;
+        program.entry = entry;
+        Ok(program)
+    }
+}
+
+pub fn compile_entry_with_imports(path: &str) -> Result<Program, VmError> {
+    let (loaded, sources) = load_module_with_sources(path)?;
+    let entry = loaded.module.source_path.clone();
+    let mut compiler = Compiler::new();
+    compiler.compile_module_with_sources(&loaded.module, sources, entry)
+}
+
+fn load_module_with_sources(
+    path: &str,
+) -> Result<(LoadedModule, HashMap<String, String>), VmError> {
+    let mut visited = HashSet::new();
+    let mut sources = HashMap::new();
+    let module = load_module_inner(path, &mut visited, &mut sources)?;
+    Ok((module, sources))
+}
+
+fn load_module_inner(
+    path: &str,
+    visited: &mut HashSet<String>,
+    sources: &mut HashMap<String, String>,
+) -> Result<LoadedModule, VmError> {
+    let normalized = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|err| compile_error(format!("error reading {path}: {err}"), None))?;
+    let normalized_str = normalized.to_string_lossy().to_string();
+    if !visited.insert(normalized_str.clone()) {
+        return Ok(LoadedModule {
+            module: Module {
+                id: at_syntax::NodeId(0),
+                functions: Vec::new(),
+                stmts: Vec::new(),
+                comments: Vec::new(),
+                source_path: Some(normalized_str),
+            },
+            imports: Vec::new(),
+        });
+    }
+
+    let source = std::fs::read_to_string(&normalized)
+        .map_err(|err| compile_error(format!("error reading {path}: {err}"), None))?;
+    sources.insert(normalized_str.clone(), source.clone());
+    let mut module = parse_module(&source)
+        .map_err(|err| compile_error(format!("parse error: {err:?}"), None))?;
+    module.source_path = Some(normalized_str.clone());
+
+    let mut merged_functions = module.functions.clone();
+    let mut merged_stmts = Vec::new();
+    let mut merged_imports = Vec::new();
+    let mut seen_aliases = HashSet::new();
+    let base_dir = normalized
+        .parent()
+        .ok_or_else(|| compile_error(format!("invalid path: {}", normalized.display()), None))?;
+
+    for stmt in module.stmts.drain(..) {
+        match stmt {
+            Stmt::Import { path, alias, .. } => {
+                if !seen_aliases.insert(alias.name.clone()) {
+                    return Err(compile_error(
+                        format!("duplicate import alias: {}", alias.name),
+                        Some(alias.span),
+                    ));
+                }
+                let import_path = if path == "std" || path == "std.at" {
+                    base_dir.join("stdlib").join("std.at")
+                } else if path.starts_with("http://") || path.starts_with("https://") {
+                    fetch_remote(&path, base_dir)
+                        .map_err(|message| compile_error(message, Some(alias.span)))?
+                } else {
+                    base_dir.join(path)
+                };
+                let mut imported =
+                    load_module_inner(&import_path.to_string_lossy(), visited, sources)?;
+                prefix_module(&mut imported.module, &alias.name);
+                merged_imports.push(import_path.to_string_lossy().to_string());
+                merged_imports.extend(imported.imports);
+                merged_functions.extend(imported.module.functions);
+                merged_stmts.extend(imported.module.stmts);
+                continue;
+            }
+            other => merged_stmts.push(other),
+        }
+    }
+
+    Ok(LoadedModule {
+        module: Module {
+            id: module.id,
+            functions: merged_functions,
+            stmts: merged_stmts,
+            comments: Vec::new(),
+            source_path: Some(normalized_str),
+        },
+        imports: merged_imports,
+    })
+}
+
+fn prefix_module(module: &mut Module, alias: &str) {
+    for func in &mut module.functions {
+        if func.is_pub {
+            func.name.name = format!("{}.{}", alias, func.name.name);
+        }
+    }
+    for stmt in &mut module.stmts {
+        match stmt {
+            Stmt::Struct { name, is_pub, .. }
+            | Stmt::Enum { name, is_pub, .. }
+            | Stmt::TypeAlias { name, is_pub, .. } => {
+                if *is_pub {
+                    name.name = format!("{}.{}", alias, name.name);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn fetch_remote(url: &str, base_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = resolve_cached_path(base_dir, url) {
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    let response = ureq::get(url)
+        .call()
+        .map_err(|err| format!("error fetching {url}: {err}"))?;
+    let contents = response
+        .into_string()
+        .map_err(|err| format!("error reading response from {url}: {err}"))?;
+    store_remote_contents(url, &contents, base_dir)
+}
+
+fn store_remote_contents(
+    url: &str,
+    contents: &str,
+    base_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let cache_dir = cache_dir(base_dir);
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|err| format!("error creating cache directory: {err}"))?;
+    let hash = hash_contents(contents);
+    let filename = format!("{hash}.at");
+    let cache_path = cache_dir.join(filename);
+    std::fs::write(&cache_path, contents)
+        .map_err(|err| format!("error writing {}: {err}", cache_path.display()))?;
+    let mut lockfile = load_lockfile(base_dir)?;
+    lockfile.entries.insert(url.to_string(), hash);
+    save_lockfile(base_dir, &lockfile)?;
+    Ok(cache_path)
+}
+
+fn resolve_cached_path(
+    base_dir: &std::path::Path,
+    url: &str,
+) -> Result<std::path::PathBuf, String> {
+    let lockfile = load_lockfile(base_dir)?;
+    if let Some(hash) = lockfile.entries.get(url) {
+        return Ok(cache_dir(base_dir).join(format!("{hash}.at")));
+    }
+    Ok(cache_dir(base_dir).join(cache_file_name(url)))
+}
+
+fn cache_dir(base_dir: &std::path::Path) -> std::path::PathBuf {
+    base_dir.join(".at").join("cache")
+}
+
+fn cache_file_name(url: &str) -> String {
+    let encoded = hex::encode(Sha256::digest(url.as_bytes()));
+    format!("{encoded}.at")
+}
+
+fn hash_contents(contents: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(contents.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+#[derive(Debug, Default, Clone)]
+struct Lockfile {
+    entries: HashMap<String, String>,
+}
+
+fn lockfile_path(base_dir: &std::path::Path) -> std::path::PathBuf {
+    base_dir.join(".at").join("lock")
+}
+
+fn load_lockfile(base_dir: &std::path::Path) -> Result<Lockfile, String> {
+    let path = lockfile_path(base_dir);
+    if !path.exists() {
+        return Ok(Lockfile::default());
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|err| format!("error reading {}: {err}", path.display()))?;
+    let mut entries = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let url = match parts.next() {
+            Some(value) => value.to_string(),
+            None => continue,
+        };
+        let hash = match parts.next() {
+            Some(value) => value.to_string(),
+            None => continue,
+        };
+        entries.insert(url, hash);
+    }
+    Ok(Lockfile { entries })
+}
+
+fn save_lockfile(base_dir: &std::path::Path, lockfile: &Lockfile) -> Result<(), String> {
+    let path = lockfile_path(base_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("error creating lockfile dir: {err}"))?;
+    }
+    let mut lines = Vec::new();
+    for (url, hash) in &lockfile.entries {
+        lines.push(format!("{url} {hash}"));
+    }
+    std::fs::write(path, lines.join("\n"))
+        .map_err(|err| format!("error writing lockfile: {err}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2754,6 +2949,7 @@ pub struct Vm {
     max_instructions: Option<usize>,
     max_frames: Option<usize>,
     output_buffer: Option<Rc<RefCell<Vec<String>>>>,
+    debugger: Option<Rc<RefCell<dyn DebuggerHook>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2918,6 +3114,7 @@ impl Vm {
             max_instructions: None,
             max_frames: None,
             output_buffer: None,
+            debugger: None,
         }
     }
 
@@ -2931,6 +3128,7 @@ impl Vm {
             max_instructions: None,
             max_frames: None,
             output_buffer: None,
+            debugger: None,
         }
     }
 
@@ -2944,6 +3142,7 @@ impl Vm {
             max_instructions: Some(max_instructions),
             max_frames: None,
             output_buffer: None,
+            debugger: None,
         }
     }
 
@@ -2957,6 +3156,7 @@ impl Vm {
             max_instructions: None,
             max_frames: None,
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+            debugger: None,
         }
     }
 
@@ -2974,6 +3174,7 @@ impl Vm {
             max_instructions: Some(max_instructions),
             max_frames: None,
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+            debugger: None,
         }
     }
 
@@ -2987,7 +3188,14 @@ impl Vm {
             max_instructions: Some(max_instructions),
             max_frames: Some(max_frames),
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
+            debugger: None,
         }
+    }
+
+    pub fn with_debugger(debugger: Rc<RefCell<dyn DebuggerHook>>) -> Self {
+        let mut vm = Vm::new();
+        vm.debugger = Some(debugger);
+        vm
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
@@ -3048,6 +3256,15 @@ impl Vm {
                     }
                 }
             };
+
+            if let Some(debugger) = self.debugger.as_ref() {
+                debugger.borrow_mut().before_op(
+                    program,
+                    frame_chunk_id,
+                    frame_ip,
+                    chunk.code.get(frame_ip),
+                );
+            }
 
             if frame_ip >= chunk.code.len() {
                 let result = self.stack.pop();
@@ -3435,6 +3652,40 @@ impl Vm {
                             }
                             Value::String(Rc::new(Uuid::new_v4().to_string()))
                         }
+                        Builtin::Assert => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match value {
+                                Value::Int(0) => {
+                                    return Err(self.runtime_error(
+                                        "assert failed".to_string(),
+                                        self.current_span(program),
+                                        program,
+                                    ))
+                                }
+                                Value::Int(_) => {}
+                                Value::Bool(false) => {
+                                    return Err(self.runtime_error(
+                                        "assert failed".to_string(),
+                                        self.current_span(program),
+                                        program,
+                                    ))
+                                }
+                                Value::Bool(true) => {}
+                                _ => {
+                                    return Err(self.runtime_error(
+                                        "assert expects bool or int".to_string(),
+                                        self.current_span(program),
+                                        program,
+                                    ))
+                                }
+                            }
+                            Value::Unit
+                        }
                         Builtin::AssertEq => {
                             let right = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
@@ -3700,6 +3951,207 @@ impl Vm {
                                 }
                             }
                         }
+                        Builtin::Split => {
+                            let delimiter = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (text, delimiter) {
+                                (Value::String(text), Value::String(delim)) => {
+                                    let parts = if delim.is_empty() {
+                                        text.chars()
+                                            .map(|ch| Value::String(Rc::new(ch.to_string())))
+                                            .collect::<Vec<_>>()
+                                    } else {
+                                        text.split(delim.as_str())
+                                            .map(|part| Value::String(Rc::new(part.to_string())))
+                                            .collect::<Vec<_>>()
+                                    };
+                                    Value::Array(Rc::new(parts))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "split expects string and delimiter".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Trim => {
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match text {
+                                Value::String(text) => {
+                                    Value::String(Rc::new(text.trim().to_string()))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "trim expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Substring => {
+                            let end = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let start = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let (text, start, end) = match (text, start, end) {
+                                (Value::String(text), Value::Int(start), Value::Int(end)) => {
+                                    (text, start, end)
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "substring expects string and int bounds".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if start < 0 || end < start {
+                                return Err(runtime_error_at(
+                                    "substring out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let start = start as usize;
+                            let end = end as usize;
+                            let chars: Vec<char> = text.chars().collect();
+                            if end > chars.len() {
+                                return Err(runtime_error_at(
+                                    "substring out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let result: String = chars[start..end].iter().collect();
+                            Value::String(Rc::new(result))
+                        }
+                        Builtin::CharAt => {
+                            let index = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let (text, index) = match (text, index) {
+                                (Value::String(text), Value::Int(index)) => (text, index),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "char_at expects string and int".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            };
+                            if index < 0 {
+                                return Err(runtime_error_at(
+                                    "char_at out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            let index = index as usize;
+                            let ch = text.chars().nth(index).ok_or_else(|| {
+                                runtime_error_at(
+                                    "char_at out of bounds".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::String(Rc::new(ch.to_string()))
+                        }
+                        Builtin::ToUpper => {
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match text {
+                                Value::String(text) => Value::String(Rc::new(text.to_uppercase())),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "to_upper expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::ToLower => {
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match text {
+                                Value::String(text) => Value::String(Rc::new(text.to_lowercase())),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "to_lower expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::ParseInt => {
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match text {
+                                Value::String(text) => match text.trim().parse::<i64>() {
+                                    Ok(value) => Value::Option(Some(Rc::new(Value::Int(value)))),
+                                    Err(_) => Value::Option(None),
+                                },
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "parse_int expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::ToString => {
+                            let value = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            Value::String(Rc::new(format_value(&value)))
+                        }
                         Builtin::Next => {
                             let gen = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
@@ -3725,37 +4177,6 @@ impl Vm {
                         }
                     };
                     self.stack.push(result);
-                }
-                Op::Assert => {
-                    let value = self.stack.pop().ok_or_else(|| {
-                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
-                    })?;
-                    match value {
-                        Value::Int(0) => {
-                            return Err(self.runtime_error(
-                                "assert failed".to_string(),
-                                self.current_span(program),
-                                program,
-                            ))
-                        }
-                        Value::Int(_) => {}
-                        Value::Bool(false) => {
-                            return Err(self.runtime_error(
-                                "assert failed".to_string(),
-                                self.current_span(program),
-                                program,
-                            ))
-                        }
-                        Value::Bool(true) => {}
-                        _ => {
-                            return Err(self.runtime_error(
-                                "assert expects bool or int".to_string(),
-                                self.current_span(program),
-                                program,
-                            ))
-                        }
-                    }
-                    self.stack.push(Value::Unit);
                 }
                 Op::Try => {
                     let value = self.stack.pop().ok_or_else(|| {
@@ -4528,6 +4949,23 @@ impl Vm {
                     };
                     self.stack.push(value);
                 }
+                Op::ToBool => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    let value = match value {
+                        Value::Bool(value) => Value::Bool(value),
+                        Value::Int(value) => Value::Bool(value != 0),
+                        Value::Float(value) => Value::Bool(value != 0.0),
+                        _ => {
+                            return Err(runtime_error_at(
+                                "invalid boolean operand".to_string(),
+                                span_at(chunk, frame_ip),
+                            ))
+                        }
+                    };
+                    self.stack.push(value);
+                }
                 Op::Lt => {
                     let right = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
@@ -5163,6 +5601,22 @@ fn map_builtin(base: &str, name: &str, args: usize) -> Option<Builtin> {
         ("time", "fixed", 1) => Some(Builtin::TimeFixed),
         ("rng", "deterministic", 1) => Some(Builtin::RngDeterministic),
         ("rng", "uuid", 0) => Some(Builtin::RngUuid),
+        ("", "assert", 1) => Some(Builtin::Assert),
+        ("", "assert_eq", 2) => Some(Builtin::AssertEq),
+        ("", "print", 1) => Some(Builtin::Print),
+        ("", "next", 1) => Some(Builtin::Next),
+        ("", "len", 1) => Some(Builtin::Len),
+        ("", "append", 2) => Some(Builtin::Append),
+        ("", "contains", 2) => Some(Builtin::Contains),
+        ("", "slice", 3) => Some(Builtin::Slice),
+        ("", "split", 2) => Some(Builtin::Split),
+        ("", "trim", 1) => Some(Builtin::Trim),
+        ("", "substring", 3) => Some(Builtin::Substring),
+        ("", "char_at", 2) => Some(Builtin::CharAt),
+        ("", "to_upper", 1) => Some(Builtin::ToUpper),
+        ("", "to_lower", 1) => Some(Builtin::ToLower),
+        ("", "parse_int", 1) => Some(Builtin::ParseInt),
+        ("", "to_string", 1) => Some(Builtin::ToString),
         _ => None,
     }
 }

@@ -34,6 +34,9 @@ pub enum LintRule {
     UnusedMatchBinding,
     UnreachableCode,
     UnnecessaryNeeds,
+    ShadowedBinding,
+    MissingReturn,
+    DeadBranch,
 }
 
 impl LintRule {
@@ -49,6 +52,9 @@ impl LintRule {
             "unused_match_binding" => Some(LintRule::UnusedMatchBinding),
             "unreachable_code" => Some(LintRule::UnreachableCode),
             "unnecessary_needs" => Some(LintRule::UnnecessaryNeeds),
+            "shadowed_binding" => Some(LintRule::ShadowedBinding),
+            "missing_return" => Some(LintRule::MissingReturn),
+            "dead_branch" => Some(LintRule::DeadBranch),
             _ => None,
         }
     }
@@ -73,6 +79,9 @@ impl LintConfig {
             LintRule::UnusedMatchBinding,
             LintRule::UnreachableCode,
             LintRule::UnnecessaryNeeds,
+            LintRule::ShadowedBinding,
+            LintRule::MissingReturn,
+            LintRule::DeadBranch,
         ];
         let mut enabled = HashSet::new();
         let mut severity = HashMap::new();
@@ -83,7 +92,10 @@ impl LintConfig {
                 | LintRule::UnusedFunction
                 | LintRule::UnusedLocal
                 | LintRule::UnusedMatchBinding
-                | LintRule::UnnecessaryNeeds => LintSeverity::Warn,
+                | LintRule::UnnecessaryNeeds
+                | LintRule::ShadowedBinding
+                | LintRule::MissingReturn
+                | LintRule::DeadBranch => LintSeverity::Warn,
                 LintRule::ImportOrder => LintSeverity::Info,
                 _ => LintSeverity::Error,
             };
@@ -402,6 +414,9 @@ pub fn lint_module_with_config(
     lint_unused_match_bindings(module, &config, &mut errors);
     lint_unreachable_code(module, &config, &mut errors);
     lint_unnecessary_needs(module, &config, &mut errors);
+    lint_shadowed_bindings(module, &config, &mut errors);
+    lint_missing_returns(module, &config, &mut errors);
+    lint_dead_branches(module, &config, &mut errors);
 
     let mut result = LintResult::new();
     for error in errors {
@@ -415,11 +430,300 @@ pub fn lint_module_with_config(
     }
 }
 
+fn lint_shadowed_bindings(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        let mut scopes: Vec<HashSet<String>> = Vec::new();
+        scopes.push(HashSet::new());
+        for param in &func.params {
+            if !should_ignore_name(&param.name.name)
+                && scopes.iter().any(|scope| scope.contains(&param.name.name))
+            {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::ShadowedBinding,
+                    format!("shadowed binding: {}", param.name.name),
+                    Some(param.name.span),
+                );
+            }
+            scopes.last_mut().unwrap().insert(param.name.name.clone());
+        }
+        check_shadowed_stmt(&func.body, &mut scopes, config, errors);
+    }
+    let mut scopes: Vec<HashSet<String>> = Vec::new();
+    scopes.push(HashSet::new());
+    check_shadowed_stmt(&module.stmts, &mut scopes, config, errors);
+}
+
+fn check_shadowed_stmt(
+    stmts: &[Stmt],
+    scopes: &mut Vec<HashSet<String>>,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, .. }
+            | Stmt::Const { name, .. }
+            | Stmt::Using { name, .. }
+            | Stmt::With { name, .. } => {
+                if !should_ignore_name(&name.name)
+                    && scopes.iter().any(|scope| scope.contains(&name.name))
+                {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::ShadowedBinding,
+                        format!("shadowed binding: {}", name.name),
+                        Some(name.span),
+                    );
+                }
+                scopes.last_mut().unwrap().insert(name.name.clone());
+            }
+            Stmt::For { item, body, .. } => {
+                scopes.push(HashSet::new());
+                if !should_ignore_name(&item.name)
+                    && scopes.iter().any(|scope| scope.contains(&item.name))
+                {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::ShadowedBinding,
+                        format!("shadowed binding: {}", item.name),
+                        Some(item.span),
+                    );
+                }
+                scopes.last_mut().unwrap().insert(item.name.clone());
+                check_shadowed_stmt(body, scopes, config, errors);
+                scopes.pop();
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                scopes.push(HashSet::new());
+                check_shadowed_stmt(then_branch, scopes, config, errors);
+                scopes.pop();
+                if let Some(else_branch) = else_branch {
+                    scopes.push(HashSet::new());
+                    check_shadowed_stmt(else_branch, scopes, config, errors);
+                    scopes.pop();
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::Block { stmts: body, .. }
+            | Stmt::Test { body, .. } => {
+                scopes.push(HashSet::new());
+                check_shadowed_stmt(body, scopes, config, errors);
+                scopes.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lint_missing_returns(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        if func.return_ty.is_none() {
+            continue;
+        }
+        if !function_always_returns(&func.body) {
+            push_rule(
+                config,
+                errors,
+                LintRule::MissingReturn,
+                format!(
+                    "function '{}' may not return along all paths",
+                    func.name.name
+                ),
+                Some(func.name.span),
+            );
+        }
+    }
+}
+
+fn function_always_returns(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Return { .. } => return true,
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(else_branch) = else_branch {
+                    if function_always_returns(then_branch) && function_always_returns(else_branch)
+                    {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Block { stmts, .. } => {
+                if function_always_returns(stmts) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn lint_dead_branches(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    for func in &module.functions {
+        check_dead_branches(&func.body, config, errors);
+    }
+    check_dead_branches(&module.stmts, config, errors);
+}
+
+fn check_dead_branches(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if let Some(value) = eval_bool_literal(condition) {
+                    let span = expr_span(condition).unwrap_or(Span::new(0, 0));
+                    let message = if value {
+                        "else branch is unreachable"
+                    } else {
+                        "then branch is unreachable"
+                    };
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::DeadBranch,
+                        message.to_string(),
+                        Some(span),
+                    );
+                }
+                check_dead_branches(then_branch, config, errors);
+                if let Some(else_branch) = else_branch {
+                    check_dead_branches(else_branch, config, errors);
+                }
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                if let Some(false) = eval_bool_literal(condition) {
+                    let span = expr_span(condition).unwrap_or(Span::new(0, 0));
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::DeadBranch,
+                        "while body is unreachable".to_string(),
+                        Some(span),
+                    );
+                }
+                check_dead_branches(body, config, errors);
+            }
+            Stmt::For { body, .. } => {
+                check_dead_branches(body, config, errors);
+            }
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                check_dead_branches(stmts, config, errors);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn eval_bool_literal(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Bool(value, ..) => Some(*value),
+        Expr::Unary { op, expr, .. } => match op {
+            at_syntax::UnaryOp::Not => eval_bool_literal(expr).map(|value| !value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn expr_span(expr: &Expr) -> Option<Span> {
+    match expr {
+        Expr::Int(_, span, _)
+        | Expr::Float(_, span, _)
+        | Expr::String(_, span, _)
+        | Expr::Bool(_, span, _)
+        | Expr::InterpolatedString { span, .. } => Some(*span),
+        Expr::Ident(ident) => Some(ident.span),
+        Expr::Unary { op_span, .. }
+        | Expr::Binary { op_span, .. }
+        | Expr::ArraySpread {
+            spread_span: op_span,
+            ..
+        } => Some(*op_span),
+        Expr::Ternary { span, .. }
+        | Expr::ChainedComparison { span, .. }
+        | Expr::If { if_span: span, .. }
+        | Expr::Block {
+            block_span: span, ..
+        }
+        | Expr::Array {
+            array_span: span, ..
+        }
+        | Expr::Tuple {
+            tuple_span: span, ..
+        }
+        | Expr::Range {
+            range_span: span, ..
+        }
+        | Expr::MapLiteral { span, .. }
+        | Expr::StructLiteral { span, .. }
+        | Expr::EnumLiteral { span, .. }
+        | Expr::Group { span, .. }
+        | Expr::As { span, .. }
+        | Expr::Is { span, .. }
+        | Expr::TryCatch { try_span: span, .. }
+        | Expr::Match {
+            match_span: span, ..
+        }
+        | Expr::Closure { span, .. } => Some(*span),
+        Expr::Member { name, .. } => Some(name.span),
+        Expr::Call { callee, .. } => expr_span(callee),
+        Expr::Try(expr, _) => expr_span(expr),
+        Expr::Await { await_span, .. } => Some(*await_span),
+        Expr::Index { index_span, .. } => Some(*index_span),
+        Expr::MapSpread { spread_span, .. } => Some(*spread_span),
+    }
+}
+
 fn lint_unreachable_code(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
     for func in &module.functions {
         check_unreachable_stmts(&func.body, config, errors);
     }
     check_unreachable_stmts(&module.stmts, config, errors);
+}
+
+fn stmt_span(stmt: &Stmt) -> Option<Span> {
+    match stmt {
+        Stmt::Break { break_span, .. } => Some(*break_span),
+        Stmt::Continue { continue_span, .. } => Some(*continue_span),
+        Stmt::Let { name, .. }
+        | Stmt::Const { name, .. }
+        | Stmt::Using { name, .. }
+        | Stmt::Set { name, .. }
+        | Stmt::With { name, .. } => Some(name.span),
+        Stmt::SetMember { field, .. } => Some(field.span),
+        Stmt::SetIndex { index, .. } => expr_span(index),
+        Stmt::Return { expr, .. } => expr.as_ref().and_then(expr_span),
+        Stmt::Throw { expr, .. }
+        | Stmt::Yield { expr, .. }
+        | Stmt::Expr { expr, .. }
+        | Stmt::Defer { expr, .. } => expr_span(expr),
+        Stmt::If { condition, .. } | Stmt::While { condition, .. } => expr_span(condition),
+        Stmt::For { iter, .. } => expr_span(iter),
+        Stmt::Block { stmts, .. } => stmts.first().and_then(stmt_span),
+        Stmt::Test { .. } => None,
+        Stmt::Struct { name, .. }
+        | Stmt::Enum { name, .. }
+        | Stmt::TypeAlias { name, .. }
+        | Stmt::Import { alias: name, .. } => Some(name.span),
+    }
 }
 
 fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
@@ -436,23 +740,17 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
                     unreachable_start = Some(*break_span);
                 }
             }
-            Stmt::Return {
-                expr: Some(_expr), ..
-            } => {
+            Stmt::Return { expr, .. } => {
                 if unreachable_start.is_none() {
-                    // Get span from the statement itself if possible
-                    unreachable_start = Some(Span::new(0, 0));
+                    unreachable_start = expr
+                        .as_ref()
+                        .and_then(expr_span)
+                        .or_else(|| stmt_span(stmt));
                 }
             }
-            Stmt::Return { expr: None, .. } => {
+            Stmt::Throw { expr, .. } => {
                 if unreachable_start.is_none() {
-                    // Use a default span since Return without value has no span
-                    unreachable_start = Some(Span::new(0, 0));
-                }
-            }
-            Stmt::Throw { .. } => {
-                if unreachable_start.is_none() {
-                    unreachable_start = Some(Span::new(0, 0));
+                    unreachable_start = expr_span(expr).or_else(|| stmt_span(stmt));
                 }
             }
             Stmt::Defer { .. } => {}

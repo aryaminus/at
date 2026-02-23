@@ -15,27 +15,86 @@ use lsp_types::{
     DocumentHighlightKind, DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams,
     DocumentSymbolResponse, FoldingRange, FoldingRangeKind, FoldingRangeParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location, MarkupContent,
-    MarkupKind, ParameterInformation, ParameterLabel, Position, Range, SemanticToken,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, ServerCapabilities, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    Uri, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities,
-    WorkspaceServerCapabilities,
+    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location,
+    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
+    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
+    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceFileOperationsServerCapabilities,
+    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use sha2::{Digest, Sha256};
 
 const REMOTE_DIAGNOSTIC_CODE: &str = "LSP001";
+static WORKSPACE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+#[derive(Default)]
+struct ServerState {
+    docs: HashMap<Uri, String>,
+    module_cache: HashMap<String, CachedModule>,
+    doc_cache: HashMap<Uri, DocCacheEntry>,
+}
+
+// Progress entry is stored as a token -> label string.
+
+impl ServerState {
+    fn new(params: InitializeParams) -> Self {
+        let workspace_root = params
+            .workspace_folders
+            .and_then(|mut folders| folders.pop())
+            .and_then(|folder| uri_to_path(&folder.uri))
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(root) = workspace_root {
+            let _ = WORKSPACE_ROOT.set(root);
+        }
+        Self {
+            docs: HashMap::new(),
+            module_cache: HashMap::new(),
+            doc_cache: HashMap::new(),
+        }
+    }
+}
+
+fn send_progress(
+    connection: &Connection,
+    token: &str,
+    title: &str,
+    percentage: Option<u32>,
+) -> Result<(), String> {
+    let value = serde_json::json!({
+        "token": token,
+        "value": {
+            "kind": "report",
+            "message": title,
+            "percentage": percentage,
+        }
+    });
+    let notification = Notification::new("$/progress".to_string(), value);
+    connection
+        .sender
+        .send(Message::Notification(notification))
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
 
 pub fn run_stdio() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
 
     let server_capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         completion_provider: Some(CompletionOptions::default()),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
+        references_provider: Some(lsp_types::OneOf::Left(true)),
+        rename_provider: Some(lsp_types::OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
+        })),
         inlay_hint_provider: Some(lsp_types::OneOf::Left(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         signature_help_provider: Some(SignatureHelpOptions {
@@ -58,6 +117,7 @@ pub fn run_stdio() -> Result<(), String> {
                 },
             ),
         ),
+        workspace_symbol_provider: Some(lsp_types::OneOf::Left(true)),
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                 supported: Some(true),
@@ -107,13 +167,13 @@ pub fn run_stdio() -> Result<(), String> {
         server_info: None,
     };
 
-    connection
+    let initialize_value = connection
         .initialize(serde_json::to_value(initialize_result).map_err(|err| err.to_string())?)
         .map_err(|err| err.to_string())?;
+    let initialize_params: InitializeParams =
+        serde_json::from_value(initialize_value).map_err(|err| err.to_string())?;
 
-    let mut docs: HashMap<Uri, String> = HashMap::new();
-    let mut module_cache: HashMap<String, CachedModule> = HashMap::new();
-    let mut doc_cache: HashMap<Uri, DocCacheEntry> = HashMap::new();
+    let mut state = ServerState::new(initialize_params);
 
     for message in &connection.receiver {
         match message {
@@ -124,9 +184,7 @@ pub fn run_stdio() -> Result<(), String> {
                 {
                     break;
                 }
-                if let Some(response) =
-                    handle_request(&docs, &mut doc_cache, &mut module_cache, &request)?
-                {
+                if let Some(response) = handle_request(&mut state, &request)? {
                     connection
                         .sender
                         .send(Message::Response(response))
@@ -145,9 +203,9 @@ pub fn run_stdio() -> Result<(), String> {
             }
             Message::Notification(notification) => {
                 if let Some((url, text)) =
-                    handle_notification(&mut docs, &mut doc_cache, &notification)?
+                    handle_notification(&connection, &mut state, &notification)?
                 {
-                    let module = get_cached_module(&text, &url, &mut doc_cache);
+                    let module = get_cached_module(&text, &url, &mut state.doc_cache);
                     publish_diagnostics(&connection, &url, &text, module.as_ref())?;
                 }
             }
@@ -160,8 +218,8 @@ pub fn run_stdio() -> Result<(), String> {
 }
 
 fn handle_notification(
-    docs: &mut HashMap<Uri, String>,
-    doc_cache: &mut HashMap<Uri, DocCacheEntry>,
+    connection: &Connection,
+    state: &mut ServerState,
     notification: &Notification,
 ) -> Result<Option<(Uri, String)>, String> {
     match notification.method.as_str() {
@@ -171,7 +229,9 @@ fn handle_notification(
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
             let text = params.text_document.text;
-            docs.insert(url.clone(), text.clone());
+            state.docs.insert(url.clone(), text.clone());
+            let token = format!("diagnostics:{:?}", url);
+            let _ = send_progress(connection, &token, "Diagnostics updated", Some(100));
             Ok(Some((url, text)))
         }
         "textDocument/didChange" => {
@@ -179,8 +239,10 @@ fn handle_notification(
                 serde_json::from_value(notification.params.clone())
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
-            let text = merge_changes(docs.get(&url), params.content_changes);
-            docs.insert(url.clone(), text.clone());
+            let text = merge_changes(state.docs.get(&url), params.content_changes);
+            state.docs.insert(url.clone(), text.clone());
+            let token = format!("diagnostics:{:?}", url);
+            let _ = send_progress(connection, &token, "Diagnostics updated", Some(100));
             Ok(Some((url, text)))
         }
         "textDocument/didSave" => {
@@ -189,10 +251,10 @@ fn handle_notification(
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
             let text = if let Some(text) = params.text {
-                docs.insert(url.clone(), text.clone());
+                state.docs.insert(url.clone(), text.clone());
                 text
             } else {
-                docs.get(&url).cloned().unwrap_or_default()
+                state.docs.get(&url).cloned().unwrap_or_default()
             };
             Ok(Some((url, text)))
         }
@@ -201,8 +263,13 @@ fn handle_notification(
                 serde_json::from_value(notification.params.clone())
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
-            docs.remove(&url);
-            doc_cache.remove(&url);
+            state.docs.remove(&url);
+            state.doc_cache.remove(&url);
+            Ok(None)
+        }
+        "$/cancelRequest" => {
+            let _: lsp_types::CancelParams = serde_json::from_value(notification.params.clone())
+                .map_err(|err| err.to_string())?;
             Ok(None)
         }
         _ => Ok(None),
@@ -210,9 +277,7 @@ fn handle_notification(
 }
 
 fn handle_request(
-    docs: &HashMap<Uri, String>,
-    doc_cache: &mut HashMap<Uri, DocCacheEntry>,
-    module_cache: &mut HashMap<String, CachedModule>,
+    state: &mut ServerState,
     request: &lsp_server::Request,
 ) -> Result<Option<Response>, String> {
     match request.method.as_str() {
@@ -224,9 +289,9 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
-                let hover = provide_hover(text, module.as_ref(), module_cache, &params);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
+                let hover = provide_hover(text, module.as_ref(), &mut state.module_cache, &params);
                 Response::new_ok(request.id.clone(), serde_json::to_value(hover).unwrap())
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
@@ -241,10 +306,15 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
-                let definition =
-                    provide_definition(text, module.as_ref(), module_cache, &url, &params);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
+                let definition = provide_definition(
+                    text,
+                    module.as_ref(),
+                    &mut state.module_cache,
+                    &url,
+                    &params,
+                );
                 Response::new_ok(
                     request.id.clone(),
                     serde_json::to_value(definition).unwrap(),
@@ -258,13 +328,13 @@ fn handle_request(
             let params: CompletionParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document_position.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let completion = provide_completion(
                     text,
                     module.as_ref(),
                     &url,
-                    module_cache,
+                    &mut state.module_cache,
                     params.text_document_position.position,
                 );
                 Response::new_ok(
@@ -280,8 +350,8 @@ fn handle_request(
             let params: InlayHintParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let hints = provide_inlay_hints(text, module.as_ref());
                 Response::new_ok(request.id.clone(), serde_json::to_value(hints).unwrap())
             } else {
@@ -293,7 +363,7 @@ fn handle_request(
             let params: lsp_types::CodeActionParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
+            let response = if let Some(text) = state.docs.get(&url) {
                 let actions = provide_code_actions(text, &url, &params);
                 Response::new_ok(request.id.clone(), serde_json::to_value(actions).unwrap())
             } else {
@@ -309,9 +379,10 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
-                let help = provide_signature_help(text, module.as_ref(), module_cache, &params);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
+                let help =
+                    provide_signature_help(text, module.as_ref(), &mut state.module_cache, &params);
                 Response::new_ok(request.id.clone(), serde_json::to_value(help).unwrap())
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
@@ -322,8 +393,8 @@ fn handle_request(
             let params: DocumentSymbolParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let symbols = provide_document_symbols(text, module.as_ref());
                 Response::new_ok(request.id.clone(), serde_json::to_value(symbols).unwrap())
             } else {
@@ -335,7 +406,7 @@ fn handle_request(
             let params: SemanticTokensParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
+            let response = if let Some(text) = state.docs.get(&url) {
                 let tokens = provide_semantic_tokens(text);
                 Response::new_ok(request.id.clone(), serde_json::to_value(tokens).unwrap())
             } else {
@@ -351,7 +422,7 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = docs.get(&url) {
+            let response = if let Some(text) = state.docs.get(&url) {
                 let highlights = provide_document_highlights(text, &params);
                 Response::new_ok(
                     request.id.clone(),
@@ -366,8 +437,8 @@ fn handle_request(
             let params: FoldingRangeParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
-                let module = get_cached_module(text, &url, doc_cache);
+            let response = if let Some(text) = state.docs.get(&url) {
+                let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let ranges = provide_folding_ranges(text, module.as_ref());
                 Response::new_ok(request.id.clone(), serde_json::to_value(ranges).unwrap())
             } else {
@@ -379,7 +450,7 @@ fn handle_request(
             let params: lsp_types::DocumentFormattingParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
+            let response = if let Some(text) = state.docs.get(&url) {
                 let edits = provide_formatting(text, None);
                 Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
             } else {
@@ -391,12 +462,56 @@ fn handle_request(
             let params: lsp_types::DocumentRangeFormattingParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = docs.get(&url) {
+            let response = if let Some(text) = state.docs.get(&url) {
                 let edits = provide_formatting(text, Some(params.range));
                 Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
+            Ok(Some(response))
+        }
+        "textDocument/references" => {
+            let params: lsp_types::ReferenceParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document_position.text_document.uri.clone();
+            let response = if let Some(text) = state.docs.get(&url) {
+                let locations = provide_references(text, &url, &params, &state.docs);
+                Response::new_ok(request.id.clone(), serde_json::to_value(locations).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/prepareRename" => {
+            let params: lsp_types::TextDocumentPositionParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document.uri.clone();
+            let response = if let Some(text) = state.docs.get(&url) {
+                let prepare = provide_prepare_rename(text, &params);
+                Response::new_ok(request.id.clone(), serde_json::to_value(prepare).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "textDocument/rename" => {
+            let params: lsp_types::RenameParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let url = params.text_document_position.text_document.uri.clone();
+            let response = if let Some(text) = state.docs.get(&url) {
+                let edit = provide_rename(text, &url, &params, &state.docs);
+                Response::new_ok(request.id.clone(), serde_json::to_value(edit).unwrap())
+            } else {
+                Response::new_ok(request.id.clone(), serde_json::Value::Null)
+            };
+            Ok(Some(response))
+        }
+        "workspace/symbol" => {
+            let params: WorkspaceSymbolParams =
+                serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
+            let symbols = provide_workspace_symbols(&params, &state.docs);
+            let response =
+                Response::new_ok(request.id.clone(), serde_json::to_value(symbols).unwrap());
             Ok(Some(response))
         }
         _ => Ok(None),
@@ -523,7 +638,6 @@ fn provide_signature_help(
     })
 }
 
-#[allow(deprecated)]
 fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<DocumentSymbolResponse> {
     let owned_module;
     let module = if let Some(module) = module {
@@ -538,6 +652,7 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
         let mut name = String::new();
         name.push_str("fn ");
         name.push_str(&func.name.name);
+        #[allow(deprecated)]
         let symbol = DocumentSymbol {
             name,
             detail: None,
@@ -555,6 +670,7 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
         match stmt {
             at_syntax::Stmt::Struct { name, .. } => {
                 let range = span_to_range(text, name.span);
+                #[allow(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: name.name.clone(),
                     detail: None,
@@ -568,6 +684,7 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
             }
             at_syntax::Stmt::Enum { name, .. } => {
                 let range = span_to_range(text, name.span);
+                #[allow(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: name.name.clone(),
                     detail: None,
@@ -581,6 +698,7 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
             }
             at_syntax::Stmt::TypeAlias { name, .. } => {
                 let range = span_to_range(text, name.span);
+                #[allow(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: name.name.clone(),
                     detail: None,
@@ -603,6 +721,7 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
                         character: 0,
                     },
                 };
+                #[allow(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: format!("test {}", name),
                     detail: None,
@@ -1227,7 +1346,7 @@ fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
     }
 
     if path == "std" || path == "std.at" {
-        let root = std::env::current_dir().ok()?;
+        let root = workspace_root().or_else(|| std::env::current_dir().ok())?;
         return Some(
             root.join("stdlib")
                 .join("std.at")
@@ -1247,6 +1366,13 @@ fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
     Some(resolved.to_string_lossy().to_string())
 }
 
+fn workspace_root() -> Option<std::path::PathBuf> {
+    WORKSPACE_ROOT
+        .get()
+        .cloned()
+        .or_else(|| std::env::current_dir().ok())
+}
+
 fn remote_pending_message(resolved: &str) -> Option<String> {
     if resolved.starts_with("http://") || resolved.starts_with("https://") {
         return Some(format!("remote import {resolved} is pending download",));
@@ -1257,8 +1383,7 @@ fn remote_pending_message(resolved: &str) -> Option<String> {
 fn uri_to_path(uri: &Uri) -> Option<String> {
     let value = uri.to_string();
     if let Some(stripped) = value.strip_prefix("file://") {
-        // Percent-decode the path
-        let mut result = String::new();
+        let mut bytes = Vec::new();
         let mut chars = stripped.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch == '%' {
@@ -1266,21 +1391,23 @@ fn uri_to_path(uri: &Uri) -> Option<String> {
                 let hex2 = chars.next()?;
                 let hex_str = format!("{}{}", hex1, hex2);
                 if let Ok(byte) = u8::from_str_radix(&hex_str, 16) {
-                    result.push(byte as char);
+                    bytes.push(byte);
                 } else {
                     return None;
                 }
             } else {
-                result.push(ch);
+                let mut buf = [0u8; 4];
+                let encoded = ch.encode_utf8(&mut buf);
+                bytes.extend_from_slice(encoded.as_bytes());
             }
         }
-        return Some(result);
+        return String::from_utf8(bytes).ok();
     }
     None
 }
 
 fn resolve_remote_import(url: &str) -> Option<String> {
-    let root = std::env::current_dir().ok()?;
+    let root = workspace_root()?;
     let lock_path = root.join(".at").join("lock");
     if let Some((hash, _, _)) = read_remote_meta(&root, url) {
         let cached = root.join(".at").join("cache").join(format!("{hash}.at"));
@@ -1589,10 +1716,21 @@ fn merge_changes(
     existing: Option<&String>,
     changes: Vec<TextDocumentContentChangeEvent>,
 ) -> String {
-    if let Some(change) = changes.into_iter().last() {
-        return change.text;
+    let mut text = existing.cloned().unwrap_or_default();
+    for change in changes {
+        if let Some(range) = change.range {
+            let start = position_to_offset(&text, range.start);
+            let end = position_to_offset(&text, range.end);
+            if start <= end && end <= text.len() {
+                text.replace_range(start..end, &change.text);
+            } else {
+                text = change.text;
+            }
+        } else {
+            text = change.text;
+        }
     }
-    existing.cloned().unwrap_or_default()
+    text
 }
 
 fn publish_diagnostics(
@@ -2068,6 +2206,203 @@ fn split_qualified_ident(text: &str, offset: usize) -> Option<(String, String)> 
 
 fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn provide_prepare_rename(
+    text: &str,
+    params: &lsp_types::TextDocumentPositionParams,
+) -> Option<lsp_types::PrepareRenameResponse> {
+    let position = params.position;
+    let offset = position_to_offset(text, position);
+    let name = ident_at_offset(text, offset)?;
+    let start = offset.saturating_sub(name.len());
+    let before = text[..start].chars().next_back();
+    let after = text[offset..].chars().next();
+    let before_ok = before.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+    let after_ok = after.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+    if !before_ok || !after_ok {
+        return None;
+    }
+    let range = Range {
+        start: offset_to_position(text, start),
+        end: offset_to_position(text, start + name.len()),
+    };
+    Some(lsp_types::PrepareRenameResponse::Range(range))
+}
+
+fn provide_references(
+    text: &str,
+    url: &Uri,
+    params: &lsp_types::ReferenceParams,
+    docs: &HashMap<Uri, String>,
+) -> Vec<Location> {
+    let position = params.text_document_position.position;
+    let offset = position_to_offset(text, position);
+    let name = match ident_at_offset(text, offset) {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let mut locations = Vec::new();
+    for (uri, source) in docs {
+        let mut cursor = 0usize;
+        while cursor < source.len() {
+            let Some(idx) = source[cursor..].find(&name) else {
+                break;
+            };
+            let start = cursor + idx;
+            let end = start + name.len();
+            let before = source[..start].chars().next_back();
+            let after = source[end..].chars().next();
+            let before_ok = before.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            let after_ok = after.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            if before_ok && after_ok {
+                let range = Range {
+                    start: offset_to_position(source, start),
+                    end: offset_to_position(source, end),
+                };
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range,
+                });
+            }
+            cursor = end;
+        }
+    }
+    if params.context.include_declaration {
+        let start = offset.saturating_sub(name.len());
+        let decl_range = Range {
+            start: offset_to_position(text, start),
+            end: offset_to_position(text, start + name.len()),
+        };
+        locations.push(Location {
+            uri: url.clone(),
+            range: decl_range,
+        });
+    }
+    locations
+}
+
+fn provide_rename(
+    text: &str,
+    url: &Uri,
+    params: &lsp_types::RenameParams,
+    docs: &HashMap<Uri, String>,
+) -> lsp_types::WorkspaceEdit {
+    let position = params.text_document_position.position;
+    let offset = position_to_offset(text, position);
+    let name = match ident_at_offset(text, offset) {
+        Some(name) => name,
+        None => {
+            return lsp_types::WorkspaceEdit {
+                changes: None,
+                document_changes: None,
+                change_annotations: None,
+            }
+        }
+    };
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for (uri, source) in docs {
+        let mut edits = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < source.len() {
+            let Some(idx) = source[cursor..].find(&name) else {
+                break;
+            };
+            let start = cursor + idx;
+            let end = start + name.len();
+            let before = source[..start].chars().next_back();
+            let after = source[end..].chars().next();
+            let before_ok = before.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            let after_ok = after.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
+            if before_ok && after_ok {
+                let range = Range {
+                    start: offset_to_position(source, start),
+                    end: offset_to_position(source, end),
+                };
+                edits.push(TextEdit {
+                    range,
+                    new_text: params.new_name.clone(),
+                });
+            }
+            cursor = end;
+        }
+        if !edits.is_empty() {
+            changes.insert(uri.clone(), edits);
+        }
+    }
+    if changes.is_empty() {
+        changes.insert(
+            url.clone(),
+            vec![TextEdit {
+                range: Range {
+                    start: offset_to_position(text, offset),
+                    end: offset_to_position(text, offset + name.len()),
+                },
+                new_text: params.new_name.clone(),
+            }],
+        );
+    }
+    lsp_types::WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+fn provide_workspace_symbols(
+    params: &WorkspaceSymbolParams,
+    docs: &HashMap<Uri, String>,
+) -> WorkspaceSymbolResponse {
+    let query = params.query.to_lowercase();
+    let mut symbols = Vec::new();
+    for (uri, source) in docs {
+        if let Ok(module) = parse_module(source) {
+            for func in &module.functions {
+                if func.name.name.to_lowercase().contains(&query) {
+                    #[allow(deprecated)]
+                    symbols.push(SymbolInformation {
+                        name: func.name.name.clone(),
+                        kind: SymbolKind::FUNCTION,
+                        location: Location {
+                            uri: uri.clone(),
+                            range: span_to_range(source, func.name.span),
+                        },
+                        tags: None,
+                        container_name: None,
+                        deprecated: None,
+                    });
+                }
+            }
+            for stmt in &module.stmts {
+                match stmt {
+                    at_syntax::Stmt::Struct { name, .. }
+                    | at_syntax::Stmt::Enum { name, .. }
+                    | at_syntax::Stmt::TypeAlias { name, .. } => {
+                        if name.name.to_lowercase().contains(&query) {
+                            #[allow(deprecated)]
+                            symbols.push(SymbolInformation {
+                                name: name.name.clone(),
+                                kind: match stmt {
+                                    at_syntax::Stmt::Enum { .. } => SymbolKind::ENUM,
+                                    at_syntax::Stmt::TypeAlias { .. } => SymbolKind::TYPE_PARAMETER,
+                                    _ => SymbolKind::STRUCT,
+                                },
+                                location: Location {
+                                    uri: uri.clone(),
+                                    range: span_to_range(source, name.span),
+                                },
+                                tags: None,
+                                container_name: None,
+                                deprecated: None,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    WorkspaceSymbolResponse::Flat(symbols)
 }
 
 struct FunctionInfo {

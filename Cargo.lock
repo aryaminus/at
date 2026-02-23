@@ -104,7 +104,10 @@ dependencies = [
  "at_parser",
  "at_syntax",
  "bincode",
+ "hex",
  "serde",
+ "sha2",
+ "ureq",
  "uuid",
 ]
 

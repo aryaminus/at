@@ -8,7 +8,7 @@ use at_fmt::format_module;
 use at_mcp::{McpServer, Tool};
 use at_parser::parse_module;
 use at_syntax::{Module, Stmt, TypeRef};
-use at_vm::{format_value, Chunk, Compiler, Op, Program, Value, Vm};
+use at_vm::{compile_entry_with_imports, format_value, Chunk, Compiler, Op, Program, Value, Vm};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 
@@ -75,7 +75,7 @@ fn main() {
             let module = loaded.module;
             let imports = loaded.imports;
             let import_aliases = loaded.import_aliases;
-            let program = match Compiler::new().compile_module(&module) {
+            let program = match compile_entry_with_imports(path) {
                 Ok(program) => program,
                 Err(err) => {
                     eprintln!("{}", format_compile_error(&err, None, Some(path)));
@@ -144,6 +144,8 @@ fn main() {
                     functions: program.functions.clone(),
                     main: chunk,
                     main_locals: 0,
+                    sources: program.sources.clone(),
+                    entry: program.entry.clone(),
                 };
                 let mut vm = Vm::new();
                 let value = vm
@@ -324,6 +326,8 @@ fn main() {
                     functions: program.functions.clone(),
                     main: chunk,
                     main_locals: 0,
+                    sources: program.sources.clone(),
+                    entry: program.entry.clone(),
                 };
                 let mut vm = Vm::new();
                 match vm.run(&test_program) {
@@ -844,18 +848,13 @@ fn run_repl() {
 
 fn run_file(path: &str, extra_args: &[String]) {
     let source = fs::read_to_string(path).ok();
-    let module = match load_module(path) {
-        Ok(module) => module.module,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    };
-    let base_dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
-    let program = match load_compiled_program(base_dir, &module, source.as_deref()) {
+    let program = match compile_entry_with_imports(path) {
         Ok(program) => program,
         Err(err) => {
-            eprintln!("{}", err);
+            eprintln!(
+                "{}",
+                format_compile_error(&err, source.as_deref(), Some(path))
+            );
             std::process::exit(1);
         }
     };
@@ -890,34 +889,6 @@ fn run_file(path: &str, extra_args: &[String]) {
             std::process::exit(1);
         }
     }
-}
-
-fn load_compiled_program(
-    base_dir: &Path,
-    module: &Module,
-    source: Option<&str>,
-) -> Result<Program, String> {
-    let hash = module_hash(module, source);
-    if let Some(program) = load_program_cache(base_dir, &hash) {
-        return Ok(program);
-    }
-    let mut compiler = Compiler::new();
-    let program = compiler
-        .compile_module(module)
-        .map_err(|err| format_compile_error(&err, source, base_dir.to_str()))?;
-    store_program_cache(base_dir, &hash, &program)?;
-    Ok(program)
-}
-
-fn module_hash(module: &Module, source: Option<&str>) -> String {
-    let mut hasher = Sha256::new();
-    if let Some(source) = source {
-        hasher.update(source.as_bytes());
-    } else {
-        let serialized = serde_json::to_vec(module).unwrap_or_default();
-        hasher.update(&serialized);
-    }
-    hex::encode(hasher.finalize())
 }
 
 fn format_runtime_error(err: &at_vm::VmError, source: Option<&str>) -> String {
@@ -1319,32 +1290,6 @@ fn resolve_cached_path(base_dir: &Path, url: &str) -> Result<PathBuf, String> {
 
 fn cache_dir(base_dir: &Path) -> PathBuf {
     base_dir.join(".at").join("cache")
-}
-
-fn program_cache_dir(base_dir: &Path) -> PathBuf {
-    base_dir.join(".at").join("program_cache")
-}
-
-fn program_cache_path(base_dir: &Path, hash: &str) -> PathBuf {
-    program_cache_dir(base_dir).join(format!("{hash}.bin"))
-}
-
-fn load_program_cache(base_dir: &Path, hash: &str) -> Option<Program> {
-    let path = program_cache_path(base_dir, hash);
-    let bytes = std::fs::read(&path).ok()?;
-    Program::from_bytes(&bytes).ok()
-}
-
-fn store_program_cache(base_dir: &Path, hash: &str, program: &Program) -> Result<(), String> {
-    let dir = program_cache_dir(base_dir);
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| format!("error creating program cache dir: {err}"))?;
-    let bytes = program
-        .to_bytes()
-        .map_err(|err| format!("error serializing program: {err}"))?;
-    let path = program_cache_path(base_dir, hash);
-    std::fs::write(&path, bytes).map_err(|err| format!("error writing program cache: {err}"))?;
-    Ok(())
 }
 
 fn lockfile_path(base_dir: &Path) -> PathBuf {
