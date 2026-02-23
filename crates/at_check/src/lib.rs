@@ -259,7 +259,10 @@ impl TypeChecker {
             self.current_return = SimpleType::Generator(Box::new(inner));
         }
         // Check for missing return statement
-        if self.current_return != SimpleType::Unit && self.current_return != SimpleType::Unknown {
+        if self.current_return != SimpleType::Unit
+            && self.current_return != SimpleType::Unknown
+            && !matches!(self.current_return, SimpleType::Generator(_))
+        {
             let has_return = func
                 .body
                 .iter()
@@ -782,7 +785,12 @@ impl TypeChecker {
                 if matches!(self.current_return, SimpleType::Unknown) {
                     self.current_return = SimpleType::Generator(Box::new(SimpleType::Unknown));
                 }
-                if let SimpleType::Generator(inner) = &self.current_return {
+                let mut effective_return = self.current_return.clone();
+                if matches!(effective_return, SimpleType::Unknown) {
+                    effective_return = SimpleType::Generator(Box::new(SimpleType::Unknown));
+                    self.current_return = effective_return.clone();
+                }
+                if let SimpleType::Generator(inner) = effective_return {
                     let existing = self.return_generator_inner.clone();
                     match existing {
                         Some(existing) => {
@@ -803,7 +811,7 @@ impl TypeChecker {
                             self.return_generator_inner = Some(value_ty.clone());
                         }
                     }
-                    if matches!(**inner, SimpleType::Unknown)
+                    if matches!(*inner, SimpleType::Unknown)
                         && !matches!(value_ty, SimpleType::Unknown)
                     {
                         self.current_return = SimpleType::Generator(Box::new(value_ty));
