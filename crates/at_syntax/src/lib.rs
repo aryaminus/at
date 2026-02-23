@@ -429,6 +429,10 @@ pub enum Stmt {
         value: Expr,
         body: Vec<Stmt>,
     },
+    Yield {
+        id: NodeId,
+        expr: Expr,
+    },
     Block {
         id: NodeId,
         stmts: Vec<Stmt>,
@@ -600,6 +604,7 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
                 visitor.visit_stmt(stmt);
             }
         }
+        Stmt::Yield { expr, .. } => visitor.visit_expr(expr),
         Stmt::Block { stmts, .. } => {
             for stmt in stmts {
                 visitor.visit_stmt(stmt);

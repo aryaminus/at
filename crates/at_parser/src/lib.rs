@@ -34,6 +34,7 @@ pub enum TokenKind {
     Throw,
     Defer,
     With,
+    Yield,
     Let,
     Const,
     Mut,
@@ -339,6 +340,7 @@ impl<'a> Parser<'a> {
             TokenKind::Throw => self.parse_throw_stmt(),
             TokenKind::Defer => self.parse_defer_stmt(),
             TokenKind::With => self.parse_with_stmt(),
+            TokenKind::Yield => self.parse_yield_stmt(),
             TokenKind::Test => self.parse_test_stmt(),
             TokenKind::While => self.parse_while_stmt(),
             TokenKind::For => self.parse_for_stmt(),
@@ -941,6 +943,16 @@ impl<'a> Parser<'a> {
             name,
             value,
             body,
+        })
+    }
+
+    fn parse_yield_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Yield {
+            id: self.alloc_id(),
+            expr,
         })
     }
 
@@ -3080,6 +3092,7 @@ impl<'a> Lexer<'a> {
             "throw" => TokenKind::Throw,
             "defer" => TokenKind::Defer,
             "with" => TokenKind::With,
+            "yield" => TokenKind::Yield,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "mut" => TokenKind::Mut,

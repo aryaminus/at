@@ -205,6 +205,7 @@ fn stmt_span(stmt: &Stmt) -> usize {
         Stmt::Throw { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::Defer { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::With { name, .. } => name.span.start,
+        Stmt::Yield { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::Block { stmts, .. } => stmts
             .first()
             .and_then(|stmt| Some(stmt_span(stmt)))
@@ -624,6 +625,15 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             indent_to(out, indent);
             out.push_str("}\n");
+        }
+        Stmt::Yield { expr, .. } => {
+            indent_to(out, indent);
+            out.push_str("yield ");
+            format_expr_with_indent(expr, out, indent, comment_state);
+            if let Some(expr_span) = expr_span(expr) {
+                comment_state.emit_inline_between(out, expr_span, expr_span + 1);
+            }
+            out.push_str(";\n");
         }
         Stmt::Block { stmts, .. } => {
             indent_to(out, indent);
@@ -1343,6 +1353,9 @@ fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &Has
             for stmt in body {
                 collect_needs_stmt(stmt, needs, import_aliases);
             }
+        }
+        Stmt::Yield { expr, .. } => {
+            collect_needs_expr(expr, needs, import_aliases);
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {

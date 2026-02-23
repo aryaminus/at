@@ -766,6 +766,10 @@ impl TypeChecker {
                 }
                 self.pop_scope();
             }
+            Stmt::Yield { expr, .. } => {
+                self.check_expr(expr);
+                self.push_error("yield is not supported yet".to_string(), expr_span(expr));
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {

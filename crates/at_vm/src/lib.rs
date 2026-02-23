@@ -706,6 +706,13 @@ impl Compiler {
                 }
                 self.pop_scope();
             }
+            Stmt::Yield { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+                return Err(compile_error(
+                    "yield is not supported yet".to_string(),
+                    expr_span(expr),
+                ));
+            }
             Stmt::Set { name, value, .. } => {
                 if self.is_const(&name.name) {
                     return Err(compile_error(
@@ -2489,6 +2496,9 @@ impl Compiler {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
                 self.pop_bound_scope(bound);
+            }
+            Stmt::Yield { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_bound_scope(bound);

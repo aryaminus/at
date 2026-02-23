@@ -468,7 +468,7 @@ Run tests with `at test file.at`.
 program      ::= { function | stmt }
 function     ::= ["async"] "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
 pub_item     ::= "pub" (function | struct | enum | type | import)
-stmt         ::= pub_item | import | const | let | using | with | set | if_stmt | while | for | break | continue | return | throw | defer | test | expr ";"
+stmt         ::= pub_item | import | const | let | using | with | set | if_stmt | while | for | break | continue | return | throw | defer | yield | test | expr ";"
 import       ::= "import" string "as" ident ";"
 let          ::= "let" ident [":" type] "=" expr ";"
 using        ::= "using" ident [":" type] "=" expr ";"
@@ -481,6 +481,7 @@ continue     ::= "continue" ";"
 return       ::= "return" [expr] ";"
 throw        ::= "throw" expr ";"
 defer        ::= "defer" expr ";"
+yield        ::= "yield" expr ";"
 test         ::= "test" string block
 block        ::= "{" { stmt } [expr] "}"
 
@@ -589,6 +590,12 @@ defer cleanup();
 with time = time.fixed("2026-01-01T00:00:00Z") {
     print(time.now());
 }
+```
+
+### Yield
+
+```
+yield value;
 ```
 
 ### If Statement
