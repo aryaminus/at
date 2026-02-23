@@ -755,12 +755,12 @@ impl TypeChecker {
                 if self.is_local_in_current_scope(&name.name) {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
+                self.push_scope();
                 let value_ty = self.check_expr(value);
                 self.bind_or_refine_local(name, value_ty.clone());
                 self.infer_inner_from_expr(value, &value_ty);
                 self.bind_inner_types(name, &value_ty);
                 self.insert_capability(&name.name);
-                self.push_scope();
                 for stmt in body {
                     self.check_stmt(stmt);
                 }
