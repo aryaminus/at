@@ -26,6 +26,8 @@ use lsp_types::{
 };
 use sha2::{Digest, Sha256};
 
+const REMOTE_DIAGNOSTIC_CODE: &str = "LSP001";
+
 pub fn run_stdio() -> Result<(), String> {
     let (connection, io_threads) = Connection::stdio();
 
@@ -1146,6 +1148,9 @@ fn load_module_cached(
     cache: &mut HashMap<String, CachedModule>,
 ) -> Option<CachedModule> {
     let resolved = resolve_import_path(base_uri, path)?;
+    if resolved.starts_with("http://") || resolved.starts_with("https://") {
+        return None;
+    }
     let canonical = std::path::Path::new(&resolved).canonicalize().ok()?;
     let key = canonical.to_string_lossy().to_string();
     let metadata = std::fs::metadata(&canonical).ok();
@@ -1218,7 +1223,7 @@ fn hash_text(text: &str) -> u64 {
 
 fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
     if path.starts_with("http://") || path.starts_with("https://") {
-        return resolve_remote_import(path);
+        return resolve_remote_import(path).or_else(|| Some(path.to_string()));
     }
 
     if path == "std" || path == "std.at" {
@@ -1240,6 +1245,13 @@ fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
         base_dir.join(candidate)
     };
     Some(resolved.to_string_lossy().to_string())
+}
+
+fn remote_pending_message(resolved: &str) -> Option<String> {
+    if resolved.starts_with("http://") || resolved.starts_with("https://") {
+        return Some(format!("remote import {resolved} is pending download",));
+    }
+    None
 }
 
 fn uri_to_path(uri: &Uri) -> Option<String> {
@@ -1270,6 +1282,12 @@ fn uri_to_path(uri: &Uri) -> Option<String> {
 fn resolve_remote_import(url: &str) -> Option<String> {
     let root = std::env::current_dir().ok()?;
     let lock_path = root.join(".at").join("lock");
+    if let Some((hash, _, _)) = read_remote_meta(&root, url) {
+        let cached = root.join(".at").join("cache").join(format!("{hash}.at"));
+        if cached.exists() {
+            return Some(cached.to_string_lossy().to_string());
+        }
+    }
     if !lock_path.exists() {
         if let Some(cached) = resolve_legacy_cached_path(&root, url) {
             return Some(cached);
@@ -1320,15 +1338,54 @@ fn resolve_legacy_cached_path(root: &std::path::Path, url: &str) -> Option<Strin
     None
 }
 
-fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Option<String> {
-    let response = ureq::get(url).call().ok()?;
-    let contents = response.into_string().ok()?;
+fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Result<String, FetchError> {
+    let cache_dir = root.join(".at");
+    std::fs::create_dir_all(&cache_dir).map_err(FetchError::Io)?;
+    let mut request = ureq::get(url).timeout(std::time::Duration::from_secs(10));
+    let cached_meta = read_remote_meta(root, url);
+    if let Some((_, etag, last_modified)) = &cached_meta {
+        if let Some(etag) = etag {
+            request = request.set("If-None-Match", etag);
+        }
+        if let Some(last_modified) = last_modified {
+            request = request.set("If-Modified-Since", last_modified);
+        }
+    }
+    let response = request.call().map_err(FetchError::Http)?;
+    let status = response.status();
+    if status == 304 {
+        if let Some((hash, _, _)) = cached_meta {
+            let cached_path = root.join(".at").join("cache").join(format!("{hash}.at"));
+            if cached_path.exists() {
+                return Ok(cached_path.to_string_lossy().to_string());
+            }
+        }
+    }
+    if !(200..300).contains(&status) {
+        return Err(FetchError::Status(status));
+    }
+    let meta = response
+        .header("etag")
+        .or_else(|| response.header("ETag"))
+        .map(|value| value.to_string());
+    let last_modified = response
+        .header("last-modified")
+        .or_else(|| response.header("Last-Modified"))
+        .map(|value| value.to_string());
+    let contents = response.into_string().map_err(FetchError::Io)?;
     let hash = hash_contents(&contents);
-    let cache_dir = root.join(".at").join("cache");
-    std::fs::create_dir_all(&cache_dir).ok()?;
-    let path = cache_dir.join(format!("{hash}.at"));
-    std::fs::write(&path, contents).ok()?;
-    Some(path.to_string_lossy().to_string())
+    let cache_path = root.join(".at").join("cache");
+    std::fs::create_dir_all(&cache_path).map_err(FetchError::Io)?;
+    let path = cache_path.join(format!("{hash}.at"));
+    std::fs::write(&path, contents).map_err(FetchError::Io)?;
+    let _ = write_remote_meta(
+        &cache_dir,
+        url,
+        &hash,
+        meta.as_deref(),
+        last_modified.as_deref(),
+    );
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn enqueue_remote_fetch(root: std::path::PathBuf, url: String) {
@@ -1357,6 +1414,84 @@ fn hash_contents(contents: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[derive(Debug)]
+enum FetchError {
+    Http(ureq::Error),
+    Status(u16),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Http(err) => write!(f, "{err}"),
+            FetchError::Status(status) => write!(f, "remote returned status {status}"),
+            FetchError::Io(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+fn remote_meta_path(root: &std::path::Path, url: &str) -> std::path::PathBuf {
+    let encoded = hex::encode(Sha256::digest(url.as_bytes()));
+    root.join(".at")
+        .join("remote")
+        .join(format!("{encoded}.meta"))
+}
+
+fn read_remote_meta(
+    root: &std::path::Path,
+    url: &str,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let path = remote_meta_path(root, url);
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut hash = None;
+    let mut etag = None;
+    let mut last_modified = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "hash" => hash = Some(value.to_string()),
+                "etag" => etag = Some(value.to_string()),
+                "last_modified" => last_modified = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    hash.map(|hash| (hash, etag, last_modified))
+}
+
+fn write_remote_meta(
+    root: &std::path::Path,
+    url: &str,
+    hash: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<(), std::io::Error> {
+    let path = remote_meta_path(root, url);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut contents = String::new();
+    contents.push_str("hash=");
+    contents.push_str(hash);
+    contents.push('\n');
+    if let Some(etag) = etag {
+        contents.push_str("etag=");
+        contents.push_str(etag);
+        contents.push('\n');
+    }
+    if let Some(last_modified) = last_modified {
+        contents.push_str("last_modified=");
+        contents.push_str(last_modified);
+        contents.push('\n');
+    }
+    std::fs::write(path, contents)
 }
 
 fn path_to_uri(path: &str) -> Option<Uri> {
@@ -1467,6 +1602,9 @@ fn publish_diagnostics(
     module: Option<&Module>,
 ) -> Result<(), String> {
     let mut diagnostics = Vec::new();
+    if let Some(remote_message) = collect_remote_diagnostics(module, text, url) {
+        diagnostics.push(remote_message);
+    }
     match module.cloned().or_else(|| parse_module(text).ok()) {
         Some(module) => {
             if let Err(errors) = at_check::typecheck_module(&module) {
@@ -1503,6 +1641,37 @@ fn publish_diagnostics(
         .send(Message::Notification(notification))
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn collect_remote_diagnostics(
+    module: Option<&Module>,
+    text: &str,
+    url: &Uri,
+) -> Option<Diagnostic> {
+    let module = module.cloned().or_else(|| parse_module(text).ok())?;
+    let base_uri = url;
+    for stmt in &module.stmts {
+        if let at_syntax::Stmt::Import { path, alias, .. } = stmt {
+            let resolved = resolve_import_path(base_uri, path)?;
+            if let Some(message) = remote_pending_message(&resolved) {
+                let range = span_to_range(text, alias.span);
+                return Some(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(lsp_types::NumberOrString::String(
+                        REMOTE_DIAGNOSTIC_CODE.to_string(),
+                    )),
+                    code_description: None,
+                    source: Some("at".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+    }
+    None
 }
 
 fn parse_error_to_diagnostic(text: &str, err: ParseError) -> Diagnostic {

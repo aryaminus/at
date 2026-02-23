@@ -1654,8 +1654,9 @@ fn indent_to(out: &mut String, indent: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::format_module;
+    use super::{format_module, FormatterDisplay};
     use at_parser::parse_module;
+    use at_syntax::AstDisplay;
 
     #[test]
     fn formats_arrays_and_helpers() {
@@ -1710,5 +1711,17 @@ return match x{some(v)=>v,none=>0,};
 
 "#;
         assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn formatter_display_matches_format_module() {
+        let source = r#"
+fn f(x: int) -> int {
+    return x + 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let formatted = FormatterDisplay.format_module(&module);
+        assert_eq!(formatted, format_module(&module));
     }
 }
