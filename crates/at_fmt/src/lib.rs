@@ -202,6 +202,7 @@ fn stmt_span(stmt: &Stmt) -> usize {
         Stmt::Continue { continue_span, .. } => continue_span.start,
         Stmt::Expr { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::Return { expr, .. } => expr.as_ref().and_then(expr_span).unwrap_or(0),
+        Stmt::Throw { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::Block { stmts, .. } => stmts
             .first()
             .and_then(|stmt| Some(stmt_span(stmt)))
@@ -585,6 +586,15 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 if let Some(expr_span) = expr_span(expr) {
                     comment_state.emit_inline_between(out, expr_span, expr_span + 1);
                 }
+            }
+            out.push_str(";\n");
+        }
+        Stmt::Throw { expr, .. } => {
+            indent_to(out, indent);
+            out.push_str("throw ");
+            format_expr_with_indent(expr, out, indent, comment_state);
+            if let Some(expr_span) = expr_span(expr) {
+                comment_state.emit_inline_between(out, expr_span, expr_span + 1);
             }
             out.push_str(";\n");
         }
@@ -1294,6 +1304,9 @@ fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &Has
             if let Some(expr) = expr {
                 collect_needs_expr(expr, needs, import_aliases);
             }
+        }
+        Stmt::Throw { expr, .. } => {
+            collect_needs_expr(expr, needs, import_aliases);
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {

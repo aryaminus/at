@@ -31,6 +31,7 @@ pub enum TokenKind {
     Break,
     Continue,
     Return,
+    Throw,
     Let,
     Const,
     Mut,
@@ -333,6 +334,7 @@ impl<'a> Parser<'a> {
             TokenKind::Using => self.parse_using_stmt(),
             TokenKind::Set => self.parse_set_stmt(),
             TokenKind::Return => self.parse_return_stmt(),
+            TokenKind::Throw => self.parse_throw_stmt(),
             TokenKind::Test => self.parse_test_stmt(),
             TokenKind::While => self.parse_while_stmt(),
             TokenKind::For => self.parse_for_stmt(),
@@ -897,6 +899,16 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Return {
             id: self.alloc_id(),
             expr: Some(expr),
+        })
+    }
+
+    fn parse_throw_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Throw {
+            id: self.alloc_id(),
+            expr,
         })
     }
 
@@ -3033,6 +3045,7 @@ impl<'a> Lexer<'a> {
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,
+            "throw" => TokenKind::Throw,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "mut" => TokenKind::Mut,

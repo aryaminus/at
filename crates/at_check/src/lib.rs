@@ -707,6 +707,27 @@ impl TypeChecker {
                     }
                 }
             },
+            Stmt::Throw { expr, .. } => {
+                let ty = self.check_expr(expr);
+                if !matches!(ty, SimpleType::Result(_, _)) && ty != SimpleType::Unknown {
+                    self.push_error(
+                        format!("throw expects result, got {}", format_type(&ty)),
+                        expr_span(expr),
+                    );
+                }
+                if self.current_return == SimpleType::Unknown {
+                    self.current_return = SimpleType::Result(
+                        Box::new(SimpleType::Unknown),
+                        Box::new(SimpleType::Unknown),
+                    );
+                }
+                if matches!(self.current_return, SimpleType::Result(_, _)) {
+                    self.last_result_ok = None;
+                    self.last_result_err = None;
+                    self.infer_inner_from_expr(expr, &ty);
+                    self.update_return_result_inners(expr_span(expr));
+                }
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {

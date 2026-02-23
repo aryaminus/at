@@ -450,6 +450,11 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
                     unreachable_start = Some(Span::new(0, 0));
                 }
             }
+            Stmt::Throw { .. } => {
+                if unreachable_start.is_none() {
+                    unreachable_start = Some(Span::new(0, 0));
+                }
+            }
             _ => {
                 if let Some(span) = unreachable_start {
                     push_rule(
@@ -556,6 +561,9 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             if let Some(expr) = expr {
                 collect_used_capabilities_expr(expr, used);
             }
+        }
+        Stmt::Throw { expr, .. } => {
+            collect_used_capabilities_expr(expr, used);
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
@@ -769,6 +777,9 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
             if let Some(expr) = expr {
                 lint_unused_match_bindings_expr(expr, config, errors);
             }
+        }
+        Stmt::Throw { expr, .. } => {
+            lint_unused_match_bindings_expr(expr, config, errors);
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
@@ -1160,6 +1171,9 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
                 collect_local_uses_expr(expr, used);
             }
         }
+        Stmt::Throw { expr, .. } => {
+            collect_local_uses_expr(expr, used);
+        }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_local_uses_stmt(stmt, used);
@@ -1401,6 +1415,9 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(expr, used);
             }
         }
+        Stmt::Throw { expr, .. } => {
+            collect_alias_usage_expr(expr, used);
+        }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_alias_usage_stmt(stmt, used);
@@ -1627,6 +1644,9 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             if let Some(expr) = expr {
                 collect_called_functions_expr(expr, used);
             }
+        }
+        Stmt::Throw { expr, .. } => {
+            collect_called_functions_expr(expr, used);
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {

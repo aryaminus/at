@@ -112,6 +112,7 @@ pub enum Op {
     Builtin(Builtin),
     Assert,
     Try,
+    Throw,
     Add,
     Sub,
     Mul,
@@ -872,6 +873,10 @@ impl Compiler {
                     chunk.push(Op::Const(unit_index), None);
                 }
                 chunk.push(Op::Return, expr.as_ref().and_then(expr_span));
+            }
+            Stmt::Throw { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::Throw, expr_span(expr));
             }
             Stmt::Block { stmts, .. } => {
                 self.push_scope();
@@ -2448,6 +2453,9 @@ impl Compiler {
                     self.collect_free_vars_expr(expr, bound, captures, seen);
                 }
             }
+            Stmt::Throw { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_bound_scope(bound);
                 for stmt in stmts {
@@ -3466,6 +3474,31 @@ impl Vm {
                         _ => {
                             return Err(self.runtime_error(
                                 "? expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
+                Op::Throw => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Result(Err(inner)) => {
+                            let span = self.current_span(program);
+                            let message = match inner.as_ref() {
+                                Value::String(text) => text.as_ref().clone(),
+                                other => format_value(other),
+                            };
+                            return Err(self.runtime_error(message, span, program));
+                        }
+                        Value::Result(Ok(inner)) => {
+                            self.stack.push(Value::Result(Ok(inner)));
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "throw expects result".to_string(),
                                 self.current_span(program),
                                 program,
                             ))
