@@ -4271,6 +4271,7 @@ fn f() {
         set i = i + 1;
         continue;
     }
+
     while i < 10 {
         break;
     }
@@ -4278,5 +4279,19 @@ fn f() {
 "#;
         let module = parse_module(source).expect("parse module");
         assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_yield() {
+        let source = r#"
+fn f() {
+    yield 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("yield is not supported")));
     }
 }
