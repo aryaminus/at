@@ -62,6 +62,21 @@ pub fn typecheck_module(module: &Module) -> Result<(), Vec<TypeError>> {
     }
 }
 
+pub fn typecheck_modules(modules: &[Module]) -> Result<(), Vec<TypeError>> {
+    let mut checker = TypeChecker::new();
+    for module in modules {
+        checker.load_functions(module);
+    }
+    for module in modules {
+        checker.check_module(module);
+    }
+    if checker.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(checker.errors)
+    }
+}
+
 pub fn infer_function_returns(module: &Module) -> HashMap<String, String> {
     let mut checker = TypeChecker::new();
     checker.load_functions(module);

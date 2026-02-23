@@ -513,7 +513,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(errors) = at_check::typecheck_module(&loaded.module) {
+        if let Err(errors) = at_check::typecheck_modules(&[loaded.module.clone()]) {
             for error in errors {
                 eprintln!(
                     "{}",
