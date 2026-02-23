@@ -479,7 +479,7 @@ for          ::= "for" ident "in" expr block
 break        ::= "break" ";"
 continue     ::= "continue" ";"
 return       ::= "return" [expr] ";"
-throw        ::= "throw" expr ";"
+throw        ::= ("throw" | "raise") expr ";"
 defer        ::= "defer" expr ";"
 yield        ::= "yield" expr ";"
 test         ::= "test" string block
@@ -576,6 +576,7 @@ async fn fetch_value() {
 
 ```
 throw err("failed");
+raise err("failed");
 ```
 
 ### Defer
