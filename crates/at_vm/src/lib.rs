@@ -107,6 +107,8 @@ pub enum Op {
     LoadLocal(usize),
     StoreLocal(usize),
     GrantCapability(String),
+    PushCapabilityScope,
+    PopCapabilityScope,
     Call(usize, usize),
     CallAsync(usize, usize),
     Builtin(Builtin),
@@ -696,6 +698,7 @@ impl Compiler {
             Stmt::With {
                 name, value, body, ..
             } => {
+                chunk.push(Op::PushCapabilityScope, Some(name.span));
                 self.compile_expr(value, chunk)?;
                 let slot = self.bind_local_checked(&name.name, name.span)?;
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
@@ -705,6 +708,7 @@ impl Compiler {
                     self.compile_stmt(stmt, chunk)?;
                 }
                 self.pop_scope();
+                chunk.push(Op::PopCapabilityScope, Some(name.span));
             }
             Stmt::Yield { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
@@ -2688,6 +2692,7 @@ struct Frame {
     locals: Vec<Value>,
     capabilities: HashSet<String>,
     defers: Vec<usize>,
+    capability_scopes: Vec<Vec<String>>,
 }
 
 pub struct Vm {
@@ -2748,6 +2753,7 @@ impl Vm {
             locals,
             capabilities,
             defers: Vec::new(),
+            capability_scopes: Vec::new(),
         });
         let result = self
             .run_with_existing_frames(program)?
@@ -2877,6 +2883,7 @@ impl Vm {
             locals,
             capabilities,
             defers: Vec::new(),
+            capability_scopes: Vec::new(),
         });
         self.run_with_existing_frames(program)
     }
@@ -2933,6 +2940,7 @@ impl Vm {
                             locals,
                             capabilities: parent_capabilities.clone(),
                             defers: Vec::new(),
+                            capability_scopes: Vec::new(),
                         });
                         let _ = self.run_with_existing_frames(program)?;
                     }
@@ -2980,6 +2988,19 @@ impl Vm {
                 }
                 Op::GrantCapability(name) => {
                     self.frames[frame_index].capabilities.insert(name.clone());
+                    if let Some(scope) = self.frames[frame_index].capability_scopes.last_mut() {
+                        scope.push(name.clone());
+                    }
+                }
+                Op::PushCapabilityScope => {
+                    self.frames[frame_index].capability_scopes.push(Vec::new());
+                }
+                Op::PopCapabilityScope => {
+                    if let Some(scope) = self.frames[frame_index].capability_scopes.pop() {
+                        for name in scope {
+                            self.frames[frame_index].capabilities.remove(&name);
+                        }
+                    }
                 }
                 Op::Closure(func_id, capture_count) => {
                     let mut captures = Vec::with_capacity(*capture_count);
@@ -3052,6 +3073,7 @@ impl Vm {
                         locals,
                         capabilities,
                         defers: Vec::new(),
+                        capability_scopes: Vec::new(),
                     });
                 }
                 Op::CallValue(arg_count) => {
@@ -3134,6 +3156,7 @@ impl Vm {
                         locals,
                         capabilities,
                         defers: Vec::new(),
+                        capability_scopes: Vec::new(),
                     });
                 }
                 Op::CallAsync(func_id, arg_count) => {
