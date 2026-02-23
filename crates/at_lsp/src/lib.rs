@@ -1689,6 +1689,7 @@ fn stmt_span(stmt: &at_syntax::Stmt) -> Span {
             expr.as_ref().and_then(expr_span).unwrap_or(Span::new(0, 0))
         }
         at_syntax::Stmt::Throw { expr, .. } => expr_span(expr).unwrap_or(Span::new(0, 0)),
+        at_syntax::Stmt::Defer { expr, .. } => expr_span(expr).unwrap_or(Span::new(0, 0)),
         at_syntax::Stmt::Block { stmts, .. } => {
             if let (Some(first), Some(last)) = (stmts.first(), stmts.last()) {
                 let start = stmt_span(first).start;

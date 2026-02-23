@@ -113,6 +113,7 @@ pub enum Op {
     Assert,
     Try,
     Throw,
+    Defer,
     Add,
     Sub,
     Mul,
@@ -877,6 +878,10 @@ impl Compiler {
             Stmt::Throw { expr, .. } => {
                 self.compile_expr(expr, chunk)?;
                 chunk.push(Op::Throw, expr_span(expr));
+            }
+            Stmt::Defer { expr, .. } => {
+                self.compile_expr(expr, chunk)?;
+                chunk.push(Op::Defer, expr_span(expr));
             }
             Stmt::Block { stmts, .. } => {
                 self.push_scope();
@@ -2456,6 +2461,9 @@ impl Compiler {
             Stmt::Throw { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
+            Stmt::Defer { expr, .. } => {
+                self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_bound_scope(bound);
                 for stmt in stmts {
@@ -2643,6 +2651,7 @@ struct Frame {
     ip: usize,
     locals: Vec<Value>,
     capabilities: HashSet<String>,
+    defers: Vec<usize>,
 }
 
 pub struct Vm {
@@ -2702,6 +2711,7 @@ impl Vm {
             ip: 0,
             locals,
             capabilities,
+            defers: Vec::new(),
         });
         let result = self
             .run_with_existing_frames(program)?
@@ -2830,6 +2840,7 @@ impl Vm {
             ip: 0,
             locals,
             capabilities,
+            defers: Vec::new(),
         });
         self.run_with_existing_frames(program)
     }
@@ -2873,7 +2884,24 @@ impl Vm {
             };
 
             if frame_ip >= chunk.code.len() {
-                return Ok(self.stack.pop());
+                let result = self.stack.pop();
+                if frame_chunk_id != usize::MAX {
+                    let defers = std::mem::take(&mut self.frames[frame_index].defers);
+                    let parent_capabilities = self.frames[frame_index].capabilities.clone();
+                    self.frames.pop();
+                    for func_id in defers.into_iter().rev() {
+                        let locals = self.take_locals(0);
+                        self.frames.push(Frame {
+                            chunk_id: func_id,
+                            ip: 0,
+                            locals,
+                            capabilities: parent_capabilities.clone(),
+                            defers: Vec::new(),
+                        });
+                        let _ = self.run_with_existing_frames(program)?;
+                    }
+                }
+                return Ok(result);
             }
 
             set_stack_trace(self.build_stack_trace(program));
@@ -2987,6 +3015,7 @@ impl Vm {
                         ip: 0,
                         locals,
                         capabilities,
+                        defers: Vec::new(),
                     });
                 }
                 Op::CallValue(arg_count) => {
@@ -3068,6 +3097,7 @@ impl Vm {
                         ip: 0,
                         locals,
                         capabilities,
+                        defers: Vec::new(),
                     });
                 }
                 Op::CallAsync(func_id, arg_count) => {
@@ -3499,6 +3529,23 @@ impl Vm {
                         _ => {
                             return Err(self.runtime_error(
                                 "throw expects result".to_string(),
+                                self.current_span(program),
+                                program,
+                            ))
+                        }
+                    }
+                }
+                Op::Defer => {
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
+                    match value {
+                        Value::Closure(closure) => {
+                            self.frames[frame_index].defers.push(closure.func_id);
+                        }
+                        _ => {
+                            return Err(self.runtime_error(
+                                "defer expects closure".to_string(),
                                 self.current_span(program),
                                 program,
                             ))

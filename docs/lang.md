@@ -468,7 +468,7 @@ Run tests with `at test file.at`.
 program      ::= { function | stmt }
 function     ::= ["async"] "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
 pub_item     ::= "pub" (function | struct | enum | type | import)
-stmt         ::= pub_item | import | const | let | using | set | if_stmt | while | for | break | continue | return | throw | test | expr ";"
+stmt         ::= pub_item | import | const | let | using | set | if_stmt | while | for | break | continue | return | throw | defer | test | expr ";"
 import       ::= "import" string "as" ident ";"
 let          ::= "let" ident [":" type] "=" expr ";"
 using        ::= "using" ident [":" type] "=" expr ";"
@@ -479,6 +479,7 @@ break        ::= "break" ";"
 continue     ::= "continue" ";"
 return       ::= "return" [expr] ";"
 throw        ::= "throw" expr ";"
+defer        ::= "defer" expr ";"
 test         ::= "test" string block
 block        ::= "{" { stmt } [expr] "}"
 
@@ -573,6 +574,12 @@ async fn fetch_value() {
 
 ```
 throw err("failed");
+```
+
+### Defer
+
+```
+defer cleanup();
 ```
 
 ### If Statement

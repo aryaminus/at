@@ -32,6 +32,7 @@ pub enum TokenKind {
     Continue,
     Return,
     Throw,
+    Defer,
     Let,
     Const,
     Mut,
@@ -335,6 +336,7 @@ impl<'a> Parser<'a> {
             TokenKind::Set => self.parse_set_stmt(),
             TokenKind::Return => self.parse_return_stmt(),
             TokenKind::Throw => self.parse_throw_stmt(),
+            TokenKind::Defer => self.parse_defer_stmt(),
             TokenKind::Test => self.parse_test_stmt(),
             TokenKind::While => self.parse_while_stmt(),
             TokenKind::For => self.parse_for_stmt(),
@@ -907,6 +909,16 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Throw {
+            id: self.alloc_id(),
+            expr,
+        })
+    }
+
+    fn parse_defer_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let expr = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon)?;
+        Ok(Stmt::Defer {
             id: self.alloc_id(),
             expr,
         })
@@ -3046,6 +3058,7 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,
             "throw" => TokenKind::Throw,
+            "defer" => TokenKind::Defer,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "mut" => TokenKind::Mut,

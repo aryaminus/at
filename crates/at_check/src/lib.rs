@@ -728,6 +728,9 @@ impl TypeChecker {
                     self.update_return_result_inners(expr_span(expr));
                 }
             }
+            Stmt::Defer { expr, .. } => {
+                self.check_expr(expr);
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {
