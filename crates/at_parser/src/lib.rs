@@ -3294,6 +3294,18 @@ fn f(a: int, b: int,) {
     }
 
     #[test]
+    fn parses_with_and_yield() {
+        let source = r#"
+fn f() {
+    with time = time.fixed("2026-01-01T00:00:00Z") {
+        yield time.now();
+    }
+}
+"#;
+        assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
     fn parses_logical_ops() {
         let source = r#"
 fn f() {
