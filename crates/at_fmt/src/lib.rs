@@ -132,6 +132,68 @@ pub fn format_module(module: &Module) -> String {
     out
 }
 
+pub fn format_function_string(func: &Function) -> String {
+    let mut out = String::new();
+    let import_aliases = HashSet::new();
+    let mut comment_state = CommentState::new(Vec::new());
+    format_function(func, &mut out, 0, &import_aliases, &mut comment_state);
+    out
+}
+
+pub fn format_stmt_string(stmt: &Stmt) -> String {
+    let mut out = String::new();
+    let mut comment_state = CommentState::new(Vec::new());
+    format_stmt(stmt, &mut out, 0, &mut comment_state);
+    out
+}
+
+pub fn format_expr_string(expr: &Expr) -> String {
+    let mut out = String::new();
+    let mut comment_state = CommentState::new(Vec::new());
+    format_expr_with_indent(expr, &mut out, 0, &mut comment_state);
+    out
+}
+
+pub fn format_type_ref_string(ty: &at_syntax::TypeRef) -> String {
+    let mut out = String::new();
+    format_type_ref(ty, &mut out);
+    out
+}
+
+pub fn format_pattern_string(pattern: &MatchPattern) -> String {
+    let mut out = String::new();
+    format_match_pattern(pattern, &mut out);
+    out
+}
+
+pub struct FormatterDisplay;
+
+impl at_syntax::AstDisplay for FormatterDisplay {
+    fn format_module(&self, module: &Module) -> String {
+        format_module(module)
+    }
+
+    fn format_function(&self, function: &Function) -> String {
+        format_function_string(function)
+    }
+
+    fn format_stmt(&self, stmt: &Stmt) -> String {
+        format_stmt_string(stmt)
+    }
+
+    fn format_expr(&self, expr: &Expr) -> String {
+        format_expr_string(expr)
+    }
+
+    fn format_type_ref(&self, ty: &at_syntax::TypeRef) -> String {
+        format_type_ref_string(ty)
+    }
+
+    fn format_pattern(&self, pattern: &MatchPattern) -> String {
+        format_pattern_string(pattern)
+    }
+}
+
 fn format_function(
     func: &Function,
     out: &mut String,

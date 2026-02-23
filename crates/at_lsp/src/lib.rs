@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use at_lint;
@@ -1273,7 +1274,8 @@ fn resolve_remote_import(url: &str) -> Option<String> {
         if let Some(cached) = resolve_legacy_cached_path(&root, url) {
             return Some(cached);
         }
-        return fetch_and_cache_remote(&root, url);
+        enqueue_remote_fetch(root, url.to_string());
+        return None;
     }
 
     let contents = std::fs::read_to_string(lock_path).ok()?;
@@ -1301,7 +1303,8 @@ fn resolve_remote_import(url: &str) -> Option<String> {
     if let Some(cached) = resolve_legacy_cached_path(&root, url) {
         return Some(cached);
     }
-    fetch_and_cache_remote(&root, url)
+    enqueue_remote_fetch(root, url.to_string());
+    None
 }
 
 fn resolve_legacy_cached_path(root: &std::path::Path, url: &str) -> Option<String> {
@@ -1326,6 +1329,28 @@ fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Option<String> {
     let path = cache_dir.join(format!("{hash}.at"));
     std::fs::write(&path, contents).ok()?;
     Some(path.to_string_lossy().to_string())
+}
+
+fn enqueue_remote_fetch(root: std::path::PathBuf, url: String) {
+    static FETCHES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let fetches = FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut pending = match fetches.lock() {
+        Ok(guard) => guard,
+        Err(err) => err.into_inner(),
+    };
+    if pending.contains(&url) {
+        return;
+    }
+    pending.insert(url.clone());
+    std::thread::spawn(move || {
+        let _ = fetch_and_cache_remote(&root, &url);
+        let fetches = FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut pending = match fetches.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        pending.remove(&url);
+    });
 }
 
 fn hash_contents(contents: &str) -> String {

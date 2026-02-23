@@ -481,6 +481,15 @@ pub struct Comment {
     pub id: NodeId,
 }
 
+pub trait AstDisplay {
+    fn format_module(&self, module: &Module) -> String;
+    fn format_function(&self, function: &Function) -> String;
+    fn format_stmt(&self, stmt: &Stmt) -> String;
+    fn format_expr(&self, expr: &Expr) -> String;
+    fn format_type_ref(&self, ty: &TypeRef) -> String;
+    fn format_pattern(&self, pattern: &MatchPattern) -> String;
+}
+
 pub trait AstVisitor {
     fn visit_module(&mut self, module: &Module) {
         walk_module(self, module);
