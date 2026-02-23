@@ -456,6 +456,19 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
                 }
             }
             Stmt::Defer { .. } => {}
+            Stmt::With { body, .. } => {
+                if let Some(span) = unreachable_start {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::UnreachableCode,
+                        "unreachable code after return/break/continue".to_string(),
+                        Some(span),
+                    );
+                    unreachable_start = None;
+                }
+                check_unreachable_stmts(body, config, errors);
+            }
             _ => {
                 if let Some(span) = unreachable_start {
                     push_rule(
@@ -568,6 +581,12 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
         }
         Stmt::Defer { expr, .. } => {
             collect_used_capabilities_expr(expr, used);
+        }
+        Stmt::With { value, body, .. } => {
+            collect_used_capabilities_expr(value, used);
+            for stmt in body {
+                collect_used_capabilities_stmt(stmt, used);
+            }
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
@@ -787,6 +806,12 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
         }
         Stmt::Defer { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
+        }
+        Stmt::With { value, body, .. } => {
+            lint_unused_match_bindings_expr(value, config, errors);
+            for stmt in body {
+                lint_unused_match_bindings_stmt(stmt, config, errors);
+            }
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
@@ -1184,6 +1209,12 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
         Stmt::Defer { expr, .. } => {
             collect_local_uses_expr(expr, used);
         }
+        Stmt::With { value, body, .. } => {
+            collect_local_uses_expr(value, used);
+            for stmt in body {
+                collect_local_uses_stmt(stmt, used);
+            }
+        }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_local_uses_stmt(stmt, used);
@@ -1431,6 +1462,12 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
         Stmt::Defer { expr, .. } => {
             collect_alias_usage_expr(expr, used);
         }
+        Stmt::With { value, body, .. } => {
+            collect_alias_usage_expr(value, used);
+            for stmt in body {
+                collect_alias_usage_stmt(stmt, used);
+            }
+        }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
                 collect_alias_usage_stmt(stmt, used);
@@ -1663,6 +1700,12 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
         }
         Stmt::Defer { expr, .. } => {
             collect_called_functions_expr(expr, used);
+        }
+        Stmt::With { value, body, .. } => {
+            collect_called_functions_expr(value, used);
+            for stmt in body {
+                collect_called_functions_stmt(stmt, used);
+            }
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {

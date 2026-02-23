@@ -33,6 +33,7 @@ pub enum TokenKind {
     Return,
     Throw,
     Defer,
+    With,
     Let,
     Const,
     Mut,
@@ -337,6 +338,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return_stmt(),
             TokenKind::Throw => self.parse_throw_stmt(),
             TokenKind::Defer => self.parse_defer_stmt(),
+            TokenKind::With => self.parse_with_stmt(),
             TokenKind::Test => self.parse_test_stmt(),
             TokenKind::While => self.parse_while_stmt(),
             TokenKind::For => self.parse_for_stmt(),
@@ -921,6 +923,24 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Defer {
             id: self.alloc_id(),
             expr,
+        })
+    }
+
+    fn parse_with_stmt(&mut self) -> Result<Stmt, ParseError> {
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Equals)?;
+        let value = self.parse_expr()?;
+        let block = self.parse_block_stmt()?;
+        let body = match block {
+            Stmt::Block { stmts, .. } => stmts,
+            _ => Vec::new(),
+        };
+        Ok(Stmt::With {
+            id: self.alloc_id(),
+            name,
+            value,
+            body,
         })
     }
 
@@ -3059,6 +3079,7 @@ impl<'a> Lexer<'a> {
             "return" => TokenKind::Return,
             "throw" => TokenKind::Throw,
             "defer" => TokenKind::Defer,
+            "with" => TokenKind::With,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "mut" => TokenKind::Mut,

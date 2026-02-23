@@ -423,6 +423,12 @@ pub enum Stmt {
         id: NodeId,
         expr: Expr,
     },
+    With {
+        id: NodeId,
+        name: Ident,
+        value: Expr,
+        body: Vec<Stmt>,
+    },
     Block {
         id: NodeId,
         stmts: Vec<Stmt>,
@@ -588,6 +594,12 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
         }
         Stmt::Throw { expr, .. } => visitor.visit_expr(expr),
         Stmt::Defer { expr, .. } => visitor.visit_expr(expr),
+        Stmt::With { value, body, .. } => {
+            visitor.visit_expr(value);
+            for stmt in body {
+                visitor.visit_stmt(stmt);
+            }
+        }
         Stmt::Block { stmts, .. } => {
             for stmt in stmts {
                 visitor.visit_stmt(stmt);

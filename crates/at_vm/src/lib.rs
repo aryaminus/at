@@ -693,6 +693,19 @@ impl Compiler {
                 chunk.push(Op::StoreLocal(slot), Some(name.span));
                 chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
             }
+            Stmt::With {
+                name, value, body, ..
+            } => {
+                self.compile_expr(value, chunk)?;
+                let slot = self.bind_local_checked(&name.name, name.span)?;
+                chunk.push(Op::StoreLocal(slot), Some(name.span));
+                chunk.push(Op::GrantCapability(name.name.clone()), Some(name.span));
+                self.push_scope();
+                for stmt in body {
+                    self.compile_stmt(stmt, chunk)?;
+                }
+                self.pop_scope();
+            }
             Stmt::Set { name, value, .. } => {
                 if self.is_const(&name.name) {
                     return Err(compile_error(
@@ -2463,6 +2476,19 @@ impl Compiler {
             }
             Stmt::Defer { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
+            }
+            Stmt::With {
+                name, value, body, ..
+            } => {
+                self.collect_free_vars_expr(value, bound, captures, seen);
+                self.push_bound_scope(bound);
+                if let Some(scope) = bound.last_mut() {
+                    scope.insert(name.name.clone());
+                }
+                for stmt in body {
+                    self.collect_free_vars_stmt(stmt, bound, captures, seen);
+                }
+                self.pop_bound_scope(bound);
             }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_bound_scope(bound);

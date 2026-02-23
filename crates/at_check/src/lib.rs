@@ -746,6 +746,26 @@ impl TypeChecker {
             Stmt::Defer { expr, .. } => {
                 self.check_expr(expr);
             }
+            Stmt::With {
+                name, value, body, ..
+            } => {
+                self.last_option_inner = None;
+                self.last_result_ok = None;
+                self.last_result_err = None;
+                if self.is_local_in_current_scope(&name.name) {
+                    self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
+                }
+                let value_ty = self.check_expr(value);
+                self.bind_or_refine_local(name, value_ty.clone());
+                self.infer_inner_from_expr(value, &value_ty);
+                self.bind_inner_types(name, &value_ty);
+                self.insert_capability(&name.name);
+                self.push_scope();
+                for stmt in body {
+                    self.check_stmt(stmt);
+                }
+                self.pop_scope();
+            }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
                 self.push_scope();
                 for stmt in stmts {

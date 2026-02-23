@@ -468,10 +468,11 @@ Run tests with `at test file.at`.
 program      ::= { function | stmt }
 function     ::= ["async"] "fn" ident [ "<" ident { "," ident } ">" ] "(" params ")" [ "->" type ] [ "needs" "{" ident { "," ident } "}" ] block
 pub_item     ::= "pub" (function | struct | enum | type | import)
-stmt         ::= pub_item | import | const | let | using | set | if_stmt | while | for | break | continue | return | throw | defer | test | expr ";"
+stmt         ::= pub_item | import | const | let | using | with | set | if_stmt | while | for | break | continue | return | throw | defer | test | expr ";"
 import       ::= "import" string "as" ident ";"
 let          ::= "let" ident [":" type] "=" expr ";"
 using        ::= "using" ident [":" type] "=" expr ";"
+with         ::= "with" ident "=" expr block
 set          ::= "set" ident "=" expr ";"
 while        ::= "while" expr block
 for          ::= "for" ident "in" expr block
@@ -580,6 +581,14 @@ throw err("failed");
 
 ```
 defer cleanup();
+```
+
+### With
+
+```
+with time = time.fixed("2026-01-01T00:00:00Z") {
+    print(time.now());
+}
 ```
 
 ### If Statement

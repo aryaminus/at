@@ -204,6 +204,7 @@ fn stmt_span(stmt: &Stmt) -> usize {
         Stmt::Return { expr, .. } => expr.as_ref().and_then(expr_span).unwrap_or(0),
         Stmt::Throw { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::Defer { expr, .. } => expr_span(expr).unwrap_or(0),
+        Stmt::With { name, .. } => name.span.start,
         Stmt::Block { stmts, .. } => stmts
             .first()
             .and_then(|stmt| Some(stmt_span(stmt)))
@@ -607,6 +608,22 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 comment_state.emit_inline_between(out, expr_span, expr_span + 1);
             }
             out.push_str(";\n");
+        }
+        Stmt::With {
+            name, value, body, ..
+        } => {
+            indent_to(out, indent);
+            out.push_str("with ");
+            out.push_str(&name.name);
+            out.push_str(" = ");
+            format_expr_with_indent(value, out, indent, comment_state);
+            out.push_str(" {\n");
+            for stmt in body {
+                comment_state.emit_until(out, stmt_span(stmt));
+                format_stmt(stmt, out, indent + 4, comment_state);
+            }
+            indent_to(out, indent);
+            out.push_str("}\n");
         }
         Stmt::Block { stmts, .. } => {
             indent_to(out, indent);
@@ -1320,6 +1337,12 @@ fn collect_needs_stmt(stmt: &Stmt, needs: &mut Vec<String>, import_aliases: &Has
         }
         Stmt::Defer { expr, .. } => {
             collect_needs_expr(expr, needs, import_aliases);
+        }
+        Stmt::With { value, body, .. } => {
+            collect_needs_expr(value, needs, import_aliases);
+            for stmt in body {
+                collect_needs_stmt(stmt, needs, import_aliases);
+            }
         }
         Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
             for stmt in stmts {
