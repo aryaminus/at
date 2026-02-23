@@ -516,12 +516,6 @@ fn main() {
         let mut modules = vec![loaded.raw_module.clone()];
         let mut import_errors = Vec::new();
         for import in &loaded.imports {
-            if import.starts_with("http://") || import.starts_with("https://") {
-                continue;
-            }
-            if import.starts_with("stdlib/") {
-                continue;
-            }
             match load_module(import) {
                 Ok(imported) => modules.push(imported.raw_module),
                 Err(err) => import_errors.push(err),
