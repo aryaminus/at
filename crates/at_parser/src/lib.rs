@@ -109,7 +109,7 @@ pub struct Token {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ParseError {
     UnexpectedToken {
         expected: String,
@@ -178,6 +178,8 @@ struct Parser<'a> {
     comments: Vec<Comment>,
     pending_token: Option<Token>,
     next_id: u32,
+    collect_errors: bool,
+    recovered_errors: Vec<ParseError>,
 }
 
 impl<'a> Parser<'a> {
@@ -191,6 +193,8 @@ impl<'a> Parser<'a> {
             comments: Vec::new(),
             pending_token: None,
             next_id: 1,
+            collect_errors: false,
+            recovered_errors: Vec::new(),
         };
         parser.advance();
         parser
@@ -203,6 +207,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_module_with_errors(&mut self) -> (Module, Vec<ParseError>) {
+        self.collect_errors = true;
         let mut functions = Vec::new();
         let mut stmts = Vec::new();
         let mut errors = Vec::new();
@@ -238,6 +243,7 @@ impl<'a> Parser<'a> {
                 },
             }
         }
+        errors.extend(self.recovered_errors.drain(..));
         (
             Module {
                 id: self.alloc_id(),
@@ -469,10 +475,24 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::LBrace)?;
         let mut body = Vec::new();
+        let mut errors = Vec::new();
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
-            body.push(self.parse_stmt()?);
+            match self.parse_stmt() {
+                Ok(stmt) => body.push(stmt),
+                Err(err) => {
+                    errors.push(err);
+                    self.recover_to_stmt_boundary();
+                }
+            }
         }
         self.expect(TokenKind::RBrace)?;
+        if !errors.is_empty() {
+            if self.collect_errors {
+                self.recovered_errors.extend(errors);
+            } else if let Some(err) = errors.first().cloned() {
+                return Err(err);
+            }
+        }
         Ok(Function {
             id: self.alloc_id(),
             name,
@@ -3247,7 +3267,7 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_module;
+    use super::{parse_module, parse_module_with_errors};
 
     #[test]
     fn parses_arrays_and_indexing() {
@@ -3697,6 +3717,23 @@ fn f(x: option<int>) -> int {
 }
 "#;
         assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parse_module_collects_multiple_errors() {
+        let source = r#"
+fn f() {
+    let x = ;
+    let y = ;
+    return 1;
+}
+"#;
+        let (_module, errors) = parse_module_with_errors(source);
+        assert!(
+            errors.len() >= 2,
+            "expected multiple errors, got {}",
+            errors.len()
+        );
     }
 }
 
