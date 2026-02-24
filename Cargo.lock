@@ -71,6 +71,7 @@ dependencies = [
  "hex",
  "lsp-server",
  "lsp-types",
+ "serde",
  "serde_json",
  "sha2",
  "ureq",

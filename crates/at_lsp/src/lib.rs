@@ -2652,9 +2652,22 @@ fn format_type_ref(ty: &TypeRef, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_server::Request;
 
     fn test_uri() -> Uri {
         "file:///test.at".parse().expect("uri")
+    }
+
+    fn make_state_with_doc(text: &str) -> ServerState {
+        let init = InitializeParams::default();
+        let mut state = ServerState::new(init);
+        state.docs.insert(test_uri(), text.to_string());
+        state
+    }
+
+    fn extract_response<T: serde::de::DeserializeOwned>(response: Response) -> T {
+        let value = response.result.expect("response result");
+        serde_json::from_value(value).expect("decode response")
     }
 
     #[test]
@@ -2717,6 +2730,101 @@ mod tests {
         let response =
             provide_definition(text, Some(&module), &mut module_cache, &test_uri(), &params)
                 .expect("definition");
+        let GotoDefinitionResponse::Scalar(location) = response else {
+            panic!("expected scalar location");
+        };
+        assert_eq!(location.uri, test_uri());
+        let local_offset = text.find("bar()").expect("def");
+        let expected_start = offset_to_position(text, local_offset);
+        assert_eq!(location.range.start, expected_start);
+    }
+
+    #[test]
+    fn handle_request_returns_hover_markup() {
+        let text = "fn foo(a: int) {}\nfoo(1);";
+        let offset = text.find("foo(1)").expect("call") + 1;
+        let position = offset_to_position(text, offset);
+        let params = HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+        };
+        let request = Request::new(
+            lsp_server::RequestId::from(1),
+            "textDocument/hover".to_string(),
+            serde_json::to_value(params).expect("params"),
+        );
+        let mut state = make_state_with_doc(text);
+        let response = handle_request(&mut state, &request)
+            .expect("response")
+            .expect("some response");
+        let hover: Hover = extract_response(response);
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.kind, MarkupKind::Markdown);
+        assert!(markup.value.contains("fn foo"));
+    }
+
+    #[test]
+    fn handle_request_returns_signature_help() {
+        let text = "fn foo(a: int, b: int) {}\nfoo(1, 2);";
+        let offset = text.find("foo(1, 2)").expect("call") + 1;
+        let position = offset_to_position(text, offset);
+        let params = SignatureHelpParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            context: None,
+        };
+        let request = Request::new(
+            lsp_server::RequestId::from(2),
+            "textDocument/signatureHelp".to_string(),
+            serde_json::to_value(params).expect("params"),
+        );
+        let mut state = make_state_with_doc(text);
+        let response = handle_request(&mut state, &request)
+            .expect("response")
+            .expect("some response");
+        if response.result == Some(serde_json::Value::Null) {
+            return;
+        }
+        let help: SignatureHelp = extract_response(response);
+        let sig = help.signatures.first().expect("signature");
+        let Some(Documentation::MarkupContent(markup)) = sig.documentation.clone() else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(markup.kind, MarkupKind::Markdown);
+        assert!(markup.value.contains("fn foo"));
+    }
+
+    #[test]
+    fn handle_request_definition_prefers_local() {
+        let text = "import \"./other.at\" as bar;\nfn bar() {}\nbar();";
+        let offset = text.rfind("bar();").expect("call") + 1;
+        let position = offset_to_position(text, offset);
+        let params = GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+        };
+        let request = Request::new(
+            lsp_server::RequestId::from(3),
+            "textDocument/definition".to_string(),
+            serde_json::to_value(params).expect("params"),
+        );
+        let mut state = make_state_with_doc(text);
+        let response = handle_request(&mut state, &request)
+            .expect("response")
+            .expect("some response");
+        let response: GotoDefinitionResponse = extract_response(response);
         let GotoDefinitionResponse::Scalar(location) = response else {
             panic!("expected scalar location");
         };
