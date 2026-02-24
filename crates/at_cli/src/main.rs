@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use at_fmt::format_module;
 use at_mcp::{McpServer, Tool};
-use at_parser::{parse_module_with_errors, ParseError};
+use at_parser::parse_module_with_errors;
 use at_syntax::{Module, Stmt, TypeRef};
 use at_vm::{compile_entry_with_imports, format_value, Chunk, Compiler, Op, Program, Value, Vm};
 use serde_json::{json, Value as JsonValue};
@@ -429,10 +429,11 @@ fn main() {
                 if fix_mode && fixable > 0 {
                     // Apply fixes
                     let fixed_source = at_lint::apply_fixes(&source, &errors);
-                    let formatted_source = match parse_module_with_errors(&fixed_source) {
-                        (module, parse_errors) if parse_errors.is_empty() => format_module(&module),
-                        _ => fixed_source.clone(),
-                    };
+                    let formatted_source =
+                        match parse_module_with_formatted_errors(&fixed_source, Some(path)) {
+                            Ok(module) => format_module(&module),
+                            Err(_) => fixed_source.clone(),
+                        };
 
                     // Write back to file
                     if let Err(err) = fs::write(path, &formatted_source) {
@@ -805,8 +806,8 @@ fn run_repl() {
             continue;
         }
 
-        match parse_module_with_errors(&buffer) {
-            (mut module, errors) if errors.is_empty() => {
+        match parse_module_with_formatted_errors(&buffer, None) {
+            Ok(mut module) => {
                 module.source_path = None;
                 let mut compiler = Compiler::new();
                 let program = match compiler.compile_module(&module) {
@@ -824,8 +825,10 @@ fn run_repl() {
                     Err(err) => eprintln!("{}", format_runtime_error(&err, Some(&buffer))),
                 }
             }
-            (_, errors) => {
-                print_parse_errors(&errors, &buffer, None);
+            Err(lines) => {
+                for line in lines {
+                    eprintln!("{line}");
+                }
             }
         }
 
@@ -838,14 +841,23 @@ fn run_repl() {
 }
 
 fn run_file(path: &str, extra_args: &[String]) {
-    let source = fs::read_to_string(path).ok();
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("error reading {path}: {err}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(lines) = parse_module_with_formatted_errors(&source, Some(path)) {
+        for line in lines {
+            eprintln!("{line}");
+        }
+        std::process::exit(1);
+    }
     let program = match compile_entry_with_imports(path) {
         Ok(program) => program,
         Err(err) => {
-            eprintln!(
-                "{}",
-                format_compile_error(&err, source.as_deref(), Some(path))
-            );
+            eprintln!("{}", format_compile_error(&err, Some(&source), Some(path)));
             std::process::exit(1);
         }
     };
@@ -876,7 +888,7 @@ fn run_file(path: &str, extra_args: &[String]) {
         Ok(Some(value)) => println!("{}", format_value(&value)),
         Ok(None) => {}
         Err(err) => {
-            eprintln!("{}", format_runtime_error(&err, source.as_deref()));
+            eprintln!("{}", format_runtime_error(&err, Some(&source)));
             std::process::exit(1);
         }
     }
@@ -952,26 +964,29 @@ fn format_parse_error(err: &at_parser::ParseError, source: &str, path: Option<&s
     format!("{prefix}: {message}")
 }
 
-fn format_parse_errors(errors: &[ParseError], source: &str, path: Option<&str>) -> String {
-    let mut output = Vec::new();
-    for err in errors {
-        output.push(format_parse_error(err, source, path));
+fn parse_module_with_formatted_errors(
+    source: &str,
+    path: Option<&str>,
+) -> Result<Module, Vec<String>> {
+    let (module, errors) = parse_module_with_errors(source);
+    if errors.is_empty() {
+        return Ok(module);
     }
-    output.join("\n")
+    Err(errors
+        .iter()
+        .map(|err| format_parse_error(err, source, path))
+        .collect())
 }
 
 fn parse_module_or_exit(source: &str, path: Option<&str>) -> Module {
-    let (module, errors) = parse_module_with_errors(source);
-    if errors.is_empty() {
-        return module;
-    }
-    print_parse_errors(&errors, source, path);
-    std::process::exit(1);
-}
-
-fn print_parse_errors(errors: &[ParseError], source: &str, path: Option<&str>) {
-    for err in errors {
-        eprintln!("{}", format_parse_error(err, source, path));
+    match parse_module_with_formatted_errors(source, path) {
+        Ok(module) => module,
+        Err(lines) => {
+            for line in lines {
+                eprintln!("{line}");
+            }
+            std::process::exit(1);
+        }
     }
 }
 
@@ -1167,15 +1182,9 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
 
     let source = fs::read_to_string(&normalized)
         .map_err(|err| format!("error reading {}: {err}", normalized.display()))?;
-    let (module, errors) = parse_module_with_errors(&source);
-    if !errors.is_empty() {
-        return Err(format_parse_errors(
-            &errors,
-            &source,
-            Some(&normalized.display().to_string()),
-        ));
-    }
-    let mut module = module;
+    let normalized_display = normalized.display().to_string();
+    let mut module = parse_module_with_formatted_errors(&source, Some(&normalized_display))
+        .map_err(|lines| lines.join("\n"))?;
     module.source_path = Some(normalized.display().to_string());
     let raw_module = module.clone();
 
@@ -2603,15 +2612,8 @@ fn print_deps_tree(
     let source = fs::read_to_string(&normalized)
         .map_err(|err| format!("error reading {}: {err}", normalized.display()))?;
     let normalized_display = normalized.display().to_string();
-    let (module, errors) = parse_module_with_errors(&source);
-    if !errors.is_empty() {
-        return Err(format_parse_errors(
-            &errors,
-            &source,
-            Some(&normalized_display),
-        ));
-    }
-    let mut module = module;
+    let mut module = parse_module_with_formatted_errors(&source, Some(&normalized_display))
+        .map_err(|lines| lines.join("\n"))?;
     module.source_path = Some(normalized_display.clone());
     let base_dir = normalized
         .parent()

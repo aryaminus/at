@@ -13,7 +13,7 @@ use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
     DocumentHighlightKind, DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, FoldingRange, FoldingRangeKind, FoldingRangeParams,
+    DocumentSymbolResponse, Documentation, FoldingRange, FoldingRangeKind, FoldingRangeParams,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location,
     MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
@@ -35,6 +35,8 @@ struct ServerState {
     docs: HashMap<Uri, String>,
     module_cache: HashMap<String, CachedModule>,
     doc_cache: HashMap<Uri, DocCacheEntry>,
+    diagnostics_cache: HashMap<Uri, u64>,
+    cancelled_requests: HashSet<String>,
 }
 
 // Progress entry is stored as a token -> label string.
@@ -54,6 +56,8 @@ impl ServerState {
             docs: HashMap::new(),
             module_cache: HashMap::new(),
             doc_cache: HashMap::new(),
+            diagnostics_cache: HashMap::new(),
+            cancelled_requests: HashSet::new(),
         }
     }
 }
@@ -206,7 +210,13 @@ pub fn run_stdio() -> Result<(), String> {
                     handle_notification(&connection, &mut state, &notification)?
                 {
                     let module = get_cached_module(&text, &url, &mut state.doc_cache);
-                    publish_diagnostics(&connection, &url, &text, module.as_ref())?;
+                    publish_diagnostics(
+                        &connection,
+                        &url,
+                        &text,
+                        module.as_ref(),
+                        &mut state.diagnostics_cache,
+                    )?;
                 }
             }
             Message::Response(_) => {}
@@ -265,11 +275,14 @@ fn handle_notification(
             let url = params.text_document.uri;
             state.docs.remove(&url);
             state.doc_cache.remove(&url);
+            state.diagnostics_cache.remove(&url);
             Ok(None)
         }
         "$/cancelRequest" => {
-            let _: lsp_types::CancelParams = serde_json::from_value(notification.params.clone())
-                .map_err(|err| err.to_string())?;
+            let params: lsp_types::CancelParams =
+                serde_json::from_value(notification.params.clone())
+                    .map_err(|err| err.to_string())?;
+            state.cancelled_requests.insert(cancel_id_key(&params.id));
             Ok(None)
         }
         _ => Ok(None),
@@ -280,6 +293,15 @@ fn handle_request(
     state: &mut ServerState,
     request: &lsp_server::Request,
 ) -> Result<Option<Response>, String> {
+    let request_key = request.id.to_string();
+    if state.cancelled_requests.remove(&request_key) {
+        let response = Response::new_err(
+            request.id.clone(),
+            lsp_server::ErrorCode::RequestCanceled as i32,
+            "request cancelled".to_string(),
+        );
+        return Ok(Some(response));
+    }
     match request.method.as_str() {
         "textDocument/hover" => {
             let params: HoverParams =
@@ -533,10 +555,7 @@ fn provide_hover(
     if qualifier.is_none() {
         if let Some(info) = functions.get(&name) {
             return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::PlainText,
-                    value: info.signature.clone(),
-                }),
+                contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
                 range: Some(span_to_range(text, info.span)),
             });
         }
@@ -556,10 +575,7 @@ fn provide_hover(
                 &name,
             ) {
                 return Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::PlainText,
-                        value: info.signature,
-                    }),
+                    contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
                     range: None,
                 });
             }
@@ -571,10 +587,7 @@ fn provide_hover(
     if had_qualifier {
         if let Some(info) = functions.get(&name) {
             return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::PlainText,
-                    value: info.signature.clone(),
-                }),
+                contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
                 range: Some(span_to_range(text, info.span)),
             });
         }
@@ -583,10 +596,7 @@ fn provide_hover(
     let imports = imports?;
     let info = imports.get(&name)?;
     Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::PlainText,
-            value: format!("import \"{}\" as {}", info.path, name),
-        }),
+        contents: HoverContents::Markup(hover_import_markdown(&info.path, &name)),
         range: Some(span_to_range(text, info.span)),
     })
 }
@@ -626,8 +636,8 @@ fn provide_signature_help(
         })
         .collect();
     let sig_info = SignatureInformation {
-        label: signature,
-        documentation: None,
+        label: signature.clone(),
+        documentation: Some(Documentation::MarkupContent(signature_markdown(&signature))),
         parameters: Some(parameters),
         active_parameter: None,
     };
@@ -991,6 +1001,19 @@ fn provide_definition(
     let position = params.text_document_position_params.position;
     let offset = position_to_offset(text, position);
     let (name, qualifier) = ident_at_offset_with_qualifier(text, offset)?;
+    let functions = module
+        .map(collect_functions_with_inferred)
+        .or_else(|| collect_functions(text));
+    if let Some(functions) = functions {
+        if let Some(info) = functions.get(&name) {
+            let location = Location {
+                uri: url.clone(),
+                range: span_to_range(text, info.span),
+            };
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
+    }
+
     let imports = module
         .map(collect_imports_from_module)
         .or_else(|| collect_imports(text));
@@ -1005,19 +1028,6 @@ fn provide_definition(
                 };
                 return Some(GotoDefinitionResponse::Scalar(location));
             }
-        }
-    }
-
-    let functions = module
-        .map(collect_functions_with_inferred)
-        .or_else(|| collect_functions(text));
-    if let Some(functions) = functions {
-        if let Some(info) = functions.get(&name) {
-            let location = Location {
-                uri: url.clone(),
-                range: span_to_range(text, info.span),
-            };
-            return Some(GotoDefinitionResponse::Scalar(location));
         }
     }
 
@@ -1153,19 +1163,16 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
         let end = params.range.end;
 
         for error in lint_errors {
-            if let Some(fix) = error.fix {
+            if let Some(ref fix) = error.fix {
                 let fix_start = offset_to_position(text, fix.span.start);
                 let fix_end = offset_to_position(text, fix.span.end);
 
-                if fix_start.line >= start.line
-                    && fix_start.line <= end.line
-                    && fix_end.line >= start.line
-                    && fix_end.line <= end.line
-                {
+                if ranges_overlap(start, end, fix_start, fix_end) {
+                    let diagnostic = lint_error_to_diagnostic(text, &error);
                     actions.push(CodeAction {
                         title: fix.description.clone(),
                         kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-                        diagnostics: None,
+                        diagnostics: Some(vec![diagnostic]),
                         edit: Some(lsp_types::WorkspaceEdit {
                             changes: Some({
                                 let mut map = HashMap::new();
@@ -1176,7 +1183,7 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
                                             start: fix_start,
                                             end: fix_end,
                                         },
-                                        new_text: fix.replacement,
+                                        new_text: fix.replacement.clone(),
                                     }],
                                 );
                                 map
@@ -1185,7 +1192,7 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
                             change_annotations: None,
                         }),
                         command: None,
-                        is_preferred: None,
+                        is_preferred: Some(true),
                         disabled: None,
                         data: None,
                     });
@@ -1756,6 +1763,7 @@ fn publish_diagnostics(
     url: &Uri,
     text: &str,
     module: Option<&Module>,
+    cache: &mut HashMap<Uri, u64>,
 ) -> Result<(), String> {
     let mut diagnostics = Vec::new();
     let (parsed_module, parse_errors) = match module.cloned() {
@@ -1792,7 +1800,7 @@ fn publish_diagnostics(
         let config_source = load_lint_config_for_uri(url);
         if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
             for error in errors {
-                diagnostics.push(lint_error_to_diagnostic(text, error));
+                diagnostics.push(lint_error_to_diagnostic(text, &error));
             }
         }
         let mut compiler = Compiler::new();
@@ -1800,6 +1808,12 @@ fn publish_diagnostics(
             diagnostics.extend(compile_error_to_diagnostic(text, err));
         }
     }
+
+    let hash = hash_diagnostics(&diagnostics);
+    if cache.get(url).copied() == Some(hash) {
+        return Ok(());
+    }
+    cache.insert(url.clone(), hash);
 
     let params = lsp_types::PublishDiagnosticsParams {
         uri: url.clone(),
@@ -1813,6 +1827,60 @@ fn publish_diagnostics(
         .send(Message::Notification(notification))
         .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn hover_signature_markdown(signature: &str) -> MarkupContent {
+    signature_markdown(signature)
+}
+
+fn hover_import_markdown(path: &str, alias: &str) -> MarkupContent {
+    let mut value = String::new();
+    value.push_str("```at\n");
+    value.push_str(&format!("import \"{path}\" as {alias}"));
+    value.push_str("\n```");
+    MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    }
+}
+
+fn signature_markdown(signature: &str) -> MarkupContent {
+    let mut value = String::new();
+    value.push_str("```at\n");
+    value.push_str(signature);
+    value.push_str("\n```");
+    MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    }
+}
+
+fn ranges_overlap(
+    start: Position,
+    end: Position,
+    other_start: Position,
+    other_end: Position,
+) -> bool {
+    let starts_before_end = start.line < other_end.line
+        || (start.line == other_end.line && start.character <= other_end.character);
+    let other_starts_before_end = other_start.line < end.line
+        || (other_start.line == end.line && other_start.character <= end.character);
+    starts_before_end && other_starts_before_end
+}
+
+fn hash_diagnostics(diagnostics: &[Diagnostic]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    if let Ok(value) = serde_json::to_vec(diagnostics) {
+        value.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn cancel_id_key(id: &lsp_types::NumberOrString) -> String {
+    match id {
+        lsp_types::NumberOrString::Number(value) => value.to_string(),
+        lsp_types::NumberOrString::String(value) => value.clone(),
+    }
 }
 
 fn collect_import_modules(module: &Module, base_uri: &Uri) -> Option<Vec<Module>> {
@@ -1922,7 +1990,7 @@ fn type_error_to_diagnostic(text: &str, error: at_check::TypeError) -> Diagnosti
     }
 }
 
-fn lint_error_to_diagnostic(text: &str, error: at_lint::LintError) -> Diagnostic {
+fn lint_error_to_diagnostic(text: &str, error: &at_lint::LintError) -> Diagnostic {
     let range = error
         .span
         .map(|span| span_to_range(text, span))
@@ -1942,7 +2010,7 @@ fn lint_error_to_diagnostic(text: &str, error: at_lint::LintError) -> Diagnostic
         code: Some(lsp_types::NumberOrString::String("L001".to_string())),
         code_description: None,
         source: Some("at".to_string()),
-        message: error.message,
+        message: error.message.clone(),
         related_information: None,
         tags: None,
         data: None,
