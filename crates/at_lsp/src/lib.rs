@@ -554,8 +554,12 @@ fn provide_hover(
         .or_else(|| collect_functions(text))?;
     if qualifier.is_none() {
         if let Some(info) = functions.get(&name) {
+            let doc = module.and_then(|module| doc_comment_for_span(&module.comments, info.span));
             return Some(Hover {
-                contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
+                contents: HoverContents::Markup(hover_signature_markdown_with_doc(
+                    &info.signature,
+                    doc.as_deref(),
+                )),
                 range: Some(span_to_range(text, info.span)),
             });
         }
@@ -575,7 +579,10 @@ fn provide_hover(
                 &name,
             ) {
                 return Some(Hover {
-                    contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
+                    contents: HoverContents::Markup(hover_signature_markdown_with_doc(
+                        &info.signature,
+                        None,
+                    )),
                     range: None,
                 });
             }
@@ -586,8 +593,12 @@ fn provide_hover(
     // When no qualifier, we already checked at line 217 above
     if had_qualifier {
         if let Some(info) = functions.get(&name) {
+            let doc = module.and_then(|module| doc_comment_for_span(&module.comments, info.span));
             return Some(Hover {
-                contents: HoverContents::Markup(hover_signature_markdown(&info.signature)),
+                contents: HoverContents::Markup(hover_signature_markdown_with_doc(
+                    &info.signature,
+                    doc.as_deref(),
+                )),
                 range: Some(span_to_range(text, info.span)),
             });
         }
@@ -1330,13 +1341,7 @@ fn get_cached_module(
         uri.clone(),
         DocCacheEntry {
             hash,
-            module: Module {
-                id: module.id,
-                functions: module.functions.clone(),
-                stmts: module.stmts.clone(),
-                comments: Vec::new(),
-                source_path: module.source_path.clone(),
-            },
+            module: module.clone(),
         },
     );
     Some(module)
@@ -1829,8 +1834,22 @@ fn publish_diagnostics(
     Ok(())
 }
 
-fn hover_signature_markdown(signature: &str) -> MarkupContent {
-    signature_markdown(signature)
+fn hover_signature_markdown_with_doc(signature: &str, doc: Option<&str>) -> MarkupContent {
+    let mut value = String::new();
+    value.push_str("```at\n");
+    value.push_str(signature);
+    value.push_str("\n```");
+    if let Some(doc) = doc {
+        let doc = doc.trim();
+        if !doc.is_empty() {
+            value.push_str("\n\n");
+            value.push_str(doc);
+        }
+    }
+    MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    }
 }
 
 fn hover_import_markdown(path: &str, alias: &str) -> MarkupContent {
@@ -1853,6 +1872,41 @@ fn signature_markdown(signature: &str) -> MarkupContent {
         kind: MarkupKind::Markdown,
         value,
     }
+}
+
+fn doc_comment_for_span(comments: &[at_syntax::Comment], span: Span) -> Option<String> {
+    let mut best: Option<&at_syntax::Comment> = None;
+    for comment in comments {
+        if comment.span.end <= span.start {
+            if best
+                .map(|current| comment.span.end > current.span.end)
+                .unwrap_or(true)
+            {
+                best = Some(comment);
+            }
+        }
+    }
+    let comment = best?;
+    let text = comment.text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let stripped = if let Some(rest) = line.strip_prefix("//") {
+            rest.trim_start()
+        } else {
+            line
+        };
+        if !stripped.is_empty() {
+            lines.push(stripped);
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
 }
 
 fn ranges_overlap(
@@ -2672,7 +2726,7 @@ mod tests {
 
     #[test]
     fn hover_returns_markdown_signature() {
-        let text = "fn foo(a: int) {}\nfoo(1);";
+        let text = "// doc string\nfn foo(a: int) {}\nfoo(1);";
         let module = parse_module(text).expect("parse module");
         let offset = text.find("foo(1)").expect("call") + 1;
         let position = offset_to_position(text, offset);
@@ -2691,6 +2745,7 @@ mod tests {
         assert_eq!(markup.kind, MarkupKind::Markdown);
         assert!(markup.value.contains("```at"));
         assert!(markup.value.contains("fn foo"));
+        assert!(markup.value.contains("doc string"));
     }
 
     #[test]
