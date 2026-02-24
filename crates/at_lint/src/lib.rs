@@ -144,6 +144,31 @@ impl LintConfig {
         }
     }
 
+    fn strict() -> Self {
+        let mut config = Self::default();
+        for rule in [
+            LintRule::UnusedImportAlias,
+            LintRule::UnusedFunction,
+            LintRule::UnusedLocal,
+            LintRule::UnusedMatchBinding,
+            LintRule::UnnecessaryNeeds,
+            LintRule::ShadowedBinding,
+            LintRule::MissingReturn,
+            LintRule::DeadBranch,
+            LintRule::NamingConvention,
+            LintRule::UnusedSetTarget,
+            LintRule::InfiniteLoop,
+            LintRule::BooleanLiteralComparison,
+            LintRule::EmptyBody,
+            LintRule::FunctionLength,
+            LintRule::NestingDepth,
+            LintRule::CyclomaticComplexity,
+        ] {
+            config.severity.insert(rule, LintSeverity::Error);
+        }
+        config
+    }
+
     fn load(source: &str) -> Self {
         let mut config = Self::default();
         let parsed = source.parse::<toml::Value>();
@@ -153,6 +178,11 @@ impl LintConfig {
         let Some(table) = value.as_table() else {
             return config;
         };
+        if let Some(profile) = table.get("profile").and_then(|value| value.as_str()) {
+            if profile == "strict" {
+                config = Self::strict();
+            }
+        }
         if let Some(rules) = table.get("rules").and_then(|value| value.as_table()) {
             for (key, value) in rules {
                 let Some(rule) = LintRule::from_str(key) else {
@@ -3082,7 +3112,7 @@ pub fn count_fixable(errors: &[LintError]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::lint_module;
+    use super::{lint_module, LintConfig, LintRule, LintSeverity};
     use at_parser::parse_module;
     use at_parser::parse_module_with_errors;
 
@@ -3105,6 +3135,19 @@ main();
             .iter()
             .any(|err| err.message.contains("unused function")
                 && err.message.contains("unused_helper")));
+    }
+
+    #[test]
+    fn strict_profile_promotes_severity() {
+        let config = LintConfig::load("profile = \"strict\"");
+        assert_eq!(
+            config
+                .severity
+                .get(&LintRule::UnusedLocal)
+                .copied()
+                .unwrap_or(LintSeverity::Warn),
+            LintSeverity::Error
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -h, --help     Show this help message");
     eprintln!("  -V, --version  Show version information");
+    eprintln!("  --strict-types Enable strict type checks");
 }
 
 fn main() {
@@ -61,6 +62,8 @@ fn main() {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
+
+    let strict_types = args.iter().any(|arg| arg == "--strict-types");
 
     if args[1] == "mcp-server" {
         if args.len() > 2 {
@@ -526,7 +529,12 @@ fn main() {
             }
             std::process::exit(1);
         }
-        if let Err(errors) = at_check::typecheck_modules(&modules) {
+        let result = if strict_types {
+            at_check::typecheck_modules_with_mode(&modules, at_check::TypecheckMode::Strict)
+        } else {
+            at_check::typecheck_modules(&modules)
+        };
+        if let Err(errors) = result {
             for error in errors {
                 eprintln!(
                     "{}",
@@ -701,7 +709,7 @@ fn main() {
             "prune" => {
                 let options = parse_prune_options(&args[3..]).unwrap_or_else(|err| {
                     eprintln!("{err}");
-                    eprintln!("usage: at cache prune [--max <files>] [--max-files <files>] [--max-mb <mb>]");
+                    eprintln!("usage: at cache prune [--max <files>] [--max-files <files>] [--max-mb <mb>] [--max-age-days <days>]");
                     std::process::exit(1);
                 });
                 prune_cache(Path::new("."), &options)
@@ -1433,6 +1441,16 @@ fn parse_prune_options(args: &[String]) -> Result<PruneOptions, String> {
                 options.max_bytes = Some(parsed.saturating_mul(1024 * 1024));
                 index += 2;
             }
+            "--max-age-days" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --max-age-days".to_string())?;
+                let parsed = value
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid max age days: {value}"))?;
+                options.max_age_days = Some(parsed);
+                index += 2;
+            }
             value => {
                 return Err(format!("unknown prune option: {value}"));
             }
@@ -1469,6 +1487,7 @@ mod tests {
         let options = parse_prune_options(&[]).expect("options");
         assert!(options.max_files.is_none());
         assert!(options.max_bytes.is_none());
+        assert!(options.max_age_days.is_none());
     }
 
     #[test]
@@ -1487,6 +1506,12 @@ mod tests {
     fn parse_prune_options_max_mb() {
         let options = parse_prune_options(&["--max-mb".into(), "2".into()]).expect("options");
         assert_eq!(options.max_bytes, Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_prune_options_max_age_days() {
+        let options = parse_prune_options(&["--max-age-days".into(), "7".into()]).expect("options");
+        assert_eq!(options.max_age_days, Some(7));
     }
 
     #[test]
@@ -1576,6 +1601,7 @@ mod tests {
         let options = PruneOptions {
             max_files: Some(3),
             max_bytes: None,
+            max_age_days: None,
         };
         prune_cache(&base, &options).expect("prune cache");
 
@@ -1609,6 +1635,7 @@ mod tests {
         let options = PruneOptions {
             max_files: None,
             max_bytes: Some(2048),
+            max_age_days: None,
         };
         prune_cache(&base, &options).expect("prune cache");
 
@@ -1640,6 +1667,7 @@ mod tests {
         let options = PruneOptions {
             max_files: Some(1),
             max_bytes: Some(512),
+            max_age_days: None,
         };
         prune_cache(&base, &options).expect("prune cache");
 
@@ -1670,6 +1698,7 @@ mod tests {
         let options = PruneOptions {
             max_files: Some(1),
             max_bytes: Some(512),
+            max_age_days: None,
         };
         let report = prune_cache_with_report(&base, &options).expect("prune cache");
 
@@ -2209,6 +2238,26 @@ fn prune_cache_with_report(base_dir: &Path, options: &PruneOptions) -> Result<Pr
     let mut removed = 0usize;
     let mut removed_bytes = 0u64;
     let mut referenced_over_limits = false;
+    let now = std::time::SystemTime::now();
+
+    if let Some(max_age_days) = options.max_age_days {
+        let max_age = std::time::Duration::from_secs(max_age_days.saturating_mul(86400));
+        let mut keep = Vec::new();
+        for entry in unreferenced {
+            let age = now.duration_since(entry.modified).unwrap_or_default();
+            if age > max_age {
+                fs::remove_file(&entry.path)
+                    .map_err(|err| format!("error removing {}: {err}", entry.path.display()))?;
+                removed += 1;
+                removed_bytes += entry.size;
+                total_files = total_files.saturating_sub(1);
+                total_size = total_size.saturating_sub(entry.size);
+            } else {
+                keep.push(entry);
+            }
+        }
+        unreferenced = keep;
+    }
 
     if options.max_files.is_none() && options.max_bytes.is_none() {
         for entry in unreferenced {
@@ -2295,6 +2344,7 @@ struct ToolParam {
 struct PruneOptions {
     max_files: Option<usize>,
     max_bytes: Option<u64>,
+    max_age_days: Option<u64>,
 }
 
 #[derive(Debug, Default)]

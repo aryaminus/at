@@ -106,6 +106,14 @@ impl McpServer {
         self
     }
 
+    fn validate_input_size(&self, value: &JsonValue) -> Result<(), String> {
+        let encoded = serde_json::to_vec(value).map_err(|err| err.to_string())?;
+        if encoded.len() > MAX_REQUEST_LINE_BYTES {
+            return Err("Invalid Request: request too large".to_string());
+        }
+        Ok(())
+    }
+
     pub fn with_context(mut self, context: Option<String>) -> Self {
         self.context = context;
         self
@@ -259,72 +267,36 @@ impl McpServer {
                             params.get("protocolVersion").and_then(|v| v.as_str())
                         {
                             if client_version != SUPPORTED_PROTOCOL_VERSION {
-                                json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "error": {
-                                        "code": -32602,
-                                        "message": format!(
-                                            "Unsupported protocol version: {}",
-                                            client_version
-                                        ),
-                                        "data": {
-                                            "supportedVersions": [SUPPORTED_PROTOCOL_VERSION]
-                                        }
-                                    }
-                                })
-                            } else {
-                                let mut result = json!({
-                                    "jsonrpc": "2.0",
-                                    "id": id,
-                                    "result": {
-                                        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
-                                        "serverInfo": {
-                                            "name": self.name,
-                                            "version": self.version,
-                                        },
-                                        "capabilities": {
-                                            "tools": {},
-                                            "roots": {},
-                                            "completion": {},
-                                            "sampling": {},
-                                        }
-                                    }
-                                });
-
-                                // Only include instructions if context is present
-                                if let Some(context) = &self.context {
-                                    result["result"]["instructions"] = json!(context);
-                                }
-
-                                result
+                                eprintln!(
+                                    "[at-mcp] unsupported protocol version: {}, using {}",
+                                    client_version, SUPPORTED_PROTOCOL_VERSION
+                                );
                             }
-                        } else {
-                            let mut result = json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
-                                    "serverInfo": {
-                                        "name": self.name,
-                                        "version": self.version,
-                                    },
-                                    "capabilities": {
-                                        "tools": {},
-                                        "roots": {},
-                                        "completion": {},
-                                        "sampling": {},
-                                    }
-                                }
-                            });
-
-                            // Only include instructions if context is present
-                            if let Some(context) = &self.context {
-                                result["result"]["instructions"] = json!(context);
-                            }
-
-                            result
                         }
+                        let mut result = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+                                "serverInfo": {
+                                    "name": self.name,
+                                    "version": self.version,
+                                },
+                                "capabilities": {
+                                    "tools": {},
+                                    "roots": {},
+                                    "completion": {},
+                                    "sampling": {},
+                                }
+                            }
+                        });
+
+                        // Only include instructions if context is present
+                        if let Some(context) = &self.context {
+                            result["result"]["instructions"] = json!(context);
+                        }
+
+                        result
                     } else {
                         let mut result = json!({
                             "jsonrpc": "2.0",
@@ -358,12 +330,19 @@ impl McpServer {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "resources": self.resources.iter().map(|resource| json!({
-                            "uri": resource.uri,
-                            "name": resource.name,
-                            "description": resource.description,
-                            "mimeType": resource.mime_type,
-                        })).collect::<Vec<_>>(),
+                        "resources": self.resources.iter().map(|resource| {
+                            let mut value = json!({
+                                "uri": resource.uri,
+                                "name": resource.name,
+                            });
+                            if let Some(description) = &resource.description {
+                                value["description"] = json!(description);
+                            }
+                            if let Some(mime_type) = &resource.mime_type {
+                                value["mimeType"] = json!(mime_type);
+                            }
+                            value
+                        }).collect::<Vec<_>>(),
                     }
                 }),
                 "resources/read" => {
@@ -410,10 +389,15 @@ impl McpServer {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "prompts": self.prompts.iter().map(|prompt| json!({
-                            "name": prompt.name,
-                            "description": prompt.description,
-                        })).collect::<Vec<_>>(),
+                        "prompts": self.prompts.iter().map(|prompt| {
+                            let mut value = json!({
+                                "name": prompt.name,
+                            });
+                            if let Some(description) = &prompt.description {
+                                value["description"] = json!(description);
+                            }
+                            value
+                        }).collect::<Vec<_>>(),
                     }
                 }),
                 "prompts/get" => {
@@ -429,13 +413,17 @@ impl McpServer {
                         let name = name.unwrap();
                         let prompt = self.prompts.iter().find(|prompt| prompt.name == name);
                         if let Some(prompt) = prompt {
-                            json!({
+                            let mut result = json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "result": {
                                     "messages": prompt.messages,
                                 }
-                            })
+                            });
+                            if let Some(description) = &prompt.description {
+                                result["result"]["description"] = json!(description);
+                            }
+                            result
                         } else {
                             json!({
                                 "jsonrpc": "2.0",
@@ -537,105 +525,118 @@ impl McpServer {
                             }
                         })
                     } else {
-                        let name = params.get("name").and_then(|value| value.as_str());
-
-                        // Validate name is present
-                        if name.is_none() {
+                        let params_size_error = self.validate_input_size(&params).err();
+                        if let Some(message) = params_size_error {
                             json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "error": {
-                                    "code": -32602,
-                                    "message": "Invalid params: name must be a string"
+                                    "code": -32600,
+                                    "message": message
                                 }
                             })
                         } else {
-                            let arguments = params
-                                .get("arguments")
-                                .cloned()
-                                .unwrap_or_else(|| json!({}));
-                            if !arguments.is_object() {
+                            let name = params.get("name").and_then(|value| value.as_str());
+
+                            // Validate name is present
+                            if name.is_none() {
                                 json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
                                     "error": {
                                         "code": -32602,
-                                        "message": "Invalid params: arguments must be an object"
+                                        "message": "Invalid params: name must be a string"
                                     }
                                 })
                             } else {
-                                match (name, &self.tool_handler) {
-                                    (Some(name), Some(handler)) => {
-                                        match handler(name, &arguments) {
-                                            Ok(result) => {
-                                                if result
-                                                    .get("content")
-                                                    .and_then(|v| v.as_array())
-                                                    .is_some()
-                                                {
-                                                    let mut payload = result.clone();
-                                                    if payload.get("isError").is_none() {
-                                                        payload["isError"] = json!(false);
-                                                    }
-                                                    json!({
-                                                        "jsonrpc": "2.0",
-                                                        "id": id,
-                                                        "result": payload
-                                                    })
-                                                } else if let Some(image) = result.get("image") {
-                                                    let data = image
-                                                        .get("data")
-                                                        .cloned()
-                                                        .unwrap_or(JsonValue::Null);
-                                                    let mime_type = image
-                                                        .get("mimeType")
-                                                        .cloned()
-                                                        .unwrap_or_else(|| json!("image/png"));
-                                                    json!({
-                                                        "jsonrpc": "2.0",
-                                                        "id": id,
-                                                        "result": {
-                                                            "content": [
-                                                                {"type": "image", "data": data, "mimeType": mime_type}
-                                                            ],
-                                                            "isError": false
-                                                        }
-                                                    })
-                                                } else {
-                                                    json!({
-                                                        "jsonrpc": "2.0",
-                                                        "id": id,
-                                                        "result": {
-                                                            "content": [
-                                                                {"type": "text", "text": result.to_string()}
-                                                            ],
-                                                            "isError": false
-                                                        }
-                                                    })
-                                                }
-                                            }
-                                            Err(message) => json!({
-                                                "jsonrpc": "2.0",
-                                                "id": id,
-                                                "result": {
-                                                    "content": [
-                                                        {"type": "text", "text": message}
-                                                    ],
-                                                    "isError": true
-                                                }
-                                            }),
-                                        }
-                                    }
-                                    _ => json!({
+                                let arguments = params
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or_else(|| json!({}));
+                                if !arguments.is_object() {
+                                    json!({
                                         "jsonrpc": "2.0",
                                         "id": id,
-                                        "result": {
-                                            "content": [
-                                                {"type": "text", "text": "unknown tool"}
-                                            ],
-                                            "isError": true
+                                        "error": {
+                                            "code": -32602,
+                                            "message": "Invalid params: arguments must be an object"
                                         }
-                                    }),
+                                    })
+                                } else {
+                                    match (name, &self.tool_handler) {
+                                        (Some(name), Some(handler)) => {
+                                            match handler(name, &arguments) {
+                                                Ok(result) => {
+                                                    if result
+                                                        .get("content")
+                                                        .and_then(|v| v.as_array())
+                                                        .is_some()
+                                                    {
+                                                        let mut payload = result.clone();
+                                                        if payload.get("isError").is_none() {
+                                                            payload["isError"] = json!(false);
+                                                        }
+                                                        json!({
+                                                            "jsonrpc": "2.0",
+                                                            "id": id,
+                                                            "result": payload
+                                                        })
+                                                    } else if let Some(image) = result.get("image")
+                                                    {
+                                                        let data = image
+                                                            .get("data")
+                                                            .cloned()
+                                                            .unwrap_or(JsonValue::Null);
+                                                        let mime_type = image
+                                                            .get("mimeType")
+                                                            .cloned()
+                                                            .unwrap_or_else(|| json!("image/png"));
+                                                        json!({
+                                                            "jsonrpc": "2.0",
+                                                            "id": id,
+                                                            "result": {
+                                                                "content": [
+                                                                    {"type": "image", "data": data, "mimeType": mime_type}
+                                                                ],
+                                                                "isError": false
+                                                            }
+                                                        })
+                                                    } else {
+                                                        json!({
+                                                            "jsonrpc": "2.0",
+                                                            "id": id,
+                                                            "result": {
+                                                                "content": [
+                                                                    {"type": "text", "text": result.to_string()}
+                                                                ],
+                                                                "isError": false
+                                                            }
+                                                        })
+                                                    }
+                                                }
+                                                Err(message) => json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": id,
+                                                    "result": {
+                                                        "content": [
+                                                            {"type": "text", "text": message}
+                                                        ],
+                                                        "isError": true
+                                                    }
+                                                }),
+                                            }
+                                        }
+                                        _ => json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id,
+                                            "result": {
+                                                "content": [
+                                                    {"type": "text", "text": "unknown tool"}
+                                                ],
+                                                "isError": true
+                                            }
+                                        }),
+                                    }
                                 }
                             }
                         }

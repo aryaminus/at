@@ -39,6 +39,12 @@ pub struct TypeError {
     pub span: Option<Span>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypecheckMode {
+    Default,
+    Strict,
+}
+
 #[derive(Clone, Debug)]
 struct OptionNarrow {
     ident: Ident,
@@ -65,8 +71,40 @@ pub fn typecheck_module(module: &Module) -> Result<(), Vec<TypeError>> {
     }
 }
 
+pub fn typecheck_module_with_mode(
+    module: &Module,
+    mode: TypecheckMode,
+) -> Result<(), Vec<TypeError>> {
+    let mut checker = TypeChecker::new_with_mode(mode);
+    checker.load_functions(module);
+    checker.check_module(module);
+    if checker.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(checker.errors)
+    }
+}
+
 pub fn typecheck_modules(modules: &[Module]) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new();
+    for module in modules {
+        checker.load_functions(module);
+    }
+    for module in modules {
+        checker.check_module(module);
+    }
+    if checker.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(checker.errors)
+    }
+}
+
+pub fn typecheck_modules_with_mode(
+    modules: &[Module],
+    mode: TypecheckMode,
+) -> Result<(), Vec<TypeError>> {
+    let mut checker = TypeChecker::new_with_mode(mode);
     for module in modules {
         checker.load_functions(module);
     }
@@ -119,10 +157,15 @@ struct TypeChecker {
     last_result_err: Option<SimpleType>,
     loop_depth: usize,
     current_is_async: bool,
+    mode: TypecheckMode,
 }
 
 impl TypeChecker {
     fn new() -> Self {
+        Self::new_with_mode(TypecheckMode::Default)
+    }
+
+    fn new_with_mode(mode: TypecheckMode) -> Self {
         Self {
             functions: HashMap::new(),
             function_needs: HashMap::new(),
@@ -146,6 +189,7 @@ impl TypeChecker {
             last_result_err: None,
             loop_depth: 0,
             current_is_async: false,
+            mode,
         }
     }
 
@@ -473,7 +517,7 @@ impl TypeChecker {
                 if self.is_local_in_current_scope(&name.name) {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
-                let value_ty = self.check_expr(value);
+                let value_ty = self.check_expr_strict(value);
                 let declared = ty
                     .as_ref()
                     .map(|ty| self.type_from_ref_with_env(ty, None, None));
@@ -500,7 +544,7 @@ impl TypeChecker {
                 if self.is_local_in_current_scope(&name.name) {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
-                let value_ty = self.check_expr(value);
+                let value_ty = self.check_expr_strict(value);
                 let declared = ty
                     .as_ref()
                     .map(|ty| self.type_from_ref_with_env(ty, None, None));
@@ -536,7 +580,7 @@ impl TypeChecker {
                         Some(name.span),
                     );
                 }
-                let value_ty = self.check_expr(value);
+                let value_ty = self.check_expr_strict(value);
                 if let Some(expected) = existing {
                     if let SimpleType::Option(inner) = &value_ty {
                         if self.last_option_inner.is_none()
@@ -580,8 +624,8 @@ impl TypeChecker {
                         );
                     }
                 }
-                let _ = self.check_expr(base);
-                self.check_expr(value);
+                let _ = self.check_expr_strict(base);
+                self.check_expr_strict(value);
             }
             Stmt::SetIndex {
                 base, index, value, ..
@@ -594,9 +638,9 @@ impl TypeChecker {
                         );
                     }
                 }
-                let base_ty = self.check_expr(base);
-                let index_ty = self.check_expr(index);
-                let value_ty = self.check_expr(value);
+                let base_ty = self.check_expr_strict(base);
+                let index_ty = self.check_expr_strict(index);
+                let value_ty = self.check_expr_strict(value);
                 match base_ty {
                     SimpleType::Array(inner) => {
                         if index_ty != SimpleType::Int && !matches!(index_ty, SimpleType::Unknown) {
@@ -656,7 +700,7 @@ impl TypeChecker {
                 body,
                 ..
             } => {
-                let cond_ty = self.check_expr(condition);
+                let cond_ty = self.check_expr_strict(condition);
                 if cond_ty != SimpleType::Bool
                     && cond_ty != SimpleType::Int
                     && cond_ty != SimpleType::Unknown
@@ -668,9 +712,7 @@ impl TypeChecker {
                 }
                 self.loop_depth += 1;
                 self.push_scope();
-                for stmt in body {
-                    self.check_stmt(stmt);
-                }
+                self.check_loop_body_fixpoint(body);
                 self.pop_scope();
                 self.loop_depth -= 1;
             }
@@ -680,7 +722,7 @@ impl TypeChecker {
                 else_branch,
                 ..
             } => {
-                self.check_expr(condition);
+                self.check_expr_strict(condition);
                 self.push_scope();
                 for stmt in then_branch {
                     self.check_stmt(stmt);
@@ -701,7 +743,7 @@ impl TypeChecker {
                 body,
                 ..
             } => {
-                let iter_ty = self.check_expr(iter);
+                let iter_ty = self.check_expr_strict(iter);
                 if !matches!(iter_ty, SimpleType::Array(_)) && iter_ty != SimpleType::Unknown {
                     self.push_error(
                         format!("for expects array, got {}", format_type(&iter_ty)),
@@ -735,7 +777,7 @@ impl TypeChecker {
                 }
             }
             Stmt::Expr { expr, .. } => {
-                self.check_expr(expr);
+                self.check_expr_strict(expr);
             }
             Stmt::Return { expr, .. } => match (expr, self.current_return.clone()) {
                 (None, SimpleType::Unit) => {}
@@ -755,7 +797,7 @@ impl TypeChecker {
                     self.last_result_ok = None;
                     self.last_result_err = None;
                     self.last_option_inner = None;
-                    let found = self.check_expr(expr);
+                    let found = self.check_expr_strict(expr);
                     if matches!(found, SimpleType::Result(_, _)) {
                         self.current_return = found.clone();
                         self.update_return_result_inners(expr_span(expr));
@@ -772,7 +814,7 @@ impl TypeChecker {
                     self.last_result_ok = None;
                     self.last_result_err = None;
                     self.last_option_inner = None;
-                    let found = self.check_expr(expr);
+                    let found = self.check_expr_strict(expr);
                     self.check_compatible(
                         &expected,
                         &found,
@@ -790,7 +832,7 @@ impl TypeChecker {
                 }
             },
             Stmt::Throw { expr, .. } => {
-                let ty = self.check_expr(expr);
+                let ty = self.check_expr_strict(expr);
                 if !matches!(ty, SimpleType::Result(_, _)) && ty != SimpleType::Unknown {
                     self.push_error(
                         format!("throw expects result, got {}", format_type(&ty)),
@@ -811,7 +853,7 @@ impl TypeChecker {
                 }
             }
             Stmt::Defer { expr, .. } => {
-                self.check_expr(expr);
+                self.check_expr_strict(expr);
             }
             Stmt::With {
                 name, value, body, ..
@@ -823,7 +865,7 @@ impl TypeChecker {
                     self.push_error(format!("duplicate local: {}", name.name), Some(name.span));
                 }
                 self.push_scope();
-                let value_ty = self.check_expr(value);
+                let value_ty = self.check_expr_strict(value);
                 self.bind_or_refine_local(name, value_ty.clone());
                 self.infer_inner_from_expr(value, &value_ty);
                 self.bind_inner_types(name, &value_ty);
@@ -834,7 +876,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
             Stmt::Yield { expr, .. } => {
-                let value_ty = self.check_expr(expr);
+                let value_ty = self.check_expr_strict(expr);
                 if matches!(self.current_return, SimpleType::Unknown) {
                     self.current_return = SimpleType::Generator(Box::new(SimpleType::Unknown));
                 }
@@ -1608,6 +1650,45 @@ impl TypeChecker {
         }
     }
 
+    fn check_expr_strict(&mut self, expr: &Expr) -> SimpleType {
+        let ty = self.check_expr(expr);
+        if self.mode == TypecheckMode::Strict {
+            if matches!(ty, SimpleType::Unknown) {
+                self.push_error(
+                    "type is unknown in strict mode".to_string(),
+                    expr_span(expr),
+                );
+            }
+            if let SimpleType::Array(inner) = &ty {
+                if matches!(inner.as_ref(), SimpleType::Unknown) {
+                    self.push_error(
+                        "array element type is unknown in strict mode".to_string(),
+                        expr_span(expr),
+                    );
+                }
+            }
+            if let SimpleType::Option(inner) = &ty {
+                if matches!(inner.as_ref(), SimpleType::Unknown) {
+                    self.push_error(
+                        "option inner type is unknown in strict mode".to_string(),
+                        expr_span(expr),
+                    );
+                }
+            }
+            if let SimpleType::Result(ok, err) = &ty {
+                if matches!(ok.as_ref(), SimpleType::Unknown)
+                    || matches!(err.as_ref(), SimpleType::Unknown)
+                {
+                    self.push_error(
+                        "result inner type is unknown in strict mode".to_string(),
+                        expr_span(expr),
+                    );
+                }
+            }
+        }
+        ty
+    }
+
     fn check_binary(
         &mut self,
         left: &Expr,
@@ -1624,6 +1705,10 @@ impl TypeChecker {
                 } else if left_ty == SimpleType::Int && right_ty == SimpleType::Int {
                     SimpleType::Int
                 } else if left_ty == SimpleType::Float && right_ty == SimpleType::Float {
+                    SimpleType::Float
+                } else if (left_ty == SimpleType::Int && right_ty == SimpleType::Float)
+                    || (left_ty == SimpleType::Float && right_ty == SimpleType::Int)
+                {
                     SimpleType::Float
                 } else if left_ty == SimpleType::Unknown || right_ty == SimpleType::Unknown {
                     SimpleType::Unknown
@@ -1643,6 +1728,10 @@ impl TypeChecker {
                 if left_ty == SimpleType::Int && right_ty == SimpleType::Int {
                     SimpleType::Int
                 } else if left_ty == SimpleType::Float && right_ty == SimpleType::Float {
+                    SimpleType::Float
+                } else if (left_ty == SimpleType::Int && right_ty == SimpleType::Float)
+                    || (left_ty == SimpleType::Float && right_ty == SimpleType::Int)
+                {
                     SimpleType::Float
                 } else if left_ty == SimpleType::Unknown || right_ty == SimpleType::Unknown {
                     if left_ty == SimpleType::Float || right_ty == SimpleType::Float {
@@ -1713,6 +1802,8 @@ impl TypeChecker {
             BinaryOp::Lt | BinaryOp::Lte | BinaryOp::Gt | BinaryOp::Gte => {
                 if (left_ty == SimpleType::Int && right_ty == SimpleType::Int)
                     || (left_ty == SimpleType::Float && right_ty == SimpleType::Float)
+                    || (left_ty == SimpleType::Int && right_ty == SimpleType::Float)
+                    || (left_ty == SimpleType::Float && right_ty == SimpleType::Int)
                 {
                     SimpleType::Bool
                 } else if left_ty == SimpleType::Unknown || right_ty == SimpleType::Unknown {
@@ -1780,6 +1871,9 @@ impl TypeChecker {
 
     fn types_compatible(&self, expected: &SimpleType, found: &SimpleType) -> bool {
         if expected == found {
+            return true;
+        }
+        if matches!(expected, SimpleType::Float) && matches!(found, SimpleType::Int) {
             return true;
         }
         if matches!(expected, SimpleType::Unknown) || matches!(found, SimpleType::Unknown) {
@@ -4243,6 +4337,13 @@ impl TypeChecker {
                 self.push_error(format!("cyclic type alias: {}", name.name), Some(name.span));
                 return None;
             }
+            if self.type_ref_contains_name(&alias, &name.name) {
+                self.push_error(
+                    format!("recursive type alias: {}", name.name),
+                    Some(name.span),
+                );
+                return None;
+            }
             match alias {
                 TypeRef::Named { name, args } if args.is_empty() => {
                     current = name.name;
@@ -4252,6 +4353,115 @@ impl TypeChecker {
             }
         }
         None
+    }
+
+    fn type_ref_contains_name(&self, ty: &TypeRef, target: &str) -> bool {
+        match ty {
+            TypeRef::Qualified { ty, .. } => self.type_ref_contains_name(ty, target),
+            TypeRef::Named { name, args } => {
+                if name.name == target {
+                    return true;
+                }
+                args.iter()
+                    .any(|arg| self.type_ref_contains_name(arg, target))
+            }
+            TypeRef::Union { types }
+            | TypeRef::Intersection { types }
+            | TypeRef::Tuple { items: types, .. } => types
+                .iter()
+                .any(|ty| self.type_ref_contains_name(ty, target)),
+            TypeRef::Function {
+                params, return_ty, ..
+            } => {
+                params
+                    .iter()
+                    .any(|ty| self.type_ref_contains_name(ty, target))
+                    || self.type_ref_contains_name(return_ty, target)
+            }
+        }
+    }
+
+    fn check_loop_body_fixpoint(&mut self, body: &[Stmt]) {
+        let mut last = self.current_locals_snapshot();
+        for _ in 0..4 {
+            for stmt in body {
+                self.check_stmt(stmt);
+            }
+            let current = self.current_locals_snapshot();
+            if current == last {
+                return;
+            }
+            self.merge_current_locals(&last, &current);
+            last = self.current_locals_snapshot();
+        }
+    }
+
+    fn current_locals_snapshot(&self) -> HashMap<String, SimpleType> {
+        let mut combined = HashMap::new();
+        for scope in &self.locals {
+            for (name, ty) in scope {
+                combined.insert(name.clone(), ty.clone());
+            }
+        }
+        combined
+    }
+
+    fn merge_current_locals(
+        &mut self,
+        left: &HashMap<String, SimpleType>,
+        right: &HashMap<String, SimpleType>,
+    ) {
+        let mut updates = Vec::new();
+        for (name, left_ty) in left {
+            if let Some(right_ty) = right.get(name) {
+                let merged = self.join_types(left_ty, right_ty);
+                updates.push((name.clone(), merged));
+            }
+        }
+        if let Some(scope) = self.locals.last_mut() {
+            for (name, merged) in updates {
+                scope.insert(name, merged);
+            }
+        }
+    }
+
+    fn join_types(&self, left: &SimpleType, right: &SimpleType) -> SimpleType {
+        if left == right {
+            return left.clone();
+        }
+        if matches!(left, SimpleType::Unknown) {
+            return right.clone();
+        }
+        if matches!(right, SimpleType::Unknown) {
+            return left.clone();
+        }
+        if self.types_compatible(left, right) {
+            return right.clone();
+        }
+        if self.types_compatible(right, left) {
+            return left.clone();
+        }
+        match (left, right) {
+            (SimpleType::Union(left_items), SimpleType::Union(right_items)) => {
+                let mut items = left_items.clone();
+                for item in right_items {
+                    if !items.iter().any(|existing| existing == item) {
+                        items.push(item.clone());
+                    }
+                }
+                SimpleType::Union(items)
+            }
+            (SimpleType::Union(items), other) | (other, SimpleType::Union(items)) => {
+                if items.iter().any(|existing| existing == other) {
+                    SimpleType::Union(items.clone())
+                } else {
+                    let mut next = items.clone();
+                    next.push(other.clone());
+                    SimpleType::Union(next)
+                }
+            }
+            _ => SimpleType::Union(vec![left.clone(), right.clone()]),
+        }
     }
 
     fn push_error(&mut self, message: String, span: Option<Span>) {

@@ -611,8 +611,20 @@ impl fmt::Display for VmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VmError::StackUnderflow => write!(f, "stack underflow"),
-            VmError::Compile { message, .. } => write!(f, "compile error: {message}"),
-            VmError::Runtime { message, .. } => write!(f, "runtime error: {message}"),
+            VmError::Compile { message, span } => {
+                if let Some(span) = span {
+                    write!(f, "compile error: {message} at {}:{}", span.start, span.end)
+                } else {
+                    write!(f, "compile error: {message}")
+                }
+            }
+            VmError::Runtime { message, span, .. } => {
+                if let Some(span) = span {
+                    write!(f, "runtime error: {message} at {}:{}", span.start, span.end)
+                } else {
+                    write!(f, "runtime error: {message}")
+                }
+            }
             VmError::ExecutionLimit { message } => write!(f, "{message}"),
         }
     }
@@ -3232,6 +3244,14 @@ pub struct Vm {
     max_frames: Option<usize>,
     output_buffer: Option<Rc<RefCell<Vec<String>>>>,
     debugger: Option<Rc<RefCell<dyn DebuggerHook>>>,
+    profiler: Option<Profiler>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Profiler {
+    pub total_instructions: usize,
+    pub op_counts: HashMap<String, usize>,
+    pub function_counts: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3405,6 +3425,7 @@ impl Vm {
             max_frames: None,
             output_buffer: None,
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3425,6 +3446,7 @@ impl Vm {
             max_frames: None,
             output_buffer: None,
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3439,6 +3461,7 @@ impl Vm {
             max_frames: None,
             output_buffer: None,
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3453,6 +3476,7 @@ impl Vm {
             max_frames: None,
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3471,6 +3495,7 @@ impl Vm {
             max_frames: None,
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3485,6 +3510,7 @@ impl Vm {
             max_frames: Some(max_frames),
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
+            profiler: None,
         }
     }
 
@@ -3492,6 +3518,16 @@ impl Vm {
         let mut vm = Vm::new();
         vm.debugger = Some(debugger);
         vm
+    }
+
+    pub fn with_profiler() -> Self {
+        let mut vm = Vm::new();
+        vm.profiler = Some(Profiler::default());
+        vm
+    }
+
+    pub fn take_profiler(&mut self) -> Option<Profiler> {
+        self.profiler.take()
     }
 
     pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
@@ -3552,6 +3588,25 @@ impl Vm {
                     }
                 }
             };
+
+            if let Some(profiler) = self.profiler.as_mut() {
+                profiler.total_instructions += 1;
+                let func_name = if frame_chunk_id == usize::MAX {
+                    "<main>"
+                } else if let Some(func) = program.functions.get(frame_chunk_id) {
+                    func.name.as_str()
+                } else {
+                    "<unknown>"
+                };
+                *profiler
+                    .function_counts
+                    .entry(func_name.to_string())
+                    .or_insert(0) += 1;
+                if let Some(op) = chunk.code.get(frame_ip) {
+                    let name = format!("{:?}", op);
+                    *profiler.op_counts.entry(name).or_insert(0) += 1;
+                }
+            }
 
             if let Some(debugger) = self.debugger.as_ref() {
                 debugger.borrow_mut().before_op(
