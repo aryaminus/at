@@ -1819,6 +1819,31 @@ mod tests {
     }
 
     #[test]
+    fn integration_deps_tree_reports_multiple_parse_errors() {
+        let temp_dir = std::env::temp_dir().join("at_test_deps_tree_multi_parse");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(&file, "fn f() {\n  let x = ;\n  let y = ;\n}\n").expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("deps")
+            .arg(&file)
+            .arg("--tree")
+            .output()
+            .expect("run at binary");
+
+        assert!(!output.status.success(), "expected deps tree failure");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_lines = stderr
+            .lines()
+            .filter(|line| line.contains("parse error"))
+            .count();
+        assert!(error_lines >= 1, "expected parse errors, got: {}", stderr);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
     fn integration_fmt_simple() {
         let temp_dir = std::env::temp_dir().join("at_test_fmt");
         fs::create_dir_all(&temp_dir).ok();

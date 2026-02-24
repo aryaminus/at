@@ -262,9 +262,15 @@ impl<'a> Parser<'a> {
         while self.current.kind != TokenKind::Eof {
             match self.current.kind {
                 TokenKind::Fn | TokenKind::Async => functions.push(self.parse_function(false)?),
-                TokenKind::Pub => stmts.push(self.parse_stmt()?),
+                TokenKind::Pub => {
+                    let stmt = self.parse_stmt()?;
+                    stmts.push(stmt);
+                }
                 TokenKind::Tool => functions.push(self.parse_tool_function()?),
-                _ => stmts.push(self.parse_stmt()?),
+                _ => {
+                    let stmt = self.parse_stmt()?;
+                    stmts.push(stmt);
+                }
             }
         }
         Ok(Module {
@@ -360,7 +366,20 @@ impl<'a> Parser<'a> {
                 Ok(stmt)
             }
             _ => {
-                let expr = self.parse_expr()?;
+                let expr = match self.parse_expr() {
+                    Ok(expr) => expr,
+                    Err(err) => {
+                        if self.collect_errors {
+                            self.recovered_errors.push(err);
+                            self.recover_to_stmt_boundary();
+                            return Ok(Stmt::Expr {
+                                id: self.alloc_id(),
+                                expr: Expr::Bool(false, self.current.span, self.alloc_id()),
+                            });
+                        }
+                        return Err(err);
+                    }
+                };
                 self.expect(TokenKind::Semicolon)?;
                 Ok(Stmt::Expr {
                     id: self.alloc_id(),
@@ -517,7 +536,22 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::Equals)?;
-        let value = self.parse_expr()?;
+        let value = match self.parse_expr() {
+            Ok(expr) => expr,
+            Err(err) => {
+                if self.collect_errors {
+                    self.recovered_errors.push(err);
+                    self.recover_to_stmt_boundary();
+                    return Ok(Stmt::Let {
+                        id: self.alloc_id(),
+                        name: ident,
+                        ty,
+                        value: Expr::Bool(false, self.current.span, self.alloc_id()),
+                    });
+                }
+                return Err(err);
+            }
+        };
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Let {
             id: self.alloc_id(),
@@ -537,7 +571,22 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::Equals)?;
-        let value = self.parse_expr()?;
+        let value = match self.parse_expr() {
+            Ok(expr) => expr,
+            Err(err) => {
+                if self.collect_errors {
+                    self.recovered_errors.push(err);
+                    self.recover_to_stmt_boundary();
+                    return Ok(Stmt::Const {
+                        id: self.alloc_id(),
+                        name: ident,
+                        ty,
+                        value: Expr::Bool(false, self.current.span, self.alloc_id()),
+                    });
+                }
+                return Err(err);
+            }
+        };
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Const {
             id: self.alloc_id(),
