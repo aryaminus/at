@@ -7,6 +7,8 @@ Complete reference for the `at` command-line interface.
 ```
 -h, --help      Show help message
 -V, --version   Show version information
+--strict-types  Enable strict type checks (applies to `at check`)
+--no-strict-types  Disable strict type checks (applies to `at check`)
 ```
 
 ## Commands
@@ -18,10 +20,14 @@ Execute a file.
 ```
 at run file.at
 at run file.at --capability time --capability rng
+at run file.at --profile-vm
+at run file.at --profile-vm=json
 ```
 
 **Options:**
 - `-c, --capability <name>` — Grant a capability at runtime
+- `--profile-vm` — Print VM profiling summary to stderr
+- `--profile-vm=text|json` — Select profiling output format
 
 ### `at repl`
 
@@ -37,7 +43,27 @@ Type-check a file. Reports type errors without executing.
 
 ```
 at check file.at
+at check file.at --strict-types
+at check file.at --no-strict-types
 ```
+
+By default, `at check` exits non-zero only for parse errors, compile/type errors, and lint diagnostics with `error` severity. Lint `warn`/`info` diagnostics are printed but do not fail the command.
+
+#### Check configuration
+
+Create `.at-check.toml` in your project root:
+
+```toml
+strict_types = true
+```
+
+Strict mode precedence:
+- `--strict-types` forces strict mode on.
+- `--no-strict-types` forces strict mode off.
+- Otherwise `.at-check.toml` `strict_types` is used.
+- Default is non-strict when nothing is set.
+
+When strict mode is off, `at check` suppresses `unknown_type_flow` lint diagnostics.
 
 ### `at lint <file.at>`
 
@@ -52,12 +78,26 @@ at lint file.at
 Create `.at-lint.toml` in your project root:
 
 ```toml
+profile = "strict"
+
 [rules]
 unused_function = "warn"
 import_order = "off"
+unknown_type_flow = "error"
+legacy_exception_surface = "warn"
+unqualified_import_call = "warn"
 
 disable = ["unnecessary_needs"]
 ```
+
+Staged deprecation warnings are available through:
+- `legacy_exception_surface` — warns on `throw` and `try { ... } catch { ... }`
+- `unqualified_import_call` — warns on unqualified calls when imports are present
+
+Timeline (current policy):
+- `0.1.x`: warning-only defaults.
+- `0.2.x`: optional deny mode for migration testing.
+- `0.3.0` or later: these may become default hard errors.
 
 Inline suppression:
 
@@ -80,6 +120,7 @@ at test file.at
 ### `at fmt <file.at>`
 
 Format a file and print the result to stdout. Use `--write` to update in place.
+`at fmt` only formats the target file; it does not inline imported modules.
 
 ```
 at fmt file.at > file_formatted.at
@@ -188,10 +229,11 @@ Prune cache to manage size.
 
 **Options:**
 - `--max <n>` or `--max-files <n>` — Maximum number of files to keep (default: 1000)
-- `--max-bytes <n>` or `--max-mb <n>` — Maximum total size in MB (default: 100)
+- `--max-mb <n>` — Maximum total size in MB
+- `--max-age-days <n>` — Remove unreferenced files older than `<n>` days
 
 ```
-at cache prune --max-files 500 --max-mb 50
+at cache prune --max-files 500 --max-mb 50 --max-age-days 30
 ```
 
 ## Exit Codes
@@ -315,7 +357,7 @@ The cache is content-addressed, so multiple URLs can map to the same cached file
 The lockfile (`.at/lock`) tracks remote imports:
 
 ```
-# at lockfile format version 1
+version 1
 https://example.com/lib.at abc123...
 https://another.com/utils.at def456...
 ```

@@ -1,4 +1,4 @@
-const { run } = require("./pkg/at_wasm.js");
+const { run } = require("./wrapper_node.js");
 
 const source = `
 fn add(a: int, b: int) -> int {
@@ -8,4 +8,5 @@ fn add(a: int, b: int) -> int {
 add(40, 2);
 `;
 
-console.log(run(source));
+const result = run(source, { maxInstructions: 10000 });
+console.log(result);

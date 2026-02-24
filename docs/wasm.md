@@ -31,7 +31,41 @@ target/wasm32-unknown-unknown/release/at_wasm.wasm
 
 ## API
 
-### `run(source: string, max_instructions?: number): string`
+### JS wrappers
+
+Use the included wrappers for a cleaner API:
+
+- `crates/at_wasm/wrapper_node.js` (Node, CommonJS)
+- `crates/at_wasm/wrapper_web.js` (browser, ESM)
+
+Both expose `run(source, options)` where options currently supports `maxInstructions`.
+
+Node example:
+
+```javascript
+const { run } = require("./wrapper_node.js");
+const result = run("print(1 + 1);", { maxInstructions: 10000 });
+console.log(result.status, result.output);
+```
+
+Browser example:
+
+```javascript
+import { run } from "./wrapper_web.js";
+const result = await run("print(1 + 1);", { maxInstructions: 10000 });
+console.log(result.status, result.output);
+```
+
+Interactive browser example:
+
+```bash
+wasm-pack build crates/at_wasm --target web
+python -m http.server
+```
+
+Open `http://localhost:8000/crates/at_wasm/example.html` for an editable source textarea, optional instruction limit, and JSON output panel.
+
+### Raw WASM export: `run(source: string, max_instructions?: number): string`
 
 Execute AT source code and return a JSON result.
 
@@ -163,7 +197,7 @@ switch (parsed.status) {
 - **Imports**: `import "..."` statements cannot be resolved in WASM
 - **File I/O**: No filesystem access
 - **Network**: Cannot fetch remote imports
-- **Effects**: `time.now()` and `rng.*` are stubs (return fixed values)
+- **Effects**: capability checks are simplified in the browser runtime
 - **Capabilities**: `needs` declarations are not enforced
 
 ## Playground Example

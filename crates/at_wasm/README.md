@@ -22,6 +22,12 @@ Example (Node):
 node crates/at_wasm/example.js
 ```
 
+Node wrapper API (`crates/at_wasm/wrapper_node.js`):
+
+```
+run(source: string, options?: { maxInstructions?: number }) -> AtResult
+```
+
 Build (browser):
 
 ```
@@ -36,8 +42,20 @@ python -m http.server
 
 Open `http://localhost:8000/crates/at_wasm/example.html`.
 
-API:
+The browser example includes:
+- editable source textarea
+- optional max-instructions input
+- run button
+- JSON result/output panel
+
+Browser wrapper API (`crates/at_wasm/wrapper_web.js`):
 
 ```
-run(source: &str) -> String
+run(source: string, options?: { maxInstructions?: number, wasmModule?: ... }) -> Promise<AtResult>
+```
+
+Raw WASM API:
+
+```
+run(source: &str, max_instructions: Option<usize>) -> String
 ```

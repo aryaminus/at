@@ -30,6 +30,7 @@ dependencies = [
  "rustyline",
  "serde_json",
  "sha2",
+ "toml",
  "ureq",
 ]
 
@@ -53,6 +54,7 @@ dependencies = [
 name = "at_lint"
 version = "0.1.0"
 dependencies = [
+ "at_check",
  "at_parser",
  "at_syntax",
  "toml",
@@ -68,6 +70,7 @@ dependencies = [
  "at_parser",
  "at_syntax",
  "at_vm",
+ "crossbeam-channel",
  "hex",
  "lsp-server",
  "lsp-types",

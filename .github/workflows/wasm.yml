@@ -20,6 +20,8 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Install wasm-pack
         run: cargo install wasm-pack
+      - name: Cargo wasm target smoke
+        run: cargo build -p at_wasm --target wasm32-unknown-unknown
       - name: Build wasm bundle
         run: wasm-pack build crates/at_wasm --target web
 

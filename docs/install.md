@@ -1,5 +1,7 @@
 # Installation
 
+This is the canonical installation guide for `at`.
+
 ## Pre-built binaries
 
 Download from GitHub releases for your platform:
@@ -59,3 +61,15 @@ For local development builds:
 npm install
 npm run build:wasm
 ```
+
+## Install Smoke Matrix
+
+Run this matrix for release sign-off or local verification.
+
+| Target | Install path | Required smoke commands |
+|---|---|---|
+| Linux/macOS | release tarball | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Windows | release zip | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Source | `cargo install --path crates/at_cli` | `at --version`, `at run examples/sum.at` |
+| Source (git) | `cargo install --git https://github.com/aryaminus/at --bin at` | `at --version`, `at run examples/sum.at` |
+| WASM | `npm install -g @aryaminus/at` | run wrapper/browser smoke from `docs/wasm.md` |

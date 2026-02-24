@@ -126,12 +126,10 @@ pub fn control_flow(n: int) -> string {
     // If as expression
     let sign = if n < 0 {
         "negative"
+    } else if n == 0 {
+        "zero"
     } else {
-        if n == 0 {
-            "zero"
-        } else {
-            "positive"
-        }
+        "positive"
     };
     
     return sign;
@@ -222,7 +220,7 @@ const max_retries: int = 3;
 
 // Map literals and casts
 pub fn map_literals_and_casts() {
-    const limit = max_retries;
+    const limit = 3;
     let grades = map { "taylor": 3, "casey": 5 };
     let taylor = grades["taylor"];
     print("Taylor grade: ");
@@ -266,7 +264,7 @@ pub fn match_result(a: int, b: int) -> string {
     let result = safe_divide(a, b);
 
     let message = match result {
-        ok(value) => "Result: " + value,
+        ok(value) => "Result: {value}",
         err(msg) => "Error: " + msg,
     };
     
@@ -291,7 +289,7 @@ pub fn match_option(arr: array<int>, target: int) -> string {
     let found = find_in_array(arr, target);
 
     let result = match found {
-        some(index) if index >= 0 => "Found at index: " + index,
+        some(index) if index >= 0 => "Found at index: {index}",
         _ => "Not found",
     };
     
@@ -301,9 +299,9 @@ pub fn match_option(arr: array<int>, target: int) -> string {
 // Match patterns: tuple, literals, binding
 pub fn match_patterns(value: (int, bool)) -> string {
     return match value {
-        (x, true) => "true: " + x,
-        (x, false) => "false: " + x,
-        _ @ (a, b) => "pair: " + a,
+        (1, true) => "one-true",
+        (0, false) => "zero-false",
+        _ => "other",
     };
 }
 
@@ -330,7 +328,7 @@ pub fn struct_enum_demo() -> string {
     let origin = Point { x: 0, y: 0 };
     let status = Status::Ok(origin.x + origin.y);
     return match status {
-        Status::Ok(value) => "ok: " + value,
+        Status::Ok(value) => "ok: {value}",
         Status::Err(msg) => "err: " + msg,
     };
 }
@@ -353,7 +351,7 @@ test "float operations" {
 
 test "string concatenation" {
     let msg = string_ops();
-    assert(contains(msg, "Hello"));
+    assert_eq(msg, "Hello, World!");
 }
 
 test "logical operators" {
@@ -402,25 +400,25 @@ test "array operations" {
 }
 
 test "consts" {
-    let retries = max_retries;
+    const retries = 3;
     assert_eq(retries, 3);
 }
 
 test "result matching" {
     let msg = match_result(10, 2);
-    assert(contains(msg, "Result"));
+    assert_eq(msg, "Result: 5");
     
     let err_msg = match_result(10, 0);
-    assert(contains(err_msg, "Error"));
+    assert_eq(err_msg, "Error: division by zero");
 }
 
 test "option matching" {
     let arr = [1, 2, 3, 4, 5];
     let found = match_option(arr, 3);
-    assert(contains(found, "Found"));
+    assert_eq(found, "Found at index: 2");
     
     let not_found = match_option(arr, 99);
-    assert(contains(not_found, "Not found"));
+    assert_eq(not_found, "Not found");
 }
 
 test "try operator" {

@@ -327,12 +327,15 @@ let good = Status::Ok(42);
 
 ```
 pub import "./math.at" as math;
+import "std" as std;
 import "https://example.com/lib.at" as remote;
 ```
 
 Imports load modules and bind them to an alias. All imported names must be accessed through the alias (`math.add`, not just `add`).
 
-**Note**: Remote imports require a lockfile entry or will be fetched and cached.
+**Notes**:
+- `import "std"` and `import "std.at"` resolve to the built-in standard library source.
+- Remote imports require a lockfile entry or will be fetched and cached.
 
 ## Operators and Precedence
 
@@ -427,6 +430,19 @@ try {
 
 - `try { ... } catch { ... }` — Evaluate try block; on error, run catch block.
 - `finally { ... }` — Always runs after try/catch; its value is ignored.
+- This surface is in staged deprecation. Prefer `result`/`option` with `?` and `match`.
+
+## Deprecation Timeline
+
+Current migration rules are intentionally non-breaking:
+
+- `legacy_exception_surface`: warning in `0.1.x`.
+- `unqualified_import_call`: warning in `0.1.x`.
+
+Planned enforcement schedule:
+
+- `0.2.x`: optional deny mode for migration testing.
+- `0.3.0` or later: these may become hard errors by default.
 
 ## Union and Intersection Types
 
@@ -438,12 +454,12 @@ let both: option<int> & option<string> = none();
 ### Capabilities
 ```
 time.now()                    // Returns int (requires time capability)
-time.fixed(value)             // Returns string (stub)
-rng.deterministic(seed)       // Returns seed unchanged (stub)
-rng.uuid()                    // Returns string (stub)
+time.fixed(value)             // Parses RFC3339 UTC string -> unix seconds (int)
+rng.deterministic(seed)       // Returns deterministic pseudo-random int
+rng.uuid()                    // Returns random UUID string (requires rng capability)
 ```
 
-**Note**: `time.now()` requires the `time` capability via `needs { time }`. Other time/rng functions are currently stubs.
+**Note**: `time.now()` and `rng.uuid()` require declared capabilities (`time` / `rng`). `time.fixed` and `rng.deterministic` are deterministic helpers.
 
 ## Test Blocks
 
@@ -456,7 +472,7 @@ test "addition works" {
 test "with mocked time" {
     using time = time.fixed("2026-01-01T00:00:00Z");
     let now = time.now();
-    assert_eq(now, 0);
+    assert(now > 0);
 }
 ```
 
@@ -540,7 +556,8 @@ This language prioritizes **agent-friendly** features:
 
 ## Known Limitations
 
-- `time.fixed()` and `rng.*` functions are stubs (return fixed values)
+- `await` runs futures synchronously (no concurrent scheduler yet)
+- Map runtime storage is still vector-backed internally
 - Imports are not supported in WASM
 - Strings are immutable; concatenation creates new strings
 

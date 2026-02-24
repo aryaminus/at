@@ -2,6 +2,9 @@
 
 The `at` CLI uses URL imports with a content-hash cache.
 
+Remote fetches are hardened with request timeouts, bounded retries, and a
+response-size limit.
+
 ## Cache directory
 
 Remote modules are cached under `.at/cache` as `<sha256>.at`.
@@ -37,4 +40,5 @@ Examples:
 at cache prune
 at cache prune --max 100
 at cache prune --max-files 100 --max-mb 200
+at cache prune --max-files 100 --max-mb 200 --max-age-days 30
 ```

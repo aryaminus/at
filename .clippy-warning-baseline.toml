@@ -1,0 +1,73 @@
+total_warnings = 51
+as_of = "2026-02-24"
+command = "cargo clippy --workspace --all-targets --message-format=json --quiet"
+
+[[category]]
+lint = "clippy::only_used_in_recursion"
+count = 14
+owner = "type-system-runtime"
+
+[[category]]
+lint = "clippy::if_same_then_else"
+count = 12
+owner = "type-system"
+
+[[category]]
+lint = "clippy::single_match"
+count = 4
+owner = "type-system"
+
+[[category]]
+lint = "clippy::new_without_default"
+count = 4
+owner = "runtime"
+
+[[category]]
+lint = "clippy::nonminimal_bool"
+count = 2
+owner = "type-system"
+
+[[category]]
+lint = "clippy::too_many_arguments"
+count = 2
+owner = "type-system"
+
+[[category]]
+lint = "clippy::derivable_impls"
+count = 2
+owner = "runtime"
+
+[[category]]
+lint = "clippy::unwrap_or_default"
+count = 2
+owner = "runtime"
+
+[[category]]
+lint = "clippy::let_unit_value"
+count = 2
+owner = "runtime"
+
+[[category]]
+lint = "clippy::useless_format"
+count = 2
+owner = "runtime"
+
+[[category]]
+lint = "clippy::arc_with_non_send_sync"
+count = 2
+owner = "cli"
+
+[[category]]
+lint = "clippy::items_after_test_module"
+count = 1
+owner = "parser"
+
+[[category]]
+lint = "clippy::get_first"
+count = 1
+owner = "core"
+
+[[category]]
+lint = "clippy::ptr_arg"
+count = 1
+owner = "cli"

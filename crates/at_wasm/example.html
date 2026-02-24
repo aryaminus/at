@@ -4,10 +4,45 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>at_wasm browser example</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+        margin: 1.5rem;
+      }
+      textarea {
+        width: 100%;
+        min-height: 14rem;
+        box-sizing: border-box;
+      }
+      .controls {
+        margin: 0.75rem 0;
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+      }
+      pre {
+        border: 1px solid #ccc;
+        padding: 0.75rem;
+        background: #f8f8f8;
+        overflow-x: auto;
+      }
+    </style>
   </head>
   <body>
-    <h1>at_wasm browser example</h1>
-    <pre id="output">loading...</pre>
+    <h1>at_wasm browser playground</h1>
+    <textarea id="source">fn add(a: int, b: int) -> int {
+    print("adding");
+    return a + b;
+}
+
+add(40, 2);</textarea>
+    <div class="controls">
+      <label for="max-instructions">Max instructions</label>
+      <input id="max-instructions" type="number" value="10000" min="1" />
+      <button id="run-btn" type="button">Run</button>
+    </div>
+    <pre id="output">Click "Run" to execute.</pre>
     <script type="module" src="./example_web.js"></script>
   </body>
 </html>

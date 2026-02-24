@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+at_check = { path = "../at_check" }
 at_syntax = { path = "../at_syntax" }
 toml = "0.8"
 

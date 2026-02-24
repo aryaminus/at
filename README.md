@@ -18,6 +18,7 @@
 - Control flow: `if` (expression, optional else), `while`, `for`, `break`, `continue`
 - Pattern matching: `match` with `ok`, `err`, `some`, `none`, `_` patterns
 - Error handling: `?` (try) operator, `option`, `result`
+- Staged deprecation warnings for legacy `throw` and `try { ... } catch { ... }` usage
 - Effects: `needs`/`using` for capability management
 - Imports: Local paths and URLs with caching
 - Comments: `//` line and `/* */` block comments
@@ -26,6 +27,12 @@
 - Operators: `+`, `-`, `*`, `/`, `%`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Test blocks: `test "name" { ... }` with `assert` and `assert_eq`
 - Tool functions: `tool fn` for MCP integration
+
+**Staged deprecation status (compatibility mode):**
+- `legacy_exception_surface` and `unqualified_import_call` are warning-level in `0.1.x`.
+- Planned enforcement timeline:
+  - `0.2.x`: optional deny mode for migration testing.
+  - `0.3.0` or later: may become hard errors by default.
 
 ## Tooling
 
@@ -44,6 +51,14 @@ Comprehensive tooling for development, testing, and deployment:
 - **Cache**: Manage cached remote imports (`at cache`)
 - **WASM**: Browser-compatible runtime
 
+CI enforces:
+- `cargo fmt --check`
+- `cargo clippy` correctness gate
+- non-correctness clippy warning budget (`.clippy-warning-baseline.toml`)
+- workspace tests + example run/check sweep
+- release binary size budget (`<= 8,000,000` bytes)
+- benchmark stability threshold via `examples/run_bench.sh` + `examples/bench_compare.py`
+
 ## Packaging
 
 ### npm (WASM)
@@ -60,7 +75,7 @@ Use `at` binaries for CLI usage; the npm package provides WASM bindings.
 # Run a program
 at run examples/sum.at
 
-# Type-check
+# Type-check (fails on errors; warns are non-fatal)
 at check file.at
 
 # Run tests
@@ -98,17 +113,7 @@ at run --help
 
 ## Installation
 
-### From Source
-
-```bash
-# Clone and build
-git clone https://github.com/aryaminus/at.git
-cd at
-cargo build --release
-
-# Add to PATH
-export PATH="$PATH:$(pwd)/target/release"
-```
+Canonical install docs live in `docs/install.md`.
 
 ### Cargo (git)
 
@@ -150,7 +155,19 @@ brew install at
 ```bash
 at --version
 at --help
+at run examples/sum.at
+at check examples/features.at
 ```
+
+### Install Smoke Matrix
+
+| Target | Install path | Verification |
+|---|---|---|
+| Linux/macOS | Release tarball | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Windows | Release zip | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Source | `cargo install --path crates/at_cli` | `at --version`, `at run examples/sum.at` |
+| Source (git) | `cargo install --git https://github.com/aryaminus/at --bin at` | `at --version`, `at run examples/sum.at` |
+| WASM | `npm install -g @aryaminus/at` | run wrapper smoke in `docs/wasm.md` |
 
 ## Example
 
@@ -177,7 +194,7 @@ fn process(items: array<int>) -> int {
 
 test "greeting works" {
     let msg = greet("World");
-    assert(contains(msg, "Hello"));
+    assert_eq(msg, "Hello, World!");
 }
 
 test "division handles errors" {
@@ -200,41 +217,8 @@ fn main() {
 
 - `docs/lang.md` — Complete language reference
 - `docs/cli.md` — CLI commands and options
+- `docs/install.md` — Installation and platform notes
 - `examples/features.at` — Comprehensive feature demonstration
-
-## Build from Source
-
-```bash
-git clone https://github.com/yourusername/at
-cd at
-cargo build --release
-```
-
-Run with `cargo run` or use the binary from `target/release/at`.
-
-## WASM Build
-
-Build for browser or embedded environments:
-
-```bash
-cargo build -p at_wasm --target wasm32-unknown-unknown --release
-```
-
-The WASM module exposes:
-- `run(source: &str, max_instructions: Option<usize>) -> String`
-- Returns structured JSON with status, value, and captured output
-- Supports execution limits to prevent infinite loops
-- Captures `print()` statements in output array
-
-See `docs/wasm.md` for complete usage guide including JavaScript integration.
-
-**Quick JS example:**
-```javascript
-const result = wasm.exports.run("fn main() { print(\"Hello\"); return 42; }");
-const parsed = JSON.parse(result);
-console.log(parsed.value);   // "42"
-console.log(parsed.output);  // ["Hello"]
-```
 
 ## Design Goals
 

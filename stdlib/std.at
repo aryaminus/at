@@ -1,5 +1,5 @@
 fn version() -> string {
-    return "std";
+    return "0.1.0";
 }
 
 fn now() -> int needs { time } {
