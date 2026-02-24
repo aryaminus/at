@@ -557,9 +557,26 @@ fn provide_hover(
     let functions = module
         .map(collect_functions_with_inferred)
         .or_else(|| collect_functions(text))?;
+    let inferred_returns = module.map(at_check::infer_function_returns);
     if qualifier.is_none() {
         if let Some(info) = functions.get(&name) {
             let doc = module.and_then(|module| doc_comment_for_span(&module.comments, info.span));
+            if let Some(module) = module {
+                if let Some(func) = module.functions.iter().find(|func| func.name.name == name) {
+                    let inferred = inferred_returns
+                        .as_ref()
+                        .and_then(|map| map.get(&name).map(String::as_str));
+                    return Some(Hover {
+                        contents: HoverContents::Markup(function_hover_markdown(
+                            &info.signature,
+                            func,
+                            inferred,
+                            doc.as_deref(),
+                        )),
+                        range: Some(span_to_range(text, info.span)),
+                    });
+                }
+            }
             return Some(Hover {
                 contents: HoverContents::Markup(hover_signature_markdown_with_doc(
                     &info.signature,
@@ -599,6 +616,22 @@ fn provide_hover(
     if had_qualifier {
         if let Some(info) = functions.get(&name) {
             let doc = module.and_then(|module| doc_comment_for_span(&module.comments, info.span));
+            if let Some(module) = module {
+                if let Some(func) = module.functions.iter().find(|func| func.name.name == name) {
+                    let inferred = inferred_returns
+                        .as_ref()
+                        .and_then(|map| map.get(&name).map(String::as_str));
+                    return Some(Hover {
+                        contents: HoverContents::Markup(function_hover_markdown(
+                            &info.signature,
+                            func,
+                            inferred,
+                            doc.as_deref(),
+                        )),
+                        range: Some(span_to_range(text, info.span)),
+                    });
+                }
+            }
             return Some(Hover {
                 contents: HoverContents::Markup(hover_signature_markdown_with_doc(
                     &info.signature,
@@ -651,9 +684,25 @@ fn provide_signature_help(
             documentation: None,
         })
         .collect();
+    let doc = if let Some(module) = module {
+        let inferred_returns = at_check::infer_function_returns(module);
+        module
+            .functions
+            .iter()
+            .find(|func| func.name.name == func_name)
+            .map(|func| {
+                let inferred = inferred_returns.get(&func.name.name).map(String::as_str);
+                let doc = doc_comment_for_span(&module.comments, func.name.span);
+                function_hover_markdown(&signature, func, inferred, doc.as_deref())
+            })
+    } else {
+        None
+    };
     let sig_info = SignatureInformation {
         label: signature.clone(),
-        documentation: Some(Documentation::MarkupContent(signature_markdown(&signature))),
+        documentation: Some(Documentation::MarkupContent(
+            doc.unwrap_or_else(|| signature_markdown(&signature)),
+        )),
         parameters: Some(parameters),
         active_parameter: None,
     };
@@ -1888,6 +1937,94 @@ fn signature_markdown(signature: &str) -> MarkupContent {
     }
 }
 
+fn function_hover_markdown(
+    signature: &str,
+    func: &at_syntax::Function,
+    inferred_return: Option<&str>,
+    doc: Option<&str>,
+) -> MarkupContent {
+    let mut value = String::new();
+    value.push_str("```at\n");
+    value.push_str(signature);
+    value.push_str("\n```");
+
+    if let Some(doc) = doc {
+        let doc = doc.trim();
+        if !doc.is_empty() {
+            value.push_str("\n\n");
+            value.push_str(doc);
+        }
+    }
+
+    let mut details: Vec<String> = Vec::new();
+    if func.is_async {
+        details.push("async".to_string());
+    }
+    if func.is_tool {
+        details.push("tool".to_string());
+    }
+    if !func.needs.is_empty() {
+        let needs = func
+            .needs
+            .iter()
+            .map(|ident| ident.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        details.push(format!("needs: {needs}"));
+    }
+    if !func.type_params.is_empty() {
+        let params = func
+            .type_params
+            .iter()
+            .map(|ident| ident.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        details.push(format!("type params: {params}"));
+    }
+    let mut return_line = None;
+    if let Some(return_ty) = &func.return_ty {
+        let mut formatted = String::new();
+        format_type_ref(return_ty, &mut formatted);
+        return_line = Some(format!("return: {formatted}"));
+    } else if let Some(inferred) = inferred_return {
+        return_line = Some(format!("return: {inferred} (inferred)"));
+    }
+    if let Some(return_line) = return_line {
+        details.push(return_line);
+    }
+
+    if !details.is_empty() {
+        value.push_str("\n\nDetails\n");
+        for item in details {
+            value.push_str("- ");
+            value.push_str(&item);
+            value.push('\n');
+        }
+    }
+
+    if !func.params.is_empty() {
+        value.push_str("\nParams\n");
+        for param in &func.params {
+            value.push_str("- ");
+            value.push_str(&param.name.name);
+            value.push_str(": ");
+            if let Some(ty) = &param.ty {
+                let mut formatted = String::new();
+                format_type_ref(ty, &mut formatted);
+                value.push_str(&formatted);
+            } else {
+                value.push_str("unknown");
+            }
+            value.push('\n');
+        }
+    }
+
+    MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    }
+}
+
 fn doc_comment_for_span(comments: &[at_syntax::Comment], span: Span) -> Option<String> {
     let mut best: Option<&at_syntax::Comment> = None;
     for comment in comments {
@@ -2741,7 +2878,7 @@ mod tests {
 
     #[test]
     fn hover_returns_markdown_signature() {
-        let text = "// doc string\nfn foo(a: int) {}\nfoo(1);";
+        let text = "// doc string\nfn foo(a: int) -> int {\n  return a;\n}\nfoo(1);";
         let module = parse_module(text).expect("parse module");
         let offset = text.find("foo(1)").expect("call") + 1;
         let position = offset_to_position(text, offset);
@@ -2761,6 +2898,9 @@ mod tests {
         assert!(markup.value.contains("```at"));
         assert!(markup.value.contains("fn foo"));
         assert!(markup.value.contains("doc string"));
+        assert!(markup.value.contains("Details"));
+        assert!(markup.value.contains("Params"));
+        assert!(markup.value.contains("return: int"));
     }
 
     #[test]
@@ -2770,7 +2910,12 @@ mod tests {
         let signature = format_function_signature_with_inferred(&module.functions[0], None);
         let sig_info = SignatureInformation {
             label: signature.clone(),
-            documentation: Some(Documentation::MarkupContent(signature_markdown(&signature))),
+            documentation: Some(Documentation::MarkupContent(function_hover_markdown(
+                &signature,
+                &module.functions[0],
+                None,
+                None,
+            ))),
             parameters: None,
             active_parameter: None,
         };
@@ -2780,6 +2925,7 @@ mod tests {
         };
         assert_eq!(markup.kind, MarkupKind::Markdown);
         assert!(markup.value.contains("fn foo"));
+        assert!(markup.value.contains("Params"));
     }
 
     #[test]
@@ -2811,7 +2957,7 @@ mod tests {
 
     #[test]
     fn handle_request_returns_hover_markup() {
-        let text = "fn foo(a: int) {}\nfoo(1);";
+        let text = "fn foo(a: int) -> int {\n  return a;\n}\nfoo(1);";
         let offset = text.find("foo(1)").expect("call") + 1;
         let position = offset_to_position(text, offset);
         let params = HoverParams {
@@ -2836,11 +2982,13 @@ mod tests {
         };
         assert_eq!(markup.kind, MarkupKind::Markdown);
         assert!(markup.value.contains("fn foo"));
+        assert!(markup.value.contains("Details"));
+        assert!(markup.value.contains("Params"));
     }
 
     #[test]
     fn handle_request_returns_signature_help() {
-        let text = "fn foo(a: int, b: int) {}\nfoo(1, 2);";
+        let text = "fn foo(a: int, b: int) -> int {\n  return a;\n}\nfoo(1, 2);";
         let offset = text.find("foo(1, 2)").expect("call") + 1;
         let position = offset_to_position(text, offset);
         let params = SignatureHelpParams {
@@ -2870,6 +3018,8 @@ mod tests {
         };
         assert_eq!(markup.kind, MarkupKind::Markdown);
         assert!(markup.value.contains("fn foo"));
+        assert!(markup.value.contains("Params"));
+        assert!(markup.value.contains("return: int"));
     }
 
     #[test]
