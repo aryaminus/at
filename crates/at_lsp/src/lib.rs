@@ -2648,3 +2648,81 @@ fn format_type_ref(ty: &TypeRef, out: &mut String) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_uri() -> Uri {
+        "file:///test.at".parse().expect("uri")
+    }
+
+    #[test]
+    fn hover_returns_markdown_signature() {
+        let text = "fn foo(a: int) {}\nfoo(1);";
+        let module = parse_module(text).expect("parse module");
+        let offset = text.find("foo(1)").expect("call") + 1;
+        let position = offset_to_position(text, offset);
+        let params = HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+        };
+        let mut module_cache = HashMap::new();
+        let hover = provide_hover(text, Some(&module), &mut module_cache, &params).expect("hover");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover");
+        };
+        assert_eq!(markup.kind, MarkupKind::Markdown);
+        assert!(markup.value.contains("```at"));
+        assert!(markup.value.contains("fn foo"));
+    }
+
+    #[test]
+    fn signature_help_includes_markdown_and_active_param() {
+        let text = "fn foo(a: int, b: int) {}\nfoo(1, 2);";
+        let module = parse_module(text).expect("parse module");
+        let signature = format_function_signature_with_inferred(&module.functions[0], None);
+        let sig_info = SignatureInformation {
+            label: signature.clone(),
+            documentation: Some(Documentation::MarkupContent(signature_markdown(&signature))),
+            parameters: None,
+            active_parameter: None,
+        };
+        assert!(sig_info.label.contains("fn foo"));
+        let Some(Documentation::MarkupContent(markup)) = sig_info.documentation else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(markup.kind, MarkupKind::Markdown);
+        assert!(markup.value.contains("fn foo"));
+    }
+
+    #[test]
+    fn definition_prefers_local_over_import_alias() {
+        let text = "import \"./other.at\" as bar;\nfn bar() {}\nbar();";
+        let module = parse_module(text).expect("parse module");
+        let offset = text.rfind("bar();").expect("call") + 1;
+        let position = offset_to_position(text, offset);
+        let params = GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+        };
+        let mut module_cache = HashMap::new();
+        let response =
+            provide_definition(text, Some(&module), &mut module_cache, &test_uri(), &params)
+                .expect("definition");
+        let GotoDefinitionResponse::Scalar(location) = response else {
+            panic!("expected scalar location");
+        };
+        assert_eq!(location.uri, test_uri());
+        let local_offset = text.find("bar()").expect("def");
+        let expected_start = offset_to_position(text, local_offset);
+        assert_eq!(location.range.start, expected_start);
+    }
+}

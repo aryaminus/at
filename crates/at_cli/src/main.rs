@@ -1795,6 +1795,30 @@ mod tests {
     }
 
     #[test]
+    fn integration_run_prints_parse_error() {
+        let temp_dir = std::env::temp_dir().join("at_test_run_parse_error_message");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(&file, "let x = ;").expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("run at binary");
+
+        assert!(!output.status.success(), "expected parse failure");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("parse error"),
+            "expected parse error output, got: {}",
+            stderr
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
     fn integration_fmt_simple() {
         let temp_dir = std::env::temp_dir().join("at_test_fmt");
         fs::create_dir_all(&temp_dir).ok();
