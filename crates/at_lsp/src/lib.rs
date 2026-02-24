@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use at_lint;
 use at_parser::{parse_module, parse_module_with_errors, ParseError};
@@ -28,6 +28,7 @@ use lsp_types::{
 use sha2::{Digest, Sha256};
 
 const REMOTE_DIAGNOSTIC_CODE: &str = "LSP001";
+const DIAGNOSTIC_DEBOUNCE_MS: u64 = 150;
 static WORKSPACE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 #[derive(Default)]
@@ -36,6 +37,7 @@ struct ServerState {
     module_cache: HashMap<String, CachedModule>,
     doc_cache: HashMap<Uri, DocCacheEntry>,
     diagnostics_cache: HashMap<Uri, u64>,
+    diagnostics_last_publish: HashMap<Uri, Instant>,
     cancelled_requests: HashSet<String>,
 }
 
@@ -57,6 +59,7 @@ impl ServerState {
             module_cache: HashMap::new(),
             doc_cache: HashMap::new(),
             diagnostics_cache: HashMap::new(),
+            diagnostics_last_publish: HashMap::new(),
             cancelled_requests: HashSet::new(),
         }
     }
@@ -216,6 +219,7 @@ pub fn run_stdio() -> Result<(), String> {
                         &text,
                         module.as_ref(),
                         &mut state.diagnostics_cache,
+                        &mut state.diagnostics_last_publish,
                     )?;
                 }
             }
@@ -276,6 +280,7 @@ fn handle_notification(
             state.docs.remove(&url);
             state.doc_cache.remove(&url);
             state.diagnostics_cache.remove(&url);
+            state.diagnostics_last_publish.remove(&url);
             Ok(None)
         }
         "$/cancelRequest" => {
@@ -1769,6 +1774,7 @@ fn publish_diagnostics(
     text: &str,
     module: Option<&Module>,
     cache: &mut HashMap<Uri, u64>,
+    last_publish: &mut HashMap<Uri, Instant>,
 ) -> Result<(), String> {
     let mut diagnostics = Vec::new();
     let (parsed_module, parse_errors) = match module.cloned() {
@@ -1814,11 +1820,19 @@ fn publish_diagnostics(
         }
     }
 
+    let now = Instant::now();
+    if let Some(last) = last_publish.get(url) {
+        if now.duration_since(*last).as_millis() < DIAGNOSTIC_DEBOUNCE_MS as u128 {
+            return Ok(());
+        }
+    }
+
     let hash = hash_diagnostics(&diagnostics);
     if cache.get(url).copied() == Some(hash) {
         return Ok(());
     }
     cache.insert(url.clone(), hash);
+    last_publish.insert(url.clone(), now);
 
     let params = lsp_types::PublishDiagnosticsParams {
         uri: url.clone(),
@@ -2716,6 +2730,7 @@ mod tests {
         let init = InitializeParams::default();
         let mut state = ServerState::new(init);
         state.docs.insert(test_uri(), text.to_string());
+        state.diagnostics_last_publish.clear();
         state
     }
 
