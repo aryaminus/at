@@ -9,7 +9,7 @@ at_syntax = { path = "../at_syntax" }
 at_parser = { path = "../at_parser" }
 uuid = { version = "1", features = ["v4", "js"] }
 serde = { version = "1", features = ["derive", "rc"] }
-bincode = "=1.3.3"
+bincode = "=2.0.1"
 sha2 = "0.10"
 hex = "0.4"
 ureq = "=2.12.1"
