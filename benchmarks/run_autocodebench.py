@@ -115,7 +115,7 @@ def execute_at_code(code, problem_id):
 
 def main():
     parser = argparse.ArgumentParser(description="End-to-End AutoCodeBench Eval for `at`")
-    parser.add_argument("--models", type=str, default="gpt-4o", help="Comma-separated models")
+    parser.add_argument("--models", type=str, default="glm-4.5", help="Comma-separated models")
     parser.add_argument("--count", type=int, default=3, help="Number of problems to evaluate")
     args = parser.parse_args()
 

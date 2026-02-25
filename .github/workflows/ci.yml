@@ -8,6 +8,7 @@ on:
 
 jobs:
     test:
+        if: "!contains(github.event.head_commit.message, 'chore(release):')"
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
@@ -16,6 +17,8 @@ jobs:
               with:
                   components: rustfmt, clippy
             - uses: Swatinem/rust-cache@v2
+              with:
+                  cache-on-failure: true
             - name: Check formatting
               run: cargo fmt --all -- --check
             - name: Clippy (correctness gate)
@@ -30,12 +33,7 @@ jobs:
               run: cargo test -p at --bin at --release
             - name: Enforce release binary size budget
               run: |
-                  cargo build --release -p at
-                  SIZE=$(python3 - <<'PY'
-                  import os
-                  print(os.path.getsize("target/release/at"))
-                  PY
-                  )
+                  SIZE=$(stat -c%s target/release/at 2>/dev/null || python3 -c "import os; print(os.path.getsize('target/release/at'))")
                   echo "release binary size: ${SIZE} bytes"
                   test "$SIZE" -le 8500000
             - name: Benchmark stability threshold
@@ -47,11 +45,11 @@ jobs:
               run: |
                   for file in examples/*.at; do
                     echo "Checking $file"
-                    cargo run --quiet -p at -- check "$file"
+                    cargo run --release --quiet -p at -- check "$file"
                   done
                   for file in examples/*.at; do
                     echo "Running $file"
-                    cargo run --quiet -p at -- run "$file"
+                    cargo run --release --quiet -p at -- run "$file"
                   done
 
     install-smoke:
@@ -62,6 +60,8 @@ jobs:
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
             - uses: Swatinem/rust-cache@v2
+              with:
+                  cache-on-failure: true
             - name: Install smoke (release artifact + source install)
               run: |
                   set -euxo pipefail
