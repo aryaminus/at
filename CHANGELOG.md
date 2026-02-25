@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [0.1.0] - 2026-02-20
 
 ### Added
+
 - Core language: `int`, `float`, `bool`, `string`, `unit`, `array<T>`, `option<T>`, `result<T,E>`
 - Control flow: `if` expressions, `while`, `for`, `break`, `continue`
 - Pattern matching: `match` with `ok`, `err`, `some`, `none`, `_` patterns
@@ -14,7 +15,7 @@ All notable changes to this project will be documented in this file.
 - Test blocks: `test "name" { ... }` with `assert` and `assert_eq`
 - Tool functions: `tool fn` for MCP integration
 - CLI: `run`, `repl`, `fmt`, `check`, `lint`, `test`, `bench`, `deps`, `cache`
-- LSP server: diagnostics, hover, go-to-definition, completion, inlay hints
+- LSP server: diagnostics, hover, go-to-definition, completion, inlay hints, semantic tokens, code actions, signature help, document highlights, folding ranges
 - MCP server: expose `tool fn` functions to AI agents
 - WASM target: browser and Node.js support
 - Code formatter (`at fmt`)
@@ -23,4 +24,11 @@ All notable changes to this project will be documented in this file.
 - Benchmark runner (`at bench`)
 - Dependency viewer (`at deps --tree`)
 - Cache management (`at cache add/list/show/remove/clear/prune`)
-- Standard library (`stdlib/std.at`)
+- Standard library (`stdlib/std.at`) with `version`, `now`, `min`, `max`, `abs`, `clamp`
+- Async/await with cooperative scheduler (quantum-based preemption)
+- Generators with `yield`
+- Closures with expression and block bodies (`|x| expr`, `|x| { stmts }`)
+- Tuples, maps, structs, enums with generic type parameters
+- Defer statements
+- Spread syntax for arrays and maps
+- String interpolation

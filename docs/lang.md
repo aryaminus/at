@@ -28,6 +28,10 @@ at repl
 - `array<T>` — Array of type T
 - `option<T>` — Optional value (`some(T)` or `none`)
 - `result<T, E>` — Success or error (`ok(T)` or `err(E)`)
+- `map<K, V>` — Key-value mapping
+- `(T, U)` — Tuple of two or more types
+- `future<T>` — Asynchronous future value
+- `fn(A) -> B` — Function type
 
 ### Notes
 
@@ -39,34 +43,42 @@ at repl
 ## Values and Literals
 
 ### Integers
+
 ```
 0, 42, -7
 ```
+
 Note: Negative literals are parsed as unary negation: `-7` is `-(7)`.
 
 ### Floats
+
 ```
 3.14, -0.5, 2.0
 ```
+
 Note: Must have digits after the decimal point. `42.` is parsed as `42` followed by `.`.
 
 ### Booleans
+
 ```
 true, false
 ```
 
 ### Strings
+
 ```
 "hello world"
 ```
 
 String interpolation:
+
 ```
 "hello {name}"
 "total = {sum}"
 ```
 
 String escape sequences:
+
 - `\n` — newline
 - `\t` — tab
 - `\r` — carriage return
@@ -75,6 +87,7 @@ String escape sequences:
 - `\"` — literal quote
 
 ### Comments
+
 ```
 // Line comment
 
@@ -113,6 +126,7 @@ if condition { then_expr } else { else_expr }
 ```
 
 `if` is an expression. `else` is optional when used as a statement.
+
 ```
 let result = if x < 0 { "neg" } else { if x == 0 { "zero" } else { "pos" } };
 ```
@@ -334,6 +348,7 @@ import "https://example.com/lib.at" as remote;
 Imports load modules and bind them to an alias. All imported names must be accessed through the alias (`math.add`, not just `add`).
 
 **Notes**:
+
 - `import "std"` and `import "std.at"` resolve to the built-in standard library source.
 - Remote imports require a lockfile entry or will be fetched and cached.
 
@@ -371,25 +386,33 @@ term:     + -           (string + string for concatenation)
 ## Built-in Functions
 
 ### Assertions
+
 ```
 assert(condition)
 assert_eq(left, right)
 ```
 
 ### I/O
+
 ```
 print(value)  // Prints value to stdout
 ```
 
 ### Array Operations
+
 ```
 len(value)                    // Length of array or string
 append(array, value)          // Add element to array
 contains(array, value)        // Check if array contains value
 slice(array, start, end)      // Extract sub-array
+map(array, fn)                // Transform each element
+filter(array, fn)             // Keep elements matching predicate
+reduce(array, init, fn)       // Fold array into a single value
+flat_map(array, fn)           // Map and flatten results
 ```
 
 ### Option/Result Constructors
+
 ```
 some(value)
 none()
@@ -398,13 +421,13 @@ err(value)
 ```
 
 ### Type Predicates
+
 ```
 is_some(value)
 is_none(value)
 is_ok(value)
 is_err(value)
 ```
-
 
 ### Casts and Type Checks
 
@@ -452,6 +475,7 @@ let both: option<int> & option<string> = none();
 ```
 
 ### Capabilities
+
 ```
 time.now()                    // Returns int (requires time capability)
 time.fixed(value)             // Parses RFC3339 UTC string -> unix seconds (int)
@@ -459,7 +483,7 @@ rng.deterministic(seed)       // Returns deterministic pseudo-random int
 rng.uuid()                    // Returns random UUID string (requires rng capability)
 ```
 
-**Note**: `time.now()` and `rng.uuid()` require declared capabilities (`time` / `rng`). `time.fixed` and `rng.deterministic` are deterministic helpers.
+**Note**: `time.now()` and `rng.uuid()` require declared capabilities (`time` / `rng`). `rng.deterministic` is a deterministic helper that does not require a capability. `time.fixed` parses RFC3339 timestamps and requires the `time` capability.
 
 ## Test Blocks
 
@@ -523,7 +547,7 @@ map_lit      ::= "map" "{" [map_item { "," map_item }] "}"
 map_item     ::= expr ":" expr | "..." expr
 tuple        ::= "(" expr "," expr { "," expr } ")"
 range        ::= expr ".." expr
-closure      ::= "|" [ident { "," ident }] "|" expr
+closure      ::= "|" [ident { "," ident }] "|" (expr | block)
 try_expr     ::= "try" block "catch" block ["finally" block]
 struct_lit   ::= ident "{" field_init { "," field_init } "}"
 enum_lit     ::= ident "::" ident [ "(" expr ")" ]
@@ -556,10 +580,10 @@ This language prioritizes **agent-friendly** features:
 
 ## Known Limitations
 
-- `await` runs futures synchronously (no concurrent scheduler yet)
 - Map runtime storage is still vector-backed internally
 - Imports are not supported in WASM
 - Strings are immutable; concatenation creates new strings
+- Calling a closure stored in a local variable as `f()` requires the compiler to know `f` is callable
 
 ### Type Qualifiers
 
@@ -588,6 +612,21 @@ async fn fetch_value() {
     return await load();
 }
 ```
+
+Async functions execute cooperatively via a built-in scheduler with quantum-based preemption. `await` suspends the current task and allows other spawned tasks to run.
+
+### Closures
+
+```
+let double = |x| x * 2;
+let process = |a, b| {
+    let sum = a + b;
+    sum * 2
+};
+map([1, 2, 3], |n| n + 1);
+```
+
+Closures capture surrounding variables. Both expression bodies (`|x| expr`) and block bodies (`|x| { stmts; expr }`) are supported.
 
 ### Throw
 
@@ -629,6 +668,7 @@ if condition {
     print("no");
 }
 ```
+
 if_stmt      ::= "if" expr block ["else" (block | if_stmt)]
 
 ## See Also
