@@ -1,6 +1,6 @@
 {
   "name": "@aryaminus/at",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": false,
   "description": "WASM bindings for the at language",
   "type": "module",
