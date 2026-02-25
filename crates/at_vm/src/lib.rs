@@ -13,8 +13,11 @@ use std::fmt;
 use uuid::Uuid;
 
 const EMBEDDED_STDLIB_SOURCE: &str = include_str!("../../../stdlib/std.at");
+#[cfg(not(target_arch = "wasm32"))]
 const REMOTE_FETCH_TIMEOUT_SECS: u64 = 10;
+#[cfg(not(target_arch = "wasm32"))]
 const REMOTE_FETCH_RETRIES: usize = 3;
+#[cfg(not(target_arch = "wasm32"))]
 const REMOTE_FETCH_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -3297,8 +3300,18 @@ fn load_module_inner(
                     ensure_stdlib_path()
                         .map_err(|message| compile_error(message, Some(alias.span)))?
                 } else if path.starts_with("http://") || path.starts_with("https://") {
-                    fetch_remote(&path, base_dir)
-                        .map_err(|message| compile_error(message, Some(alias.span)))?
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        fetch_remote(&path, base_dir)
+                            .map_err(|message| compile_error(message, Some(alias.span)))?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        return Err(compile_error(
+                            "remote imports are not supported in wasm".to_string(),
+                            Some(alias.span),
+                        ));
+                    }
                 } else {
                     base_dir.join(path)
                 };
@@ -3387,6 +3400,7 @@ fn prefix_module(module: &mut Module, alias: &str) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_remote(url: &str, base_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     match resolve_cached_path(base_dir, url) {
         Ok(path) if path.exists() => return Ok(path),
@@ -3421,6 +3435,7 @@ fn fetch_remote(url: &str, base_dir: &std::path::Path) -> Result<std::path::Path
     Err(format!("error fetching {url}: exhausted retries"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_remote_response(url: &str, response: ureq::Response) -> Result<String, String> {
     let mut reader = response.into_reader().take(REMOTE_FETCH_MAX_BYTES + 1);
     let mut bytes = Vec::new();
@@ -3437,6 +3452,7 @@ fn read_remote_response(url: &str, response: ureq::Response) -> Result<String, S
         .map_err(|_| format!("error reading response from {url}: body is not valid utf-8"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn store_remote_contents(
     url: &str,
     contents: &str,
@@ -3456,6 +3472,7 @@ fn store_remote_contents(
     Ok(cache_path)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_cached_path(
     base_dir: &std::path::Path,
     url: &str,

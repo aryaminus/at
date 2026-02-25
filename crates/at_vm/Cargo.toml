@@ -12,9 +12,11 @@ serde = { version = "1", features = ["derive", "rc"] }
 bincode = "=1.3.3"
 sha2 = "0.10"
 hex = "0.4"
-ureq = "=2.12.1"
 indexmap = { version = "2", features = ["serde"] }
 getrandom = { version = "0.2", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = "=2.12.1"
 
 [dev-dependencies]
 at_parser = { path = "../at_parser" }
