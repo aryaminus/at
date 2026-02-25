@@ -20,4 +20,4 @@ license = "MIT"
 authors = ["at contributors"]
 
 [workspace.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.4", features = ["js"] }
