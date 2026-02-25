@@ -16,7 +16,7 @@ updates:
           - dependency-name: toml
             versions: ["1.x", "0.9.x"]
           - dependency-name: rustyline
-            versions: ["16.x", "17.x"]
+            versions: ["15.x", "16.x", "17.x"]
           - dependency-name: getrandom
             versions: ["0.4.x"]
 
