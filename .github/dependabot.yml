@@ -12,11 +12,13 @@ updates:
           - dependency-name: ureq
             versions: ["3.x"]
           - dependency-name: bincode
-            versions: ["3.x"]
+            versions: ["2.x", "3.x"]
           - dependency-name: toml
-            versions: ["1.x"]
+            versions: ["1.x", "0.9.x"]
           - dependency-name: rustyline
-            versions: ["17.x"]
+            versions: ["16.x", "17.x"]
+          - dependency-name: getrandom
+            versions: ["0.4.x"]
 
     - package-ecosystem: github-actions
       directory: /

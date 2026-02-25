@@ -14,6 +14,7 @@ sha2 = "0.10"
 hex = "0.4"
 ureq = "=2.12.1"
 indexmap = { version = "2", features = ["serde"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 at_parser = { path = "../at_parser" }
