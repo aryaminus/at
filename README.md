@@ -29,6 +29,7 @@
 - Tool functions: `tool fn` for MCP integration
 
 **Staged deprecation status (compatibility mode):**
+
 - `legacy_exception_surface` and `unqualified_import_call` are warning-level in `0.1.x`.
 - Planned enforcement timeline:
   - `0.2.x`: optional deny mode for migration testing.
@@ -52,6 +53,7 @@ Comprehensive tooling for development, testing, and deployment:
 - **WASM**: Browser-compatible runtime
 
 CI enforces:
+
 - `cargo fmt --check`
 - `cargo clippy` correctness gate
 - non-correctness clippy warning budget (`.clippy-warning-baseline.toml`)
@@ -222,7 +224,7 @@ fn main() {
 
 ## Design Goals
 
-From ["A Language For Agents"](https://armin.dev/blog/2026/02/a-language-for-agents):
+From ["A Language For Agents"](https://lucumr.pocoo.org/2026/2/9/a-language-for-agents/):
 
 1. **Context Without LSP**: Readable without IDE support
 2. **Braces, Not Whitespace**: No indentation sensitivity

@@ -36,9 +36,10 @@ See the [main README](../README.md) for installation and quick start.
 
 ## Design
 
-See [Armin Ronacher's blog post](https://armin.dev/blog/2026/02/a-language-for-agents) for design rationale.
+See [Armin Ronacher's blog post](https://lucumr.pocoo.org/2026/2/9/a-language-for-agents/) for design rationale.
 
 Key features:
+
 - Braces-based blocks (not whitespace-sensitive)
 - Explicit `result<T, E>` and `option<T>` types
 - `needs`/`using` for capability tracking
@@ -49,6 +50,7 @@ Key features:
 ## Examples
 
 See `examples/` directory for working examples:
+
 - `sum.at` — Basic arithmetic
 - `primes.at` — Algorithm example
 - `features.at` — Comprehensive feature demo
