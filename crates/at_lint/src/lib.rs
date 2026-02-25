@@ -50,6 +50,7 @@ pub enum LintRule {
     CyclomaticComplexity,
     LegacyExceptionSurface,
     UnqualifiedImportCall,
+    ImportAliasMatchesFilename,
 }
 
 impl LintRule {
@@ -81,6 +82,7 @@ impl LintRule {
             "cyclomatic_complexity" => Some(LintRule::CyclomaticComplexity),
             "legacy_exception_surface" => Some(LintRule::LegacyExceptionSurface),
             "unqualified_import_call" => Some(LintRule::UnqualifiedImportCall),
+            "import_alias_matches_filename" => Some(LintRule::ImportAliasMatchesFilename),
             _ => None,
         }
     }
@@ -122,6 +124,7 @@ impl Default for LintConfig {
             LintRule::CyclomaticComplexity,
             LintRule::LegacyExceptionSurface,
             LintRule::UnqualifiedImportCall,
+            LintRule::ImportAliasMatchesFilename,
         ];
         let mut enabled = HashSet::new();
         let mut severity = HashMap::new();
@@ -143,7 +146,8 @@ impl Default for LintConfig {
                 | LintRule::BooleanLiteralComparison
                 | LintRule::EmptyBody
                 | LintRule::LegacyExceptionSurface
-                | LintRule::UnqualifiedImportCall => LintSeverity::Warn,
+                | LintRule::UnqualifiedImportCall
+                | LintRule::ImportAliasMatchesFilename => LintSeverity::Warn,
                 LintRule::ImportOrder => LintSeverity::Info,
                 LintRule::FunctionLength
                 | LintRule::NestingDepth
@@ -183,6 +187,7 @@ impl LintConfig {
             LintRule::CyclomaticComplexity,
             LintRule::LegacyExceptionSurface,
             LintRule::UnqualifiedImportCall,
+            LintRule::ImportAliasMatchesFilename,
         ] {
             config.severity.insert(rule, LintSeverity::Error);
         }
@@ -1430,7 +1435,30 @@ pub fn lint_module_with_source_and_config(
             }
         } else {
             seen_paths.insert(path.clone(), alias.clone());
-            import_order_check.push((path, alias.span));
+            import_order_check.push((path.clone(), alias.span));
+        }
+
+        // Check that the alias matches the filename stem
+        if path != "std"
+            && path != "std.at"
+            && !path.starts_with("http://")
+            && !path.starts_with("https://")
+            && !path.trim().is_empty()
+        {
+            let file_part = path.rsplit('/').next().unwrap_or(&path);
+            let stem = file_part.strip_suffix(".at").unwrap_or(file_part);
+            if !stem.is_empty() && stem != alias.name {
+                push_rule(
+                    &config,
+                    &mut errors,
+                    LintRule::ImportAliasMatchesFilename,
+                    format!(
+                        "import alias `{}` does not match filename `{stem}`; consider `as {stem}`",
+                        alias.name
+                    ),
+                    Some(alias.span),
+                );
+            }
         }
     }
 
@@ -2981,6 +3009,72 @@ f();
                     err.rule == Some(LintRule::UnusedFunction) && err.message.contains("helper")
                 }),
                 "helper should count as used when referenced: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_alias_matches_filename_warns_on_mismatch() {
+        let source = r#"
+import "./math.at" as m;
+fn f() { m.add(); }
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module_with_config(
+            &module,
+            Some("[rules]\nunused_function = \"off\"\nunknown_type_flow = \"off\"\n"),
+        )
+        .expect_err("expected lint errors");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.rule == Some(LintRule::ImportAliasMatchesFilename)
+                    && err.message.contains("does not match filename")),
+            "expected import_alias_matches_filename lint: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn import_alias_matches_filename_passes_when_matching() {
+        let source = r#"
+import "./math.at" as math;
+fn f() { math.add(); }
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let result = lint_module_with_config(
+            &module,
+            Some("[rules]\nunused_function = \"off\"\nunknown_type_flow = \"off\"\n"),
+        );
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|err| err.rule == Some(LintRule::ImportAliasMatchesFilename)),
+                "should not warn when alias matches filename: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_alias_matches_filename_skips_std() {
+        let source = r#"
+import "std" as std;
+fn f() { std.print(); }
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let result = lint_module_with_config(
+            &module,
+            Some("[rules]\nunused_function = \"off\"\nunknown_type_flow = \"off\"\n"),
+        );
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|err| err.rule == Some(LintRule::ImportAliasMatchesFilename)),
+                "should not warn for std import: {errors:?}"
             );
         }
     }

@@ -71,11 +71,14 @@ impl CommentState {
         Self { comments, index: 0 }
     }
 
-    fn emit_until(&mut self, out: &mut String, limit: usize) {
+    fn emit_until(&mut self, out: &mut String, limit: usize, indent: usize) {
         while self.index < self.comments.len() {
             let comment = &self.comments[self.index];
             if comment.span.start >= limit {
                 break;
+            }
+            for _ in 0..indent {
+                out.push(' ');
             }
             out.push_str(comment.text.trim_end());
             if !comment.text.ends_with('\n') {
@@ -120,15 +123,15 @@ pub fn format_module(module: &Module) -> String {
     let import_aliases = collect_import_aliases(module);
     let mut comment_state = CommentState::new(module.comments.clone());
     for func in &module.functions {
-        comment_state.emit_until(&mut out, func.name.span.start);
+        comment_state.emit_until(&mut out, func.name.span.start, 0);
         format_function(func, &mut out, 0, &import_aliases, &mut comment_state);
         out.push('\n');
     }
     for stmt in &module.stmts {
-        comment_state.emit_until(&mut out, stmt_span(stmt));
+        comment_state.emit_until(&mut out, stmt_span(stmt), 0);
         format_stmt(stmt, &mut out, 0, &mut comment_state);
     }
-    comment_state.emit_until(&mut out, usize::MAX);
+    comment_state.emit_until(&mut out, usize::MAX, 0);
     out
 }
 
@@ -239,7 +242,7 @@ fn format_function(
     out.push('{');
     out.push('\n');
     for stmt in &func.body {
-        comment_state.emit_until(out, stmt_span(stmt));
+        comment_state.emit_until(out, stmt_span(stmt), indent + 4);
         format_stmt(stmt, out, indent + 4, comment_state);
     }
     indent_to(out, indent);
@@ -550,7 +553,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             out.push_str(" {\n");
             for stmt in body {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
@@ -575,16 +578,17 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             out.push_str(" {\n");
             for stmt in then_branch {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
+
             out.push('}');
             comment_state.emit_inline_between(out, if_span.start, if_span.end);
             if let Some(else_branch) = else_branch {
                 out.push_str(" else {\n");
                 for stmt in else_branch {
-                    comment_state.emit_until(out, stmt_span(stmt));
+                    comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                     format_stmt(stmt, out, indent + 4, comment_state);
                 }
                 indent_to(out, indent);
@@ -611,7 +615,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             }
             out.push_str(" {\n");
             for stmt in body {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
@@ -677,7 +681,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             format_expr_with_indent(value, out, indent, comment_state);
             out.push_str(" {\n");
             for stmt in body {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
@@ -696,7 +700,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             indent_to(out, indent);
             out.push_str("{\n");
             for stmt in stmts {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
@@ -715,7 +719,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             out.push_str(name);
             out.push_str("\" {\n");
             for stmt in body {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
@@ -980,7 +984,7 @@ fn format_expr_prec_indent(
         Expr::Block { stmts, tail, .. } => {
             out.push_str("{\n");
             for stmt in stmts {
-                comment_state.emit_until(out, stmt_span(stmt));
+                comment_state.emit_until(out, stmt_span(stmt), indent + 4);
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             if let Some(expr) = tail {
@@ -992,25 +996,44 @@ fn format_expr_prec_indent(
             out.push('}');
         }
         Expr::Array { items, .. } => {
-            out.push('[');
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
-                }
-                match item {
+            if items.is_empty() {
+                out.push_str("[]");
+            } else if items.len() == 1 {
+                out.push('[');
+                match &items[0] {
                     Expr::ArraySpread { expr, .. } => {
                         out.push_str("...");
                         format_expr_prec_indent(expr, out, 0, indent, comment_state);
                     }
                     _ => {
-                        format_expr_prec_indent(item, out, 0, indent, comment_state);
+                        format_expr_prec_indent(&items[0], out, 0, indent, comment_state);
                     }
                 }
-                if let Some(item_span) = expr_span(item) {
+                if let Some(item_span) = expr_span(&items[0]) {
                     comment_state.emit_inline_between(out, item_span, item_span + 1);
                 }
+                out.push(']');
+            } else {
+                out.push_str("[\n");
+                for item in items.iter() {
+                    indent_to(out, indent + 4);
+                    match item {
+                        Expr::ArraySpread { expr, .. } => {
+                            out.push_str("...");
+                            format_expr_prec_indent(expr, out, 0, indent + 4, comment_state);
+                        }
+                        _ => {
+                            format_expr_prec_indent(item, out, 0, indent + 4, comment_state);
+                        }
+                    }
+                    if let Some(item_span) = expr_span(item) {
+                        comment_state.emit_inline_between(out, item_span, item_span + 1);
+                    }
+                    out.push_str(",\n");
+                }
+                indent_to(out, indent);
+                out.push(']');
             }
-            out.push(']');
         }
         Expr::ArraySpread { expr, .. } => {
             out.push_str("...");
@@ -1026,17 +1049,28 @@ fn format_expr_prec_indent(
             }
         }
         Expr::Tuple { items, .. } => {
-            out.push('(');
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
-                }
-                format_expr_prec_indent(item, out, 0, indent, comment_state);
-                if let Some(item_span) = expr_span(item) {
+            if items.is_empty() {
+                out.push_str("()");
+            } else if items.len() == 1 {
+                out.push('(');
+                format_expr_prec_indent(&items[0], out, 0, indent, comment_state);
+                if let Some(item_span) = expr_span(&items[0]) {
                     comment_state.emit_inline_between(out, item_span, item_span + 1);
                 }
+                out.push(')');
+            } else {
+                out.push_str("(\n");
+                for item in items.iter() {
+                    indent_to(out, indent + 4);
+                    format_expr_prec_indent(item, out, 0, indent + 4, comment_state);
+                    if let Some(item_span) = expr_span(item) {
+                        comment_state.emit_inline_between(out, item_span, item_span + 1);
+                    }
+                    out.push_str(",\n");
+                }
+                indent_to(out, indent);
+                out.push(')');
             }
-            out.push(')');
             if let Some(tuple_end) = expr_end(expr) {
                 comment_state.emit_inline_between(out, tuple_end, tuple_end + 1);
             }
@@ -1073,15 +1107,11 @@ fn format_expr_prec_indent(
             }
         }
         Expr::MapLiteral { entries, .. } => {
-            out.push_str("map {");
-            if !entries.is_empty() {
-                out.push(' ');
-            }
-            for (idx, entry) in entries.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
-                }
-                match entry {
+            if entries.is_empty() {
+                out.push_str("map {}");
+            } else if entries.len() == 1 {
+                out.push_str("map { ");
+                match &entries[0] {
                     MapEntry::Spread(expr) => {
                         out.push_str("...");
                         format_expr_prec_indent(expr, out, 0, indent, comment_state);
@@ -1092,11 +1122,27 @@ fn format_expr_prec_indent(
                         format_expr_prec_indent(value, out, 0, indent, comment_state);
                     }
                 }
+                out.push_str(" }");
+            } else {
+                out.push_str("map {\n");
+                for entry in entries.iter() {
+                    indent_to(out, indent + 4);
+                    match entry {
+                        MapEntry::Spread(expr) => {
+                            out.push_str("...");
+                            format_expr_prec_indent(expr, out, 0, indent + 4, comment_state);
+                        }
+                        MapEntry::KeyValue { key, value } => {
+                            format_expr_prec_indent(key, out, 0, indent + 4, comment_state);
+                            out.push_str(": ");
+                            format_expr_prec_indent(value, out, 0, indent + 4, comment_state);
+                        }
+                    }
+                    out.push_str(",\n");
+                }
+                indent_to(out, indent);
+                out.push('}');
             }
-            if !entries.is_empty() {
-                out.push(' ');
-            }
-            out.push('}');
         }
         Expr::As { expr, ty, .. } => {
             format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);
@@ -1110,19 +1156,32 @@ fn format_expr_prec_indent(
         }
         Expr::StructLiteral { name, fields, .. } => {
             out.push_str(&name.name);
-            out.push_str(" { ");
-            for (idx, field) in fields.iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&field.name.name);
+            if fields.is_empty() {
+                out.push_str(" {}");
+            } else if fields.len() == 1 {
+                out.push_str(" { ");
+                out.push_str(&fields[0].name.name);
                 out.push_str(": ");
-                format_expr_prec_indent(&field.value, out, 0, indent, comment_state);
-                if let Some(value_span) = expr_span(&field.value) {
+                format_expr_prec_indent(&fields[0].value, out, 0, indent, comment_state);
+                if let Some(value_span) = expr_span(&fields[0].value) {
                     comment_state.emit_inline_between(out, value_span, value_span + 1);
                 }
+                out.push_str(" }");
+            } else {
+                out.push_str(" {\n");
+                for field in fields.iter() {
+                    indent_to(out, indent + 4);
+                    out.push_str(&field.name.name);
+                    out.push_str(": ");
+                    format_expr_prec_indent(&field.value, out, 0, indent + 4, comment_state);
+                    if let Some(value_span) = expr_span(&field.value) {
+                        comment_state.emit_inline_between(out, value_span, value_span + 1);
+                    }
+                    out.push_str(",\n");
+                }
+                indent_to(out, indent);
+                out.push('}');
             }
-            out.push_str(" }");
             if let Some(struct_end) = expr_end(expr) {
                 comment_state.emit_inline_between(out, struct_end, struct_end + 1);
             }
@@ -1669,7 +1728,11 @@ return first;
         let module = parse_module(source).expect("parse module");
         let formatted = format_module(&module);
         let expected = r#"fn f() {
-    let values = [1, 2, 3];
+    let values = [
+        1,
+        2,
+        3,
+    ];
     let first = values[0];
     let next = append(values, 4);
     let has = contains(values, 2);

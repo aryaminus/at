@@ -1,33 +1,25 @@
 // Comprehensive example demonstrating all at language features
-
 // Basic arithmetic
 pub fn basic_math() -> int {
     let a = 10;
     let b = 3;
-    
     // Addition, subtraction, multiplication
     let sum = a + b;
     let diff = a - b;
     let prod = a * b;
-    
     // Division (integer division)
     let quot = a / b;
-    
     // Modulo
     let rem = a % b;
-
     // Bitwise
     let bit_and = a & b;
     let bit_or = a | b;
     let bit_xor = a ^ b;
-
     // Comparison
     let is_greater = a > b;
     let is_equal = a == b;
-    
     // Negation
     let neg = -a;
-    
     print("Sum: ");
     print(sum);
     print("Diff: ");
@@ -44,19 +36,16 @@ pub fn basic_math() -> int {
     print(bit_or);
     print("BitXor: ");
     print(bit_xor);
-    
     return sum;
 }
 
 // Float arithmetic
 pub fn float_math() -> float {
     let pi = 3.14159;
-    let r = 5.0;
+    let r = 5;
     let area = pi * r * r;
-    
     print("Area: ");
     print(area);
-    
     return area;
 }
 
@@ -65,14 +54,11 @@ pub fn string_ops() -> string {
     let greeting = "Hello";
     let target = "World";
     let message = greeting + ", " + target + "!";
-
     let interpolated = "Hello {target}";
     print(interpolated);
-    
     // String with escapes
     let multiline = "Line 1\nLine 2\tTabbed";
     print(multiline);
-    
     return message;
 }
 
@@ -86,23 +72,18 @@ pub fn ternary_demo(n: int) -> string {
 pub fn logical_ops() -> bool {
     let a = true;
     let b = false;
-    
     // Logical AND
     let and_result = a && b;
-    
     // Logical OR
     let or_result = a || b;
-    
     // Logical NOT
     let not_result = !a;
-    
     print("AND: ");
     print(and_result);
     print("OR: ");
     print(or_result);
     print("NOT: ");
     print(not_result);
-    
     // Combined
     let combined = (a || b) && !b;
     return combined;
@@ -115,7 +96,12 @@ pub fn chained_comparisons(a: int, b: int, c: int) -> bool {
 
 // Closures and higher-order functions
 pub fn closure_demo() -> int {
-    let values = [1, 2, 3, 4];
+    let values = [
+        1,
+        2,
+        3,
+        4,
+    ];
     let doubled = map(values, |x| x * 2);
     let sum = reduce(doubled, 0, |acc, x| acc + x);
     return sum;
@@ -131,7 +117,6 @@ pub fn control_flow(n: int) -> string {
     } else {
         "positive"
     };
-    
     return sign;
 }
 
@@ -139,27 +124,22 @@ pub fn control_flow(n: int) -> string {
 pub fn loop_demo() -> int {
     let i = 0;
     let sum = 0;
-    
     while i < 100 {
         set i = i + 1;
-        
         // Skip odd numbers
         if i % 2 == 1 {
             continue;
         } else {
-            // Continue in else block
         }
-        
+        // Continue in else block
         // Stop at 50
         if i > 50 {
             break;
         } else {
-            // Break in else block
         }
-        
+        // Break in else block
         set sum = sum + i;
     }
-    
     return sum;
 }
 
@@ -173,65 +153,66 @@ pub fn if_statement_demo(flag: bool) -> string {
 
 // For loop with arrays
 pub fn for_loop_demo() -> int {
-    let numbers = [1, 2, 3, 4, 5];
+    let numbers = [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ];
     let sum = 0;
-    
     for n in numbers {
         set sum = sum + n;
     }
-    
     return sum;
 }
 
 // Arrays and operations
 pub fn array_ops() -> int {
-    let arr = [10, 20, 30];
-    
+    let arr = [
+        10,
+        20,
+        30,
+    ];
     // Length
     let count = len(arr);
     print("Count: ");
     print(count);
-    
     // Append
     let extended = append(arr, 40);
     print("Extended length: ");
     print(len(extended));
-    
     // Contains
     let has_20 = contains(arr, 20);
     print("Has 20: ");
     print(has_20);
-    
     // Slice
     let sub = slice(extended, 1, 3);
     print("Slice length: ");
     print(len(sub));
-    
     // Index access
     let first = arr[0];
     print("First: ");
     print(first);
-    
     return first;
 }
 
 // Consts
-const max_retries: int = 3;
-
 // Map literals and casts
 pub fn map_literals_and_casts() {
     const limit = 3;
-    let grades = map { "taylor": 3, "casey": 5 };
+    let grades = map {
+        "taylor": 3,
+        "casey": 5,
+    };
     let taylor = grades["taylor"];
     print("Taylor grade: ");
     print(taylor);
     set grades["taylor"] = 4;
-
     let value = 42;
     let count = value as int;
     print("Count: ");
     print(count);
-
     if value is int {
         print("value is int");
     }
@@ -239,7 +220,13 @@ pub fn map_literals_and_casts() {
 
 // Try/catch/finally with result
 pub fn try_catch_demo() -> int {
-    let result = try { ok(21) } catch { 0 } finally { print("cleanup"); };
+    let result = try {
+        ok(21)
+    } catch {
+        0
+    } finally {
+        print("cleanup");
+    };
     return result * 2;
 }
 
@@ -262,12 +249,10 @@ pub fn safe_divide(a: int, b: int) -> result<int, string> {
 
 pub fn match_result(a: int, b: int) -> string {
     let result = safe_divide(a, b);
-
     let message = match result {
         ok(value) => "Result: {value}",
         err(msg) => "Error: " + msg,
     };
-    
     return message;
 }
 
@@ -278,8 +263,8 @@ pub fn find_in_array(arr: array<int>, target: int) -> option<int> {
         if arr[i] == target {
             return some(i);
         } else {
-            // Continue searching
         }
+        // Continue searching
         set i = i + 1;
     }
     return none();
@@ -287,12 +272,10 @@ pub fn find_in_array(arr: array<int>, target: int) -> option<int> {
 
 pub fn match_option(arr: array<int>, target: int) -> string {
     let found = find_in_array(arr, target);
-
     let result = match found {
         some(index) if index >= 0 => "Found at index: {index}",
         _ => "Not found",
     };
-    
     return result;
 }
 
@@ -314,18 +297,11 @@ pub fn try_demo() -> result<int, string> {
 }
 
 // Structs and enums
-pub struct Point {
-    x: int,
-    y: int,
-}
-
-pub enum Status {
-    Ok(int),
-    Err(string),
-}
-
 pub fn struct_enum_demo() -> string {
-    let origin = Point { x: 0, y: 0 };
+    let origin = Point {
+        x: 0,
+        y: 0,
+    };
     let status = Status::Ok(origin.x + origin.y);
     return match status {
         Status::Ok(value) => "ok: {value}",
@@ -339,156 +315,143 @@ pub fn get_timestamp() -> int needs { time } {
 }
 
 // Test blocks
+// Main entry point for running as script
+fn main() {
+    print("=== Basic Math ===");
+    basic_math();
+    print("\n=== Float Math ===");
+    float_math();
+    print("\n=== String Operations ===");
+    string_ops();
+    print("\n=== Logical Operations ===");
+    logical_ops();
+    print("\n=== Control Flow ===");
+    print(control_flow(-5));
+    print(control_flow(0));
+    print(control_flow(5));
+    print("\n=== If Statement ===");
+    print(if_statement_demo(true));
+    print(if_statement_demo(false));
+    print("\n=== Loop Demo ===");
+    print(loop_demo());
+    print("\n=== For Loop Demo ===");
+    print(for_loop_demo());
+    print("\n=== Array Operations ===");
+    array_ops();
+    print("\n=== Map Literals and Casts ===");
+    map_literals_and_casts();
+    print("\n=== Result Matching ===");
+    print(match_result(10, 2));
+    print(match_result(10, 0));
+    print("\n=== Option Matching ===");
+    let arr = [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ];
+    print(match_option(arr, 3));
+    print(match_option(arr, 99));
+    print("\n=== Try Demo ===");
+    print(try_demo());
+    print("\n=== Try/Catch Demo ===");
+    print(try_catch_demo());
+    print("\n=== Union Types ===");
+    print(union_demo(7));
+    return 0;
+}
+
+const max_retries: int = 3;
+pub struct Point {
+    x: int,
+    y: int,
+}
+pub enum Status {
+    Ok(int),
+    Err(string),
+}
 test "basic arithmetic" {
     let result = basic_math();
     assert(result > 0);
 }
-
 test "float operations" {
     let area = float_math();
-    assert(area > 0.0);
+    assert(area > 0);
 }
-
 test "string concatenation" {
     let msg = string_ops();
     assert_eq(msg, "Hello, World!");
 }
-
 test "logical operators" {
     let result = logical_ops();
     assert(result);
 }
-
 test "ternary operator" {
     let pos = ternary_demo(3);
     let non_pos = ternary_demo(0);
     assert_eq(pos, "positive");
     assert_eq(non_pos, "non-positive");
 }
-
 test "chained comparisons" {
     assert(chained_comparisons(1, 2, 3));
     assert(!chained_comparisons(3, 2, 1));
 }
-
 test "control flow" {
     let neg = control_flow(-5);
     let zero = control_flow(0);
     let pos = control_flow(5);
-    
     assert_eq(neg, "negative");
     assert_eq(zero, "zero");
     assert_eq(pos, "positive");
 }
-
 test "if statement" {
     assert_eq(if_statement_demo(true), "yes");
     assert_eq(if_statement_demo(false), "no");
 }
-
 test "loops" {
     let loop_sum = loop_demo();
     let for_sum = for_loop_demo();
-    
     assert(loop_sum > 0);
     assert_eq(for_sum, 15);
 }
-
 test "array operations" {
     let first = array_ops();
     assert_eq(first, 10);
 }
-
 test "consts" {
     const retries = 3;
     assert_eq(retries, 3);
 }
-
 test "result matching" {
     let msg = match_result(10, 2);
     assert_eq(msg, "Result: 5");
-    
     let err_msg = match_result(10, 0);
     assert_eq(err_msg, "Error: division by zero");
 }
-
 test "option matching" {
-    let arr = [1, 2, 3, 4, 5];
+    let arr = [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ];
     let found = match_option(arr, 3);
     assert_eq(found, "Found at index: 2");
-    
     let not_found = match_option(arr, 99);
     assert_eq(not_found, "Not found");
 }
-
 test "try operator" {
     let result = try_demo();
     assert(is_ok(result));
 }
-
 test "try/catch/finally" {
     let result = try_catch_demo();
     assert_eq(result, 42);
 }
-
 test "union types" {
     let value: int | string = 7;
     let result = union_demo(value);
     assert_eq(result, 7);
-}
-
-// Main entry point for running as script
-fn main() {
-    print("=== Basic Math ===");
-    basic_math();
-    
-    print("\n=== Float Math ===");
-    float_math();
-    
-    print("\n=== String Operations ===");
-    string_ops();
-    
-    print("\n=== Logical Operations ===");
-    logical_ops();
-    
-    print("\n=== Control Flow ===");
-    print(control_flow(-5));
-    print(control_flow(0));
-    print(control_flow(5));
-
-    print("\n=== If Statement ===");
-    print(if_statement_demo(true));
-    print(if_statement_demo(false));
-    
-    print("\n=== Loop Demo ===");
-    print(loop_demo());
-    
-    print("\n=== For Loop Demo ===");
-    print(for_loop_demo());
-    
-    print("\n=== Array Operations ===");
-    array_ops();
-
-    print("\n=== Map Literals and Casts ===");
-    map_literals_and_casts();
-    
-    print("\n=== Result Matching ===");
-    print(match_result(10, 2));
-    print(match_result(10, 0));
-    
-    print("\n=== Option Matching ===");
-    let arr = [1, 2, 3, 4, 5];
-    print(match_option(arr, 3));
-    print(match_option(arr, 99));
-    
-    print("\n=== Try Demo ===");
-    print(try_demo());
-
-    print("\n=== Try/Catch Demo ===");
-    print(try_catch_demo());
-
-    print("\n=== Union Types ===");
-    print(union_demo(7));
-    
-    return 0;
 }

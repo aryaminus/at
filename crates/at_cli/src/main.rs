@@ -31,6 +31,7 @@ fn print_usage() {
     eprintln!("  at repl                         Start interactive REPL");
     eprintln!("  at fmt [--write] <file.at>      Format a file");
     eprintln!("  at test <file.at>               Run tests in a file");
+    eprintln!("  at fix <file.at>                Format and auto-fix a file");
     eprintln!("  at check <file.at> [options]    Type-check a file");
     eprintln!("  at lint <file.at>               Lint a file");
     eprintln!("  at bench <file.at>              Benchmark a file");
@@ -303,20 +304,119 @@ fn main() {
         return;
     }
 
-    if args[1] == "test" {
+    if args[1] == "fix" {
         if args.len() < 3 {
-            eprintln!("usage: at test <file.at>");
+            eprintln!("usage: at fix <file.at>");
             std::process::exit(1);
         }
         let path = &args[2];
-        let module = match load_module(path) {
-            Ok(module) => module.module,
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(err) => {
+                eprintln!("error reading {path}: {err}");
+                std::process::exit(1);
+            }
+        };
+
+        // Step 1: format
+        let module = parse_module_or_exit(&source, Some(path));
+        let formatted = format_module(&module);
+        let mut changed = formatted != source;
+        if changed {
+            if let Err(err) = fs::write(path, &formatted) {
+                eprintln!("failed to write {path}: {err}");
+                std::process::exit(1);
+            }
+        }
+
+        // Step 2: lint --fix
+        let current_source = if changed { formatted } else { source.clone() };
+        let mut fix_module = parse_module_or_exit(&current_source, Some(path));
+        fix_module.source_path = Some(path.to_string());
+        let config_source = load_lint_config(path);
+        if let Err(errors) = at_lint::lint_module_with_source_and_config(
+            &fix_module,
+            Some(&current_source),
+            config_source.as_deref(),
+        ) {
+            let fixable = at_lint::count_fixable(&errors);
+            if fixable > 0 {
+                let (error_list, _, _) = split_lint_by_severity(errors);
+                let fixed_source = at_lint::apply_fixes(&current_source, &error_list);
+                let final_source =
+                    match parse_module_with_formatted_errors(&fixed_source, Some(path)) {
+                        Ok(module) => format_module(&module),
+                        Err(_) => fixed_source,
+                    };
+                if final_source != current_source {
+                    if let Err(err) = fs::write(path, &final_source) {
+                        eprintln!("error writing {path}: {err}");
+                        std::process::exit(1);
+                    }
+                    changed = true;
+                }
+                println!("fixed {} lint issue(s)", fixable);
+            }
+        }
+
+        if changed {
+            println!("fixed {path}");
+        } else {
+            println!("no changes needed");
+        }
+        return;
+    }
+
+    if args[1] == "test" {
+        if args.len() < 3 {
+            eprintln!("usage: at test <file.at> [--no-cache]");
+            std::process::exit(1);
+        }
+        let path = &args[2];
+        let no_cache = args.iter().any(|arg| arg == "--no-cache");
+
+        let loaded = match load_module(path) {
+            Ok(loaded) => loaded,
             Err(err) => {
                 eprintln!("{err}");
                 std::process::exit(1);
             }
         };
 
+        // Test caching: hash the source and all dependencies
+        let source_hash = {
+            let mut hasher = Sha256::new();
+
+            // Hash the main file
+            let source = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error reading {path}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            hasher.update(source.as_bytes());
+
+            // Hash all imported files (sorted for determinism)
+            let mut imports = loaded.imports.clone();
+            imports.sort();
+            for import_path in imports {
+                if let Ok(content) = fs::read_to_string(&import_path) {
+                    hasher.update(import_path.as_bytes());
+                    hasher.update(content.as_bytes());
+                }
+            }
+
+            format!("{:x}", hasher.finalize())
+        };
+        let cache_dir = Path::new(".at").join("test-cache");
+        let cache_file = cache_dir.join(format!("{source_hash}.passed"));
+        if !no_cache && cache_file.exists() {
+            println!("cached - all tests passed (use --no-cache to force re-run)");
+            return;
+        }
+
+        let module = loaded.module;
         let mut compiler = Compiler::new();
         let program = match compiler.compile_module(&module) {
             Ok(program) => program,
@@ -329,8 +429,8 @@ fn main() {
         let mut failures = 0;
         for stmt in &module.stmts {
             if let at_syntax::Stmt::Test { name, body, .. } = stmt {
-                let chunk = match compiler.compile_test_body(body) {
-                    Ok(chunk) => chunk,
+                let (chunk, main_locals) = match compiler.compile_test_body(body) {
+                    Ok(res) => res,
                     Err(err) => {
                         eprintln!(
                             "fail - {name}: {}",
@@ -343,7 +443,7 @@ fn main() {
                 let test_program = at_vm::Program {
                     functions: program.functions.clone(),
                     main: chunk,
-                    main_locals: 0,
+                    main_locals,
                     sources: program.sources.clone(),
                     entry: program.entry.clone(),
                     capability_names: program.capability_names.clone(),
@@ -360,8 +460,14 @@ fn main() {
         }
 
         if failures > 0 {
+            // Remove stale cache on failure
+            let _ = fs::remove_file(&cache_file);
             std::process::exit(1);
         }
+
+        // Cache the pass result
+        let _ = fs::create_dir_all(&cache_dir);
+        let _ = fs::write(&cache_file, "");
         return;
     }
 
@@ -2612,6 +2718,7 @@ unknown_type_flow = "error"
         let output = std::process::Command::new(at_binary())
             .arg("test")
             .arg(&file)
+            .arg("--no-cache")
             .output()
             .expect("run at binary");
 
@@ -2640,6 +2747,7 @@ unknown_type_flow = "error"
         let output = std::process::Command::new(at_binary())
             .arg("test")
             .arg(&file)
+            .arg("--no-cache")
             .output()
             .expect("run at binary");
 
@@ -2993,7 +3101,7 @@ unknown_type_flow = "error"
         let file = temp_dir.join("main.at");
         fs::write(
             &file,
-            "import \"std\" as std;\nfn main() -> string { return version(); }\nmain();\n",
+            "import \"std\" as std;\nfn main() -> int { return print(\"hello\"); }\nmain();\n",
         )
         .expect("write test file");
 
@@ -3021,7 +3129,7 @@ unknown_type_flow = "error"
         let file = temp_dir.join("main.at");
         fs::write(
             &file,
-            "import \"std\" as std;\nfn main() -> string { return version(); }\nmain();\n",
+            "import \"std\" as std;\nfn main() { print(\"hello\"); }\nmain();\n",
         )
         .expect("write test file");
 

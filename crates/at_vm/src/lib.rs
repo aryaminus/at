@@ -1181,7 +1181,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile_test_body(&mut self, stmts: &[Stmt]) -> Result<Chunk, VmError> {
+    pub fn compile_test_body(&mut self, stmts: &[Stmt]) -> Result<(Chunk, usize), VmError> {
         self.scopes.clear();
         self.next_local = 0;
         self.free_slots.clear();
@@ -1192,7 +1192,7 @@ impl Compiler {
             self.compile_stmt(stmt, &mut chunk)?;
         }
         chunk.push(Op::Halt, None);
-        Ok(chunk)
+        Ok((chunk, self.next_local))
     }
 
     fn compile_function(&mut self, func: &Function) -> Result<(Chunk, usize), VmError> {
