@@ -1,5 +1,5 @@
 pub fn count_digits_recursive(n: int) -> int {
-    let mut num = n;
+    let num = n;
     if num < 0 {
         set num = -num;
     }
@@ -13,11 +13,11 @@ pub fn count_digits_iterative(n: int) -> int {
     if n == 0 {
         return 1;
     }
-    let mut num = n;
+    let num = n;
     if num < 0 {
         set num = -num;
     }
-    let mut count = 0;
+    let count = 0;
     while num != 0 {
         set num = num / 10;
         set count = count + 1;
