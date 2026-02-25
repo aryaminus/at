@@ -1040,13 +1040,30 @@ fn provide_folding_ranges(text: &str, module: Option<&Module>) -> Option<Vec<Fol
     };
     let mut ranges = Vec::new();
     for func in &module.functions {
-        let range = span_to_range(text, func.name.span);
-        if range.start.line < range.end.line {
+        let start_pos = offset_to_position(text, func.name.span.start);
+        let end_pos = if let Some(last_stmt) = func.body.last() {
+            let s = stmt_span(last_stmt);
+            // Advance past the closing '}' by scanning forward from the
+            // last statement end.
+            let mut close = s.end;
+            while close < text.len() {
+                let ch = text.as_bytes().get(close).copied().unwrap_or(0);
+                if ch == b'}' {
+                    close += 1;
+                    break;
+                }
+                close += 1;
+            }
+            offset_to_position(text, close)
+        } else {
+            offset_to_position(text, func.name.span.end)
+        };
+        if start_pos.line < end_pos.line {
             ranges.push(FoldingRange {
-                start_line: range.start.line,
-                start_character: Some(range.start.character),
-                end_line: range.end.line,
-                end_character: Some(range.end.character),
+                start_line: start_pos.line,
+                start_character: Some(start_pos.character),
+                end_line: end_pos.line,
+                end_character: Some(end_pos.character),
                 kind: Some(FoldingRangeKind::Region),
                 collapsed_text: None,
             });
@@ -2406,7 +2423,6 @@ fn expr_span(expr: &at_syntax::Expr) -> Option<Span> {
         at_syntax::Expr::StructLiteral { span, .. } => Some(*span),
         at_syntax::Expr::EnumLiteral { span, .. } => Some(*span),
         at_syntax::Expr::MapLiteral { span, .. } => Some(*span),
-        at_syntax::Expr::MapSpread { spread_span, .. } => Some(*spread_span),
         at_syntax::Expr::As { span, .. } => Some(*span),
         at_syntax::Expr::Is { span, .. } => Some(*span),
         at_syntax::Expr::Group { span, .. } => Some(*span),
@@ -3283,6 +3299,148 @@ mod tests {
             "expected at least {} keyword tokens, got {}",
             keywords.len(),
             keyword_count
+        );
+    }
+
+    #[test]
+    fn completion_returns_identifiers() {
+        let text = "fn greet(name: string) -> string {\n  return name;\n}\ngreet(\"hi\");\n";
+        let module = parse_module(text).expect("parse module");
+        // Position cursor at the start of "greet" on the call line
+        let offset = text.rfind("greet").expect("call") + 2;
+        let position = offset_to_position(text, offset);
+        let mut module_cache = HashMap::new();
+        let response = provide_completion(
+            text,
+            Some(&module),
+            &test_uri(),
+            &mut module_cache,
+            position,
+        );
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected Array response");
+        };
+        assert!(!items.is_empty(), "expected at least one completion item");
+        let has_greet = items.iter().any(|item| item.label == "greet");
+        assert!(
+            has_greet,
+            "expected completion for 'greet', got: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn document_symbols_returns_functions_and_structs() {
+        let text = "struct Point { x: int, y: int }\nenum Color { Red, Blue }\nfn distance() -> float {\n  return 0.0;\n}\ntest \"basic\" {\n  assert(true);\n}\n";
+        let module = parse_module(text).expect("parse module");
+        let response = provide_document_symbols(text, Some(&module));
+        let Some(DocumentSymbolResponse::Nested(symbols)) = response else {
+            panic!("expected nested document symbols");
+        };
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.contains("distance")),
+            "expected function symbol, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n.contains("Point")),
+            "expected struct symbol, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n.contains("Color")),
+            "expected enum symbol, got: {:?}",
+            names
+        );
+        assert!(
+            names.iter().any(|n| n.contains("basic")),
+            "expected test symbol, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn folding_ranges_cover_functions() {
+        let text = "fn foo() {\n  let a = 1;\n  let b = 2;\n  return a + b;\n}\nfn bar() {\n  return 0;\n}\n";
+        let module = parse_module(text).expect("parse module");
+        let ranges = provide_folding_ranges(text, Some(&module));
+        let ranges = ranges.expect("expected folding ranges");
+        assert_eq!(
+            ranges.len(),
+            2,
+            "expected 2 folding ranges (one per function), got {:?}",
+            ranges
+        );
+        // foo: line 0 to line 4
+        assert_eq!(ranges[0].start_line, 0);
+        assert!(
+            ranges[0].end_line >= 4,
+            "foo end line: {}",
+            ranges[0].end_line
+        );
+        // bar: line 5 to line 7
+        assert_eq!(ranges[1].start_line, 5);
+        assert!(
+            ranges[1].end_line >= 7,
+            "bar end line: {}",
+            ranges[1].end_line
+        );
+    }
+
+    #[test]
+    fn full_document_formatting() {
+        let text = "fn   foo( )  {\nreturn   1 ; \n}\n";
+        let edits = provide_formatting(text, None);
+        assert!(!edits.is_empty(), "expected at least one formatting edit");
+        let formatted = &edits[0].new_text;
+        assert!(
+            formatted.contains("fn foo()"),
+            "expected formatted output to normalize spacing, got: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn rename_updates_all_references() {
+        let text = "fn foo() -> int {\n  return 1;\n}\nfoo();\nfoo();\n";
+        let offset = text.find("foo").expect("first foo");
+        let position = offset_to_position(text, offset);
+        let params = lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position,
+            },
+            new_name: "bar".to_string(),
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+        };
+        let mut docs = HashMap::new();
+        docs.insert(uri_key(&test_uri()), text.to_string());
+        let edit = provide_rename(text, &test_uri(), &params, &docs);
+        let changes = edit.document_changes.expect("expected document_changes");
+        let DocumentChanges::Operations(ops) = changes else {
+            panic!("expected Operations");
+        };
+        assert!(
+            !ops.is_empty(),
+            "expected at least one document change operation"
+        );
+        // Count total text edits across all operations
+        let total_edits: usize = ops
+            .iter()
+            .filter_map(|op| {
+                if let DocumentChangeOperation::Edit(text_doc_edit) = op {
+                    Some(text_doc_edit.edits.len())
+                } else {
+                    None
+                }
+            })
+            .sum();
+        // "foo" appears 3 times: definition + 2 calls
+        assert!(
+            total_edits >= 3,
+            "expected at least 3 rename edits (definition + 2 calls), got {}",
+            total_edits
         );
     }
 }

@@ -1,6 +1,6 @@
 use at_syntax::{
-    Comment, EnumVariant, Expr, Function, Ident, InterpPart, MatchArm, MatchPattern, Module, Param,
-    Span, Stmt, StructField, StructLiteralField, StructPatternField, TypeRef,
+    Comment, EnumVariant, Expr, Function, Ident, InterpPart, MapEntry, MatchArm, MatchPattern,
+    Module, Param, Span, Stmt, StructField, StructLiteralField, StructPatternField, TypeRef,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1687,6 +1687,18 @@ impl<'a> Parser<'a> {
                 })
             }
             TokenKind::Pipe => self.parse_closure_expr(),
+            TokenKind::OrOr => {
+                // || is lexed as OrOr; treat as zero-param closure
+                let span = self.current.span;
+                self.advance();
+                let body = self.parse_expr()?;
+                Ok(Expr::Closure {
+                    span,
+                    id: self.alloc_id(),
+                    params: Vec::new(),
+                    body: Box::new(body),
+                })
+            }
             TokenKind::LBracket => self.parse_array_literal(),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression".to_string(),
@@ -1703,21 +1715,14 @@ impl<'a> Parser<'a> {
         if self.current.kind != TokenKind::RBrace {
             loop {
                 if self.current.kind == TokenKind::DotDotDot {
-                    let spread_span = self.current.span;
                     self.advance();
                     let expr = self.parse_expr()?;
-                    let key = Expr::MapSpread {
-                        spread_span,
-                        id: self.alloc_id(),
-                        expr: Box::new(expr),
-                    };
-                    let placeholder = Expr::Bool(true, spread_span, self.alloc_id());
-                    entries.push((key, placeholder));
+                    entries.push(MapEntry::Spread(expr));
                 } else {
                     let key = self.parse_expr()?;
                     self.expect(TokenKind::Colon)?;
                     let value = self.parse_expr()?;
-                    entries.push((key, value));
+                    entries.push(MapEntry::KeyValue { key, value });
                 }
                 if self.current.kind != TokenKind::Comma {
                     break;
@@ -3366,7 +3371,6 @@ fn expr_span_start(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
         Expr::MapLiteral { span, .. } => Some(span.start),
-        Expr::MapSpread { spread_span, .. } => Some(spread_span.start),
         Expr::As { span, .. } => Some(span.start),
         Expr::Is { span, .. } => Some(span.start),
         Expr::Group { span, .. } => Some(span.start),
@@ -3405,7 +3409,6 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
         Expr::MapLiteral { span, .. } => Some(span.end),
-        Expr::MapSpread { spread_span, .. } => Some(spread_span.end),
         Expr::As { span, .. } => Some(span.end),
         Expr::Is { span, .. } => Some(span.end),
         Expr::Group { span, .. } => Some(span.end),
@@ -3423,6 +3426,7 @@ fn is_ident_continue(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse_module, parse_module_with_errors};
+    use at_syntax::{Expr, MapEntry, Stmt};
 
     #[test]
     fn parses_arrays_and_indexing() {
@@ -3990,5 +3994,335 @@ fn f() {
         assert_eq!(module.functions.len(), 1);
         let body = &module.functions[0].body;
         assert_eq!(body.len(), 2);
+    }
+
+    #[test]
+    fn parses_spread_in_array() {
+        let source = r#"
+fn f() {
+    let rest = [3, 4];
+    let arr = [1, 2, ...rest, 5];
+    return arr;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert_eq!(module.functions.len(), 1);
+        let body = &module.functions[0].body;
+        // let rest, let arr, return
+        assert_eq!(body.len(), 3);
+        // The array literal should contain an ArraySpread element
+        if let Stmt::Let { value, .. } = &body[1] {
+            if let Expr::Array { items, .. } = value {
+                assert_eq!(items.len(), 4); // 1, 2, ...rest, 5
+                assert!(
+                    matches!(&items[2], Expr::ArraySpread { .. }),
+                    "expected ArraySpread at index 2"
+                );
+            } else {
+                panic!("expected Array expression");
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_spread_in_map() {
+        let source = r#"
+fn f() {
+    let base = map { "a": 1 };
+    let merged = map { ...base, "b": 2 };
+    return merged;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[1] {
+            if let Expr::MapLiteral { entries, .. } = value {
+                assert_eq!(entries.len(), 2);
+                assert!(
+                    matches!(&entries[0], MapEntry::Spread(..)),
+                    "expected Spread entry"
+                );
+                assert!(
+                    matches!(&entries[1], MapEntry::KeyValue { .. }),
+                    "expected KeyValue entry"
+                );
+            } else {
+                panic!("expected MapLiteral expression");
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_closure_expr() {
+        let source = r#"
+fn f() {
+    let inc = |x| x + 1;
+    let add = |a, b| a + b;
+    let noop = || 42;
+    return inc;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[0] {
+            if let Expr::Closure { params, .. } = value {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+            } else {
+                panic!("expected Closure expression, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+        if let Stmt::Let { value, .. } = &body[1] {
+            if let Expr::Closure { params, .. } = value {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "a");
+                assert_eq!(params[1].name, "b");
+            } else {
+                panic!("expected Closure expression");
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+        // Zero-param closure: || is lexed as OrOr but parsed as empty-param closure
+        if let Stmt::Let { value, .. } = &body[2] {
+            if let Expr::Closure { params, .. } = value {
+                assert_eq!(params.len(), 0, "expected zero params for || closure");
+            } else {
+                panic!("expected Closure expression for ||, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_enum_literal() {
+        let source = r#"
+enum Color { Red, Green, Blue }
+enum Option<T> { Some(T), None }
+fn f() {
+    let c = Color::Red;
+    let v = Option::Some(42);
+    return c;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[0] {
+            if let Expr::EnumLiteral {
+                name,
+                variant,
+                payload,
+                ..
+            } = value
+            {
+                assert_eq!(name.name, "Color");
+                assert_eq!(variant.name, "Red");
+                assert!(payload.is_none());
+            } else {
+                panic!("expected EnumLiteral, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+        if let Stmt::Let { value, .. } = &body[1] {
+            if let Expr::EnumLiteral {
+                name,
+                variant,
+                payload,
+                ..
+            } = value
+            {
+                assert_eq!(name.name, "Option");
+                assert_eq!(variant.name, "Some");
+                assert!(payload.is_some());
+            } else {
+                panic!("expected EnumLiteral, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_struct_literal() {
+        let source = r#"
+struct Point { x: int, y: int }
+fn f() {
+    let p = Point { x: 1, y: 2 };
+    return p;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[0] {
+            if let Expr::StructLiteral { name, fields, .. } = value {
+                assert_eq!(name.name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name.name, "x");
+                assert_eq!(fields[1].name.name, "y");
+            } else {
+                panic!("expected StructLiteral, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_interpolated_string() {
+        let source = r#"
+fn f() {
+    let name = "world";
+    let msg = "hello {name}!";
+    return msg;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[1] {
+            assert!(
+                matches!(value, Expr::InterpolatedString { .. }),
+                "expected InterpolatedString, got {:?}",
+                value
+            );
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_range_expr() {
+        let source = r#"
+fn f() {
+    let r = 1..10;
+    return r;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[0] {
+            if let Expr::Range { inclusive, .. } = value {
+                assert!(!inclusive, "expected exclusive range");
+            } else {
+                panic!("expected Range, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_compound_assignment() {
+        let source = r#"
+fn f() {
+    let x = 10;
+    set x += 5;
+    set x -= 2;
+    set x *= 3;
+    return x;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        // let, set +=, set -=, set *=, return => 5 stmts
+        assert_eq!(body.len(), 5);
+        // Each compound assignment should desugar to Stmt::Set with Binary expr
+        for stmt in &body[1..4] {
+            if let Stmt::Set { value, .. } = stmt {
+                assert!(
+                    matches!(value, Expr::Binary { .. }),
+                    "expected compound assignment to desugar to Binary expr, got {:?}",
+                    value
+                );
+            } else {
+                panic!("expected Set statement, got {:?}", stmt);
+            }
+        }
+    }
+
+    #[test]
+    fn parses_tuple_literal() {
+        let source = r#"
+fn f() {
+    let t = (1, 2, 3);
+    return t;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        if let Stmt::Let { value, .. } = &body[0] {
+            if let Expr::Tuple { items, .. } = value {
+                assert_eq!(items.len(), 3);
+            } else {
+                panic!("expected Tuple, got {:?}", value);
+            }
+        } else {
+            panic!("expected Let statement");
+        }
+    }
+
+    #[test]
+    fn parses_defer_statement() {
+        let source = r#"
+fn f() {
+    defer cleanup();
+    return 1;
+}
+fn cleanup() {}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        assert!(
+            matches!(&body[0], Stmt::Defer { .. }),
+            "expected Defer statement, got {:?}",
+            &body[0]
+        );
+    }
+
+    #[test]
+    fn parses_throw_statement() {
+        let source = r#"
+fn f() -> result<int, string> {
+    throw "error";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let body = &module.functions[0].body;
+        assert!(
+            matches!(&body[0], Stmt::Throw { .. }),
+            "expected Throw statement, got {:?}",
+            &body[0]
+        );
+    }
+
+    #[test]
+    fn parses_type_alias() {
+        let source = r#"
+type Id = int;
+type Name = string;
+fn f() {
+    return 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert_eq!(module.stmts.len(), 2);
+        assert!(
+            matches!(&module.stmts[0], Stmt::TypeAlias { .. }),
+            "expected TypeAlias, got {:?}",
+            &module.stmts[0]
+        );
+        if let Stmt::TypeAlias { name, .. } = &module.stmts[0] {
+            assert_eq!(name.name, "Id");
+        }
+        if let Stmt::TypeAlias { name, .. } = &module.stmts[1] {
+            assert_eq!(name.name, "Name");
+        }
     }
 }

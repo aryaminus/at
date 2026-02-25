@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use at_parser::parse_module;
-use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
+use at_syntax::{Expr, Function, Ident, MapEntry, Module, Span, Stmt};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1001,6 +1001,30 @@ impl Default for Compiler {
     }
 }
 
+fn stmts_contain_yield(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_contains_yield)
+}
+
+fn stmt_contains_yield(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Yield { .. } => true,
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stmts_contain_yield(then_branch)
+                || else_branch.as_ref().is_some_and(|b| stmts_contain_yield(b))
+        }
+        Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::With { body, .. }
+        | Stmt::Block { stmts: body, .. }
+        | Stmt::Test { body, .. } => stmts_contain_yield(body),
+        _ => false,
+    }
+}
+
 impl Compiler {
     pub fn compile_module(&mut self, module: &Module) -> Result<Program, VmError> {
         let mut program = Program::default();
@@ -1053,10 +1077,7 @@ impl Compiler {
                 .insert(func.name.name.clone(), func.params.len());
             self.function_async
                 .insert(func.name.name.clone(), func.is_async);
-            let is_generator = func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, Stmt::Yield { .. }));
+            let is_generator = stmts_contain_yield(&func.body);
             self.function_generator
                 .insert(func.name.name.clone(), is_generator);
             let needs: Vec<usize> = func
@@ -1662,18 +1683,20 @@ impl Compiler {
                 let mut chunk_count = 0;
                 let mut has_spread = false;
                 for item in items {
-                    self.compile_expr(item, chunk)?;
                     match item {
                         Expr::ArraySpread { .. } => {
+                            // Flush accumulated non-spread items BEFORE compiling the spread
                             if array_count > 0 {
                                 chunk.push(Op::Array(array_count), expr_span(expr));
                                 array_count = 0;
                                 chunk_count += 1;
                             }
+                            self.compile_expr(item, chunk)?;
                             has_spread = true;
                             chunk_count += 1;
                         }
                         _ => {
+                            self.compile_expr(item, chunk)?;
                             array_count += 1;
                         }
                     }
@@ -1705,19 +1728,24 @@ impl Compiler {
                 let mut map_count = 0;
                 let mut chunk_count = 0;
                 let mut has_spread = false;
-                for (key, value) in entries {
-                    self.compile_expr(key, chunk)?;
-                    if let Expr::MapSpread { .. } = key {
-                        if map_count > 0 {
-                            chunk.push(Op::Map(map_count), expr_span(expr));
-                            map_count = 0;
+                for entry in entries {
+                    match entry {
+                        MapEntry::Spread(spread_expr) => {
+                            self.compile_expr(spread_expr, chunk)?;
+                            chunk.push(Op::MapSpread(1), expr_span(spread_expr));
+                            if map_count > 0 {
+                                chunk.push(Op::Map(map_count), expr_span(expr));
+                                map_count = 0;
+                                chunk_count += 1;
+                            }
+                            has_spread = true;
                             chunk_count += 1;
                         }
-                        has_spread = true;
-                        chunk_count += 1;
-                    } else {
-                        self.compile_expr(value, chunk)?;
-                        map_count += 1;
+                        MapEntry::KeyValue { key, value } => {
+                            self.compile_expr(key, chunk)?;
+                            self.compile_expr(value, chunk)?;
+                            map_count += 1;
+                        }
                     }
                 }
                 if map_count > 0 {
@@ -1727,10 +1755,6 @@ impl Compiler {
                 if has_spread {
                     chunk.push(Op::MapSpread(chunk_count), expr_span(expr));
                 }
-            }
-            Expr::MapSpread { expr, .. } => {
-                self.compile_expr(expr, chunk)?;
-                chunk.push(Op::MapSpread(1), expr_span(expr));
             }
             Expr::As { expr, ty, .. } => {
                 self.compile_expr(expr, chunk)?;
@@ -2815,13 +2839,17 @@ impl Compiler {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::MapLiteral { entries, .. } => {
-                for (key, value) in entries {
-                    self.collect_free_vars_expr(key, bound, captures, seen);
-                    self.collect_free_vars_expr(value, bound, captures, seen);
+                for entry in entries {
+                    match entry {
+                        MapEntry::KeyValue { key, value } => {
+                            self.collect_free_vars_expr(key, bound, captures, seen);
+                            self.collect_free_vars_expr(value, bound, captures, seen);
+                        }
+                        MapEntry::Spread(expr) => {
+                            self.collect_free_vars_expr(expr, bound, captures, seen);
+                        }
+                    }
                 }
-            }
-            Expr::MapSpread { expr, .. } => {
-                self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Expr::As { expr, .. } | Expr::Is { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
@@ -3556,7 +3584,7 @@ struct Frame {
     ip: usize,
     locals: Vec<Value>,
     capabilities: HashSet<usize>,
-    defers: Vec<usize>,
+    defers: Vec<Rc<ClosureValue>>,
     capability_scopes: Vec<Vec<usize>>,
 }
 
@@ -4194,10 +4222,20 @@ impl Vm {
                     let defers = std::mem::take(&mut self.frames[frame_index].defers);
                     let parent_capabilities = self.frames[frame_index].capabilities.clone();
                     self.frames.pop();
-                    for func_id in defers.into_iter().rev() {
-                        let locals = self.take_locals(0);
+                    for closure in defers.into_iter().rev() {
+                        let func = program.functions.get(closure.func_id).ok_or_else(|| {
+                            runtime_error_at(
+                                format!("invalid defer function id: {}", closure.func_id),
+                                None,
+                            )
+                        })?;
+                        let required_locals = func.captures + func.params;
+                        let mut locals = self.take_locals(func.locals.max(required_locals));
+                        for (idx, value) in closure.captures.iter().cloned().enumerate() {
+                            locals[idx] = value;
+                        }
                         self.frames.push(Frame {
-                            chunk_id: func_id,
+                            chunk_id: closure.func_id,
                             ip: 0,
                             locals,
                             capabilities: parent_capabilities.clone(),
@@ -5242,7 +5280,7 @@ impl Vm {
                     })?;
                     match value {
                         Value::Closure(closure) => {
-                            self.frames[frame_index].defers.push(closure.func_id);
+                            self.frames[frame_index].defers.push(closure);
                         }
                         _ => {
                             return Err(self.runtime_error(
@@ -6385,7 +6423,34 @@ impl Vm {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
                     })?;
+                    let defers = std::mem::take(&mut self.frames[frame_index].defers);
+                    let parent_capabilities = self.frames[frame_index].capabilities.clone();
                     self.pop_frame();
+                    if !defers.is_empty() {
+                        for closure in defers.into_iter().rev() {
+                            let func = program.functions.get(closure.func_id).ok_or_else(|| {
+                                runtime_error_at(
+                                    format!("invalid defer function id: {}", closure.func_id),
+                                    None,
+                                )
+                            })?;
+                            let required_locals = func.captures + func.params;
+                            let mut locals = self.take_locals(func.locals.max(required_locals));
+                            for (idx, val) in closure.captures.iter().cloned().enumerate() {
+                                locals[idx] = val;
+                            }
+                            self.frames.push(Frame {
+                                chunk_id: closure.func_id,
+                                ip: 0,
+                                locals,
+                                capabilities: parent_capabilities.clone(),
+                                defers: Vec::new(),
+                                capability_scopes: Vec::new(),
+                            });
+                            let _ = self
+                                .run_with_existing_frames(program, ExecutionMode::ToCompletion)?;
+                        }
+                    }
                     if self.frames.is_empty() {
                         return Ok(Some(value));
                     }
@@ -6629,7 +6694,6 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
         Expr::MapLiteral { span, .. } => Some(*span),
-        Expr::MapSpread { spread_span, .. } => Some(*spread_span),
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
         Expr::Ternary { span, .. } => Some(*span),
@@ -7383,5 +7447,226 @@ print(result);
         vm.run(&program).expect("run program");
         let output = vm.get_output().unwrap();
         assert_eq!(output, vec!["2001"]);
+    }
+
+    #[test]
+    fn generator_detects_yield_in_nested_block() {
+        let source = r#"
+fn gen(x) {
+    if x {
+        yield 1;
+    } else {
+        yield 2;
+    }
+}
+
+let g = gen(true);
+assert_eq(next(g), some(1));
+assert_eq(next(g), none());
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn filter_and_reduce_builtins() {
+        let source = r#"
+fn f() {
+    let nums = [1, 2, 3, 4, 5];
+    let evens = filter(nums, |n| n % 2 == 0);
+    assert_eq(len(evens), 2);
+    assert_eq(evens[0], 2);
+    assert_eq(evens[1], 4);
+
+    let total = reduce(nums, 0, |acc, n| acc + n);
+    assert_eq(total, 15);
+
+    let doubled = map(nums, |n| n * 2);
+    assert_eq(len(doubled), 5);
+    assert_eq(doubled[0], 2);
+    assert_eq(doubled[4], 10);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn spread_in_array_literal() {
+        let source = r#"
+fn f() {
+    let mid = [3, 4];
+    let arr = [1, 2, ...mid, 5];
+    assert_eq(len(arr), 5);
+    assert_eq(arr[0], 1);
+    assert_eq(arr[1], 2);
+    assert_eq(arr[2], 3);
+    assert_eq(arr[3], 4);
+    assert_eq(arr[4], 5);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn spread_in_map_literal() {
+        let source = r#"
+fn f() {
+    let base = map { "a": 1, "b": 2 };
+    let merged = map { ...base, "c": 3 };
+    assert_eq(len(merged), 3);
+    assert_eq(merged["a"], 1);
+    assert_eq(merged["c"], 3);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn string_builtins_work() {
+        let source = r#"
+fn f() {
+    assert_eq(len("hello"), 5);
+    assert_eq(trim("  hi  "), "hi");
+    assert_eq(to_upper("abc"), "ABC");
+    assert_eq(to_lower("XYZ"), "xyz");
+
+    let parts = split("a,b,c", ",");
+    assert_eq(len(parts), 3);
+    assert_eq(parts[0], "a");
+    assert_eq(parts[2], "c");
+
+    assert_eq(contains([1, 2, 3], 2), true);
+    assert_eq(contains([1, 2, 3], 9), false);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn map_keys_and_values() {
+        let source = r#"
+fn f() {
+    let m = map { "x": 10, "y": 20 };
+    let k = keys(m);
+    let v = values(m);
+    assert_eq(len(k), 2);
+    assert_eq(len(v), 2);
+    assert_eq(contains(k, "x"), true);
+    assert_eq(contains(v, 20), true);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn match_patterns_with_bindings() {
+        let source = r#"
+fn unwrap_or(opt, default) {
+    return match opt {
+        some(v) => v,
+        none => default,
+    };
+}
+
+assert_eq(unwrap_or(some(42), 0), 42);
+assert_eq(unwrap_or(none(), 0), 0);
+
+fn check_result(r) {
+    return match r {
+        ok(v) => v + 1,
+        err(e) => 0,
+    };
+}
+
+assert_eq(check_result(ok(9)), 10);
+assert_eq(check_result(err("fail")), 0);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn defer_executes_on_scope_exit() {
+        let source = r#"
+fn f() {
+    defer || print("cleanup");
+    print("body");
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["body", "cleanup"]);
+    }
+
+    #[test]
+    fn defer_runs_in_lifo_order() {
+        let source = r#"
+fn f() {
+    defer || print("first");
+    defer || print("second");
+    defer || print("third");
+    print("body");
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["body", "third", "second", "first"]);
     }
 }

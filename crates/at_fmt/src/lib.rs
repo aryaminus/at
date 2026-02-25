@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use at_syntax::{Comment, Expr, Function, Ident, MatchPattern, Module, Stmt};
+use at_syntax::{Comment, Expr, Function, Ident, MapEntry, MatchPattern, Module, Stmt};
 
 struct CommentState {
     comments: Vec<Comment>,
@@ -302,7 +302,6 @@ fn expr_span(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.start),
         Expr::EnumLiteral { span, .. } => Some(span.start),
         Expr::MapLiteral { span, .. } => Some(span.start),
-        Expr::MapSpread { spread_span, .. } => Some(spread_span.start),
         Expr::As { span, .. } => Some(span.start),
         Expr::Is { span, .. } => Some(span.start),
         Expr::Group { span, .. } => Some(span.start),
@@ -354,7 +353,6 @@ fn expr_end(expr: &Expr) -> Option<usize> {
         Expr::StructLiteral { span, .. } => Some(span.end),
         Expr::EnumLiteral { span, .. } => Some(span.end),
         Expr::MapLiteral { span, .. } => Some(span.end),
-        Expr::MapSpread { spread_span, .. } => Some(spread_span.end),
         Expr::As { span, .. } => Some(span.end),
         Expr::Is { span, .. } => Some(span.end),
         Expr::Group { span, .. } => Some(span.end),
@@ -1079,27 +1077,26 @@ fn format_expr_prec_indent(
             if !entries.is_empty() {
                 out.push(' ');
             }
-            for (idx, (key, value)) in entries.iter().enumerate() {
+            for (idx, entry) in entries.iter().enumerate() {
                 if idx > 0 {
                     out.push_str(", ");
                 }
-                if let Expr::MapSpread { expr, .. } = key {
-                    out.push_str("...");
-                    format_expr_prec_indent(expr, out, 0, indent, comment_state);
-                } else {
-                    format_expr_prec_indent(key, out, 0, indent, comment_state);
-                    out.push_str(": ");
-                    format_expr_prec_indent(value, out, 0, indent, comment_state);
+                match entry {
+                    MapEntry::Spread(expr) => {
+                        out.push_str("...");
+                        format_expr_prec_indent(expr, out, 0, indent, comment_state);
+                    }
+                    MapEntry::KeyValue { key, value } => {
+                        format_expr_prec_indent(key, out, 0, indent, comment_state);
+                        out.push_str(": ");
+                        format_expr_prec_indent(value, out, 0, indent, comment_state);
+                    }
                 }
             }
             if !entries.is_empty() {
                 out.push(' ');
             }
             out.push('}');
-        }
-        Expr::MapSpread { expr, .. } => {
-            out.push_str("...");
-            format_expr_prec_indent(expr, out, 0, indent, comment_state);
         }
         Expr::As { expr, ty, .. } => {
             format_expr_prec_indent(expr, out, unary_prec(), indent, comment_state);

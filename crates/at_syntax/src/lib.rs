@@ -59,6 +59,12 @@ pub enum TypeQualifier {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MapEntry {
+    KeyValue { key: Expr, value: Expr },
+    Spread(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     Int(i64, Span, NodeId),
     Float(f64, Span, NodeId),
@@ -188,12 +194,7 @@ pub enum Expr {
     MapLiteral {
         span: Span,
         id: NodeId,
-        entries: Vec<(Expr, Expr)>,
-    },
-    MapSpread {
-        spread_span: Span,
-        id: NodeId,
-        expr: Box<Expr>,
+        entries: Vec<MapEntry>,
     },
     As {
         expr: Box<Expr>,
@@ -736,12 +737,16 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::MapLiteral { entries, .. } => {
-            for (key, value) in entries {
-                visitor.visit_expr(key);
-                visitor.visit_expr(value);
+            for entry in entries {
+                match entry {
+                    MapEntry::KeyValue { key, value } => {
+                        visitor.visit_expr(key);
+                        visitor.visit_expr(value);
+                    }
+                    MapEntry::Spread(expr) => visitor.visit_expr(expr),
+                }
             }
         }
-        Expr::MapSpread { expr, .. } => visitor.visit_expr(expr),
         Expr::As { expr, ty, .. } | Expr::Is { expr, ty, .. } => {
             visitor.visit_expr(expr);
             visitor.visit_type_ref(ty);

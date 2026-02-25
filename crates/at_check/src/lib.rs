@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use at_syntax::{
-    BinaryOp, EnumVariant, Expr, Function, Ident, Module, Span, Stmt, StructField, TypeRef, UnaryOp,
+    BinaryOp, EnumVariant, Expr, Function, Ident, MapEntry, Module, Span, Stmt, StructField,
+    TypeRef, UnaryOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,7 @@ struct BranchInners {
 
 pub fn typecheck_module(module: &Module) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new();
+    checker.load_declarations(module);
     checker.load_functions(module);
     checker.check_module(module);
     if checker.errors.is_empty() {
@@ -83,6 +85,7 @@ pub fn typecheck_module_with_mode(
     mode: TypecheckMode,
 ) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new_with_mode(mode);
+    checker.load_declarations(module);
     checker.load_functions(module);
     checker.check_module(module);
     if checker.errors.is_empty() {
@@ -94,6 +97,9 @@ pub fn typecheck_module_with_mode(
 
 pub fn typecheck_modules(modules: &[Module]) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new();
+    for module in modules {
+        checker.load_declarations(module);
+    }
     for module in modules {
         checker.load_functions(module);
     }
@@ -113,6 +119,9 @@ pub fn typecheck_modules_with_mode(
 ) -> Result<(), Vec<TypeError>> {
     let mut checker = TypeChecker::new_with_mode(mode);
     for module in modules {
+        checker.load_declarations(module);
+    }
+    for module in modules {
         checker.load_functions(module);
     }
     for module in modules {
@@ -127,6 +136,7 @@ pub fn typecheck_modules_with_mode(
 
 pub fn infer_function_returns(module: &Module) -> HashMap<String, String> {
     let mut checker = TypeChecker::new();
+    checker.load_declarations(module);
     checker.load_functions(module);
     for func in &module.functions {
         checker.check_function(func);
@@ -216,6 +226,8 @@ impl TypeChecker {
                 func.name.name.clone(),
                 func.needs.iter().map(|ident| ident.name.clone()).collect(),
             );
+            let tp: HashSet<String> = func.type_params.iter().map(|p| p.name.clone()).collect();
+            let tp_ref = if tp.is_empty() { None } else { Some(&tp) };
             let params = func
                 .params
                 .iter()
@@ -223,14 +235,14 @@ impl TypeChecker {
                     param
                         .ty
                         .as_ref()
-                        .map(|ty| self.type_from_ref_with_env(ty, None, None))
+                        .map(|ty| self.type_from_ref_with_env(ty, None, tp_ref))
                         .unwrap_or(SimpleType::Unknown)
                 })
                 .collect();
             let return_ty = func
                 .return_ty
                 .as_ref()
-                .map(|ty| self.type_from_ref_with_env(ty, None, None))
+                .map(|ty| self.type_from_ref_with_env(ty, None, tp_ref))
                 .unwrap_or(SimpleType::Unknown);
             self.functions.insert(
                 func.name.name.clone(),
@@ -248,11 +260,14 @@ impl TypeChecker {
         }
     }
 
-    fn check_module(&mut self, module: &Module) {
-        self.check_duplicate_import_aliases(module);
+    fn load_declarations(&mut self, module: &Module) {
         self.load_type_aliases(module);
         self.load_structs(module);
         self.load_enums(module);
+    }
+
+    fn check_module(&mut self, module: &Module) {
+        self.check_duplicate_import_aliases(module);
         self.type_params.clear();
         for func in &module.functions {
             self.check_function(func);
@@ -1371,14 +1386,56 @@ impl TypeChecker {
             Expr::MapLiteral { entries, .. } => {
                 let mut key_ty = SimpleType::Unknown;
                 let mut value_ty = SimpleType::Unknown;
-                for (key, value) in entries {
-                    let found_key = self.check_expr(key);
-                    if matches!(found_key, SimpleType::Map(_, _)) {
-                        if let SimpleType::Map(inner_key, inner_value) = found_key {
-                            let found_key = (*inner_key).clone();
-                            let found_value = (*inner_value).clone();
+                for entry in entries {
+                    match entry {
+                        MapEntry::Spread(spread_expr) => {
+                            let found = self.check_expr(spread_expr);
+                            match found {
+                                SimpleType::Map(inner_key, inner_value) => {
+                                    let found_key = (*inner_key).clone();
+                                    let found_value = (*inner_value).clone();
+                                    if matches!(key_ty, SimpleType::Unknown) {
+                                        key_ty = found_key.clone();
+                                    } else if !matches!(found_key, SimpleType::Unknown)
+                                        && !self.types_compatible(&key_ty, &found_key)
+                                    {
+                                        self.push_error(
+                                            format!(
+                                                "map key type mismatch: expected {}, got {}",
+                                                format_type(&key_ty),
+                                                format_type(&found_key)
+                                            ),
+                                            expr_span(spread_expr),
+                                        );
+                                    }
+                                    if matches!(value_ty, SimpleType::Unknown) {
+                                        value_ty = found_value.clone();
+                                    } else if !matches!(found_value, SimpleType::Unknown)
+                                        && !self.types_compatible(&value_ty, &found_value)
+                                    {
+                                        self.push_error(
+                                            format!(
+                                                "map value type mismatch: expected {}, got {}",
+                                                format_type(&value_ty),
+                                                format_type(&found_value)
+                                            ),
+                                            expr_span(spread_expr),
+                                        );
+                                    }
+                                }
+                                SimpleType::Unknown => {}
+                                other => {
+                                    self.push_error(
+                                        format!("spread expects map, got {}", format_type(&other)),
+                                        expr_span(spread_expr),
+                                    );
+                                }
+                            }
+                        }
+                        MapEntry::KeyValue { key, value } => {
+                            let found_key = self.check_expr(key);
                             if matches!(key_ty, SimpleType::Unknown) {
-                                key_ty = found_key.clone();
+                                key_ty = found_key;
                             } else if !matches!(found_key, SimpleType::Unknown)
                                 && !self.types_compatible(&key_ty, &found_key)
                             {
@@ -1391,8 +1448,10 @@ impl TypeChecker {
                                     expr_span(key),
                                 );
                             }
+
+                            let found_value = self.check_expr(value);
                             if matches!(value_ty, SimpleType::Unknown) {
-                                value_ty = found_value.clone();
+                                value_ty = found_value;
                             } else if !matches!(found_value, SimpleType::Unknown)
                                 && !self.types_compatible(&value_ty, &found_value)
                             {
@@ -1402,41 +1461,10 @@ impl TypeChecker {
                                         format_type(&value_ty),
                                         format_type(&found_value)
                                     ),
-                                    expr_span(key),
+                                    expr_span(value),
                                 );
                             }
                         }
-                        continue;
-                    }
-                    if matches!(key_ty, SimpleType::Unknown) {
-                        key_ty = found_key;
-                    } else if !matches!(found_key, SimpleType::Unknown)
-                        && !self.types_compatible(&key_ty, &found_key)
-                    {
-                        self.push_error(
-                            format!(
-                                "map key type mismatch: expected {}, got {}",
-                                format_type(&key_ty),
-                                format_type(&found_key)
-                            ),
-                            expr_span(key),
-                        );
-                    }
-
-                    let found_value = self.check_expr(value);
-                    if matches!(value_ty, SimpleType::Unknown) {
-                        value_ty = found_value;
-                    } else if !matches!(found_value, SimpleType::Unknown)
-                        && !self.types_compatible(&value_ty, &found_value)
-                    {
-                        self.push_error(
-                            format!(
-                                "map value type mismatch: expected {}, got {}",
-                                format_type(&value_ty),
-                                format_type(&found_value)
-                            ),
-                            expr_span(value),
-                        );
                     }
                 }
                 SimpleType::Map(Box::new(key_ty), Box::new(value_ty))
@@ -1457,20 +1485,6 @@ impl TypeChecker {
                     other => {
                         self.push_error(
                             format!("spread expects array or tuple, got {}", format_type(&other)),
-                            expr_span(expr),
-                        );
-                        SimpleType::Unknown
-                    }
-                }
-            }
-            Expr::MapSpread { expr, .. } => {
-                let found = self.check_expr(expr);
-                match found {
-                    SimpleType::Map(key, value) => SimpleType::Map(key, value),
-                    SimpleType::Unknown => SimpleType::Unknown,
-                    other => {
-                        self.push_error(
-                            format!("spread expects map, got {}", format_type(&other)),
                             expr_span(expr),
                         );
                         SimpleType::Unknown
@@ -4386,7 +4400,7 @@ impl TypeChecker {
         env: Option<&HashMap<String, SimpleType>>,
         params: Option<&HashSet<String>>,
     ) -> SimpleType {
-        self.validate_type_ref(ty);
+        self.validate_type_ref_with_params(ty, params);
         match ty {
             TypeRef::Qualified { ty, .. } => self.type_from_ref_with_env(ty, env, params),
             TypeRef::Named { name, args } => {
@@ -4540,8 +4554,16 @@ impl TypeChecker {
     }
 
     fn validate_type_ref(&mut self, ty: &TypeRef) {
+        self.validate_type_ref_with_params(ty, None);
+    }
+
+    fn validate_type_ref_with_params(
+        &mut self,
+        ty: &TypeRef,
+        extra_params: Option<&HashSet<String>>,
+    ) {
         match ty {
-            TypeRef::Qualified { ty, .. } => self.validate_type_ref(ty),
+            TypeRef::Qualified { ty, .. } => self.validate_type_ref_with_params(ty, extra_params),
             TypeRef::Named { name, args } => match name.name.as_str() {
                 "array" => {
                     if args.len() != 1 {
@@ -4595,30 +4617,36 @@ impl TypeChecker {
                 other => {
                     if self.type_aliases.contains_key(other) {
                         if let Some(alias) = self.resolve_alias(name) {
-                            self.validate_type_ref(&alias);
+                            self.validate_type_ref_with_params(&alias, extra_params);
                         }
-                    } else if !self.structs.contains_key(other) && !self.enums.contains_key(other) {
+                    } else if !self.structs.contains_key(other)
+                        && !self.enums.contains_key(other)
+                        && !self
+                            .current_type_params()
+                            .is_some_and(|tp| tp.contains(other))
+                        && !extra_params.is_some_and(|ep| ep.contains(other))
+                    {
                         self.push_error(format!("unknown type: {}", other), Some(name.span));
                     }
                 }
             },
             TypeRef::Tuple { items, .. } => {
                 for item in items {
-                    self.validate_type_ref(item);
+                    self.validate_type_ref_with_params(item, extra_params);
                 }
             }
             TypeRef::Union { types } | TypeRef::Intersection { types } => {
                 for ty in types {
-                    self.validate_type_ref(ty);
+                    self.validate_type_ref_with_params(ty, extra_params);
                 }
             }
             TypeRef::Function {
                 params, return_ty, ..
             } => {
                 for param in params {
-                    self.validate_type_ref(param);
+                    self.validate_type_ref_with_params(param, extra_params);
                 }
-                self.validate_type_ref(return_ty);
+                self.validate_type_ref_with_params(return_ty, extra_params);
             }
         }
     }
@@ -4817,7 +4845,6 @@ fn expr_span(expr: &Expr) -> Option<Span> {
         Expr::StructLiteral { span, .. } => Some(*span),
         Expr::EnumLiteral { span, .. } => Some(*span),
         Expr::MapLiteral { span, .. } => Some(*span),
-        Expr::MapSpread { spread_span, .. } => Some(*spread_span),
         Expr::As { span, .. } => Some(*span),
         Expr::Is { span, .. } => Some(*span),
         Expr::Group { span, .. } => Some(*span),
@@ -5904,5 +5931,456 @@ fn f() -> int {
         assert!(errors
             .iter()
             .any(|err| err.message.contains("yield requires generator return type")));
+    }
+
+    // ---- Enum type checking ----
+
+    #[test]
+    fn allows_enum_literal_construction() {
+        let source = r#"
+enum Dir { Up, Down, }
+
+fn f() -> Dir {
+    return Dir::Up;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_unknown_enum_variant() {
+        let source = r#"
+enum Dir { Up, Down, }
+
+fn f() {
+    let d = Dir::Left;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("unknown variant Dir::Left")));
+    }
+
+    #[test]
+    fn errors_on_unknown_enum_name() {
+        let source = r#"
+fn f() {
+    let d = Bogus::X;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("unknown enum: Bogus")));
+    }
+
+    #[test]
+    fn match_enum_exhaustiveness() {
+        let source = r#"
+enum Dir { Up, Down, Left, }
+
+fn f(d: Dir) -> int {
+    return match d {
+        Dir::Up => 1,
+        Dir::Down => 2,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("non-exhaustive match for enum Dir")));
+    }
+
+    #[test]
+    fn allows_exhaustive_enum_match() {
+        let source = r#"
+enum Dir { Up, Down, }
+
+fn f(d: Dir) -> int {
+    return match d {
+        Dir::Up => 1,
+        Dir::Down => 2,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn allows_exhaustive_enum_match_with_wildcard() {
+        let source = r#"
+enum Dir { Up, Down, Left, }
+
+fn f(d: Dir) -> int {
+    return match d {
+        Dir::Up => 1,
+        _ => 0,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    // ---- Generic type params ----
+
+    #[test]
+    fn allows_generic_function_call() {
+        let source = r#"
+fn identity<T>(x: T) -> T { return x; }
+
+fn f() -> int { return identity(42); }
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn infers_generic_return_from_args() {
+        let source = r#"
+fn wrap<T>(x: T) -> option<T> { return some(x); }
+
+fn f() -> option<int> { return wrap(1); }
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_duplicate_type_params() {
+        let source = r#"
+fn f<T, T>(a: T) -> T { return a; }
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("duplicate function type parameter")));
+    }
+
+    // ---- Deep struct checking ----
+
+    #[test]
+    fn errors_on_unknown_struct_name() {
+        let source = r#"
+fn f() {
+    let x = Bogus { a: 1, };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("unknown struct: Bogus")));
+    }
+
+    #[test]
+    fn errors_on_unknown_struct_field() {
+        let source = r#"
+struct Point { x: int, y: int, }
+
+fn f() {
+    let p = Point { x: 1, y: 2, z: 3, };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("unknown field z on struct Point")));
+    }
+
+    #[test]
+    fn errors_on_missing_struct_field() {
+        let source = r#"
+struct Point { x: int, y: int, }
+
+fn f() {
+    let p = Point { x: 1, };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("missing field y for struct Point")));
+    }
+
+    #[test]
+    fn errors_on_duplicate_struct_field_in_literal() {
+        let source = r#"
+struct Point { x: int, y: int, }
+
+fn f() {
+    let p = Point { x: 1, y: 2, x: 3, };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("duplicate field: x")));
+    }
+
+    // ---- Binary op type errors ----
+
+    #[test]
+    fn errors_on_add_incompatible_types() {
+        let source = r#"
+fn f() -> int {
+    return 1 + "hello";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors.iter().any(|err| err
+            .message
+            .contains("operator expects int, float, or string")));
+    }
+
+    #[test]
+    fn errors_on_sub_string_operands() {
+        let source = r#"
+fn f() -> int {
+    return "a" - "b";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("operator expects int or float")));
+    }
+
+    #[test]
+    fn errors_on_comparison_non_numeric() {
+        let source = r#"
+fn f() -> bool {
+    return "a" < "b";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("comparison expects number")));
+    }
+
+    #[test]
+    fn allows_float_promotion_in_arithmetic() {
+        let source = r#"
+fn f() -> float {
+    return 1 + 2.0;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    // ---- Type aliases ----
+
+    #[test]
+    fn allows_type_alias_in_annotation() {
+        let source = r#"
+type Id = int;
+
+fn f(x: Id) -> Id { return x; }
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_duplicate_type_alias() {
+        let source = r#"
+type Id = int;
+type Id = string;
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("duplicate type alias: Id")));
+    }
+
+    // ---- Try operator ----
+
+    #[test]
+    fn allows_try_operator_in_result_fn() {
+        let source = r#"
+fn inner() -> result<int, string> {
+    return ok(1);
+}
+
+fn f() -> result<int, string> {
+    let x = inner()?;
+    return ok(x);
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_try_in_non_result_fn() {
+        let source = r#"
+fn inner() -> result<int, string> {
+    return ok(1);
+}
+
+fn f() -> int {
+    let x = inner()?;
+    return x;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("? requires function returning result")));
+    }
+
+    // ---- Missing return detection ----
+
+    #[test]
+    fn errors_on_missing_return_in_typed_fn() {
+        let source = r#"
+fn f() -> int {
+    let x = 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("not all paths return")));
+    }
+
+    #[test]
+    fn allows_return_in_all_branches() {
+        let source = r#"
+fn f(x: bool) -> int {
+    if x {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    // ---- Match exhaustiveness ----
+
+    #[test]
+    fn errors_on_non_exhaustive_bool_match() {
+        let source = r#"
+fn f(x: bool) -> int {
+    return match x {
+        true => 1,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("non-exhaustive match for bool")));
+    }
+
+    #[test]
+    fn errors_on_non_exhaustive_int_match() {
+        let source = r#"
+fn f(x: int) -> int {
+    return match x {
+        1 => 10,
+        2 => 20,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("non-exhaustive match for int")));
+    }
+
+    #[test]
+    fn allows_exhaustive_match_with_wildcard() {
+        let source = r#"
+fn f(x: int) -> int {
+    return match x {
+        1 => 10,
+        _ => 0,
+    };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    // ---- Unary operators ----
+
+    #[test]
+    fn errors_on_negate_string() {
+        let source = r#"
+fn f() {
+    let x = -"hello";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("- expects int or float")));
+    }
+
+    #[test]
+    fn errors_on_not_string() {
+        let source = r#"
+fn f() {
+    let x = !"hello";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("! expects bool or int")));
+    }
+
+    // ---- Ternary expression ----
+
+    #[test]
+    fn allows_ternary_with_matching_types() {
+        let source = r#"
+fn f(x: bool) -> int {
+    return x ? 1 : 2;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert!(typecheck_module(&module).is_ok());
+    }
+
+    #[test]
+    fn errors_on_ternary_type_mismatch() {
+        let source = r#"
+fn f(x: bool) -> int {
+    return x ? 1 : "no";
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = typecheck_module(&module).expect_err("expected type errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("ternary branch mismatch")));
     }
 }
