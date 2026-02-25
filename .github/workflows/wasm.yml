@@ -13,7 +13,7 @@ jobs:
     build-wasm:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
               with:
@@ -33,13 +33,13 @@ jobs:
         needs: build-wasm
         if: startsWith(github.ref, 'refs/tags/v')
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v6
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
               with:
                   targets: wasm32-unknown-unknown
             - uses: Swatinem/rust-cache@v2
-            - uses: actions/setup-node@v4
+            - uses: actions/setup-node@v6
               with:
                   node-version: 20
                   registry-url: https://registry.npmjs.org

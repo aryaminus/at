@@ -2455,7 +2455,7 @@ impl TypeChecker {
                     at_syntax::MatchPattern::Tuple { items, .. } => {
                         if let SimpleType::Tuple(inner_items) = &value_ty {
                             if items.len() == inner_items.len()
-                                && items.iter().all(|item| Self::pattern_is_catch_all(item))
+                                && items.iter().all(Self::pattern_is_catch_all)
                             {
                                 has_wildcard = true;
                             }
@@ -2810,9 +2810,7 @@ impl TypeChecker {
         at_syntax::builtin_capability(base, name)
     }
 
-    fn unwrap_binding_pattern<'a>(
-        pattern: &'a at_syntax::MatchPattern,
-    ) -> &'a at_syntax::MatchPattern {
+    fn unwrap_binding_pattern(pattern: &at_syntax::MatchPattern) -> &at_syntax::MatchPattern {
         match pattern {
             at_syntax::MatchPattern::Binding { pattern, .. } => {
                 Self::unwrap_binding_pattern(pattern)
@@ -2826,7 +2824,7 @@ impl TypeChecker {
             at_syntax::MatchPattern::Wildcard(_) => true,
             at_syntax::MatchPattern::Binding { pattern, .. } => Self::pattern_is_catch_all(pattern),
             at_syntax::MatchPattern::Tuple { items, .. } => {
-                items.iter().all(|item| Self::pattern_is_catch_all(item))
+                items.iter().all(Self::pattern_is_catch_all)
             }
             _ => false,
         }
@@ -3269,7 +3267,7 @@ impl TypeChecker {
                         if matches!(**existing_inner, SimpleType::Unknown)
                             && !matches!(**new_inner, SimpleType::Unknown)
                         {
-                            *existing_inner = Box::new((**new_inner).clone());
+                            **existing_inner = (**new_inner).clone();
                         }
                     }
                     (
@@ -3279,12 +3277,12 @@ impl TypeChecker {
                         if matches!(**existing_ok, SimpleType::Unknown)
                             && !matches!(**new_ok, SimpleType::Unknown)
                         {
-                            *existing_ok = Box::new((**new_ok).clone());
+                            **existing_ok = (**new_ok).clone();
                         }
                         if matches!(**existing_err, SimpleType::Unknown)
                             && !matches!(**new_err, SimpleType::Unknown)
                         {
-                            *existing_err = Box::new((**new_err).clone());
+                            **existing_err = (**new_err).clone();
                         }
                     }
                     _ => {}
@@ -3318,7 +3316,7 @@ impl TypeChecker {
                 if matches!(existing_return.as_ref(), SimpleType::Unknown)
                     && !matches!(return_ty, SimpleType::Unknown)
                 {
-                    *existing_return = Box::new(return_ty.clone());
+                    **existing_return = return_ty.clone();
                 }
             }
             break;

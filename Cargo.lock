@@ -16,7 +16,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "at"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_check",
  "at_fmt",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "at_check"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_parser",
  "at_syntax",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "at_fmt"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_parser",
  "at_syntax",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "at_lint"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_check",
  "at_parser",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "at_lsp"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_check",
  "at_fmt",
@@ -83,28 +83,28 @@ dependencies = [
 
 [[package]]
 name = "at_mcp"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "at_parser"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_syntax",
 ]
 
 [[package]]
 name = "at_syntax"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "at_vm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_parser",
  "at_syntax",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "at_wasm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "at_parser",
  "at_vm",

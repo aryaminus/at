@@ -8,6 +8,15 @@ updates:
       labels:
           - dependencies
           - rust
+      ignore:
+          - dependency-name: ureq
+            versions: ["3.x"]
+          - dependency-name: bincode
+            versions: ["3.x"]
+          - dependency-name: toml
+            versions: ["1.x"]
+          - dependency-name: rustyline
+            versions: ["17.x"]
 
     - package-ecosystem: github-actions
       directory: /
