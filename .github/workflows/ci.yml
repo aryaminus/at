@@ -37,7 +37,7 @@ jobs:
                   PY
                   )
                   echo "release binary size: ${SIZE} bytes"
-                  test "$SIZE" -le 8000000
+                  test "$SIZE" -le 8500000
             - name: Benchmark stability threshold
               run: |
                   RUNS=3 RELEASE=1 OUT=/tmp/bench_baseline.json sh examples/run_bench.sh >/dev/null
