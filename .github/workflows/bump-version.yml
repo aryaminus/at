@@ -1,39 +1,39 @@
 name: bump-version
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - ".github/**"
-      - "docs/**"
-      - "**/*.md"
+    push:
+        branches:
+            - main
+        paths-ignore:
+            - ".github/**"
+            - "docs/**"
+            - "**/*.md"
 
 permissions:
-  contents: write
+    contents: write
 
 jobs:
-  bump:
-    if: "!contains(github.event.head_commit.message, 'chore(release):')"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Bump version
-        run: |
-          python scripts/bump-version.py patch > /tmp/version.txt
-      - name: Commit and tag
-        run: |
-          VERSION=$(cat /tmp/version.txt)
-          git add Cargo.toml package.json
-          git commit -m "chore(release): bump version to ${VERSION}"
-          git tag "v${VERSION}"
-      - name: Push changes and tags
-        run: |
-          git push origin main
-          git push --tags
+    bump:
+        if: "!contains(github.event.head_commit.message, 'chore(release):')"
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+            - name: Configure Git
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+            - name: Bump version
+              run: |
+                  python scripts/bump-version.py patch > /tmp/version.txt
+            - name: Commit and tag
+              run: |
+                  VERSION=$(cat /tmp/version.txt)
+                  git add Cargo.toml Cargo.lock package.json
+                  git commit -m "chore(release): bump version to ${VERSION}"
+                  git tag "v${VERSION}"
+            - name: Push changes and tags
+              run: |
+                  git push origin main
+                  git push --tags

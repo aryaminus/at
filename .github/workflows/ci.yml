@@ -1,82 +1,84 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+    push:
+        branches:
+            - main
+    pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Clippy (correctness gate)
-        run: cargo clippy --workspace --all-targets -- -D clippy::correctness
-      - name: Clippy warning budget (no increase)
-        run: |
-          cargo clippy --workspace --all-targets --message-format=json --quiet > /tmp/clippy.jsonl
-          python3 scripts/check_clippy_warning_budget.py /tmp/clippy.jsonl .clippy-warning-baseline.toml
-      - name: Run tests
-        run: cargo test --workspace
-      - name: Run release CLI integration suite
-        run: cargo test -p at --bin at --release
-      - name: Enforce release binary size budget
-        run: |
-          cargo build --release -p at
-          SIZE=$(python3 - <<'PY'
-          import os
-          print(os.path.getsize("target/release/at"))
-          PY
-          )
-          echo "release binary size: ${SIZE} bytes"
-          test "$SIZE" -le 8000000
-      - name: Benchmark stability threshold
-        run: |
-          RUNS=3 RELEASE=1 OUT=/tmp/bench_baseline.json sh examples/run_bench.sh >/dev/null
-          RUNS=3 RELEASE=1 OUT=/tmp/bench_current.json sh examples/run_bench.sh >/dev/null
-          python3 examples/bench_compare.py /tmp/bench_baseline.json /tmp/bench_current.json 100
-      - name: Validate examples
-        run: |
-          for file in examples/*.at; do
-            echo "Checking $file"
-            cargo run --quiet -p at -- check "$file"
-          done
-          for file in examples/*.at; do
-            echo "Running $file"
-            cargo run --quiet -p at -- run "$file"
-          done
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
+            - uses: Swatinem/rust-cache@v2
+            - name: Check formatting
+              run: cargo fmt --all -- --check
+            - name: Clippy (correctness gate)
+              run: cargo clippy --workspace --all-targets -- -D clippy::correctness
+            - name: Clippy warning budget (no increase)
+              run: |
+                  cargo clippy --workspace --all-targets --message-format=json --quiet > /tmp/clippy.jsonl
+                  python3 scripts/check_clippy_warning_budget.py /tmp/clippy.jsonl .clippy-warning-baseline.toml
+            - name: Run tests
+              run: cargo test --workspace
+            - name: Run release CLI integration suite
+              run: cargo test -p at --bin at --release
+            - name: Enforce release binary size budget
+              run: |
+                  cargo build --release -p at
+                  SIZE=$(python3 - <<'PY'
+                  import os
+                  print(os.path.getsize("target/release/at"))
+                  PY
+                  )
+                  echo "release binary size: ${SIZE} bytes"
+                  test "$SIZE" -le 8000000
+            - name: Benchmark stability threshold
+              run: |
+                  RUNS=3 RELEASE=1 OUT=/tmp/bench_baseline.json sh examples/run_bench.sh >/dev/null
+                  RUNS=3 RELEASE=1 OUT=/tmp/bench_current.json sh examples/run_bench.sh >/dev/null
+                  python3 examples/bench_compare.py /tmp/bench_baseline.json /tmp/bench_current.json 100
+            - name: Validate examples
+              run: |
+                  for file in examples/*.at; do
+                    echo "Checking $file"
+                    cargo run --quiet -p at -- check "$file"
+                  done
+                  for file in examples/*.at; do
+                    echo "Running $file"
+                    cargo run --quiet -p at -- run "$file"
+                  done
 
-  install-smoke:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install smoke (release artifact + source install)
-        run: |
-          set -euxo pipefail
+    install-smoke:
+        runs-on: ubuntu-latest
+        needs: test
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - name: Install smoke (release artifact + source install)
+              run: |
+                  set -euxo pipefail
 
-          cargo build --release -p at
+                  cargo build --release -p at
 
-          mkdir -p /tmp/at-install-smoke/artifact
-          cp target/release/at /tmp/at-install-smoke/artifact/at-x86_64-unknown-linux-gnu
-          tar -C /tmp/at-install-smoke/artifact -czf /tmp/at-install-smoke/at-x86_64-unknown-linux-gnu.tar.gz at-x86_64-unknown-linux-gnu
-          mkdir -p /tmp/at-install-smoke/bin
-          tar -C /tmp/at-install-smoke/bin -xzf /tmp/at-install-smoke/at-x86_64-unknown-linux-gnu.tar.gz
+                  mkdir -p /tmp/at-install-smoke/artifact
+                  cp target/release/at /tmp/at-install-smoke/artifact/at-x86_64-unknown-linux-gnu
+                  tar -C /tmp/at-install-smoke/artifact -czf /tmp/at-install-smoke/at-x86_64-unknown-linux-gnu.tar.gz at-x86_64-unknown-linux-gnu
+                  mkdir -p /tmp/at-install-smoke/bin
+                  tar -C /tmp/at-install-smoke/bin -xzf /tmp/at-install-smoke/at-x86_64-unknown-linux-gnu.tar.gz
 
-          /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu --version
-          /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu run examples/sum.at
-          /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu check examples/features.at
+                  /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu --version
+                  /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu run examples/sum.at
+                  /tmp/at-install-smoke/bin/at-x86_64-unknown-linux-gnu check examples/features.at
 
-          cargo install --path crates/at_cli --root /tmp/at-install-smoke/src --force --locked --offline
-          /tmp/at-install-smoke/src/bin/at --version
-          /tmp/at-install-smoke/src/bin/at run examples/sum.at
-          /tmp/at-install-smoke/src/bin/at check examples/features.at
+                  cargo install --path crates/at_cli --root /tmp/at-install-smoke/src --force --locked --offline
+                  /tmp/at-install-smoke/src/bin/at --version
+                  /tmp/at-install-smoke/src/bin/at run examples/sum.at
+                  /tmp/at-install-smoke/src/bin/at check examples/features.at
