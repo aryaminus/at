@@ -2811,24 +2811,24 @@ impl Compiler {
             Expr::Match { value, arms, .. } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
                 for arm in arms {
-                    self.push_bound_scope(bound);
-                    self.bind_pattern_names(&arm.pattern, bound);
+                    Self::push_bound_scope(bound);
+                    Self::bind_pattern_names(&arm.pattern, bound);
                     if let Some(guard) = &arm.guard {
                         self.collect_free_vars_expr(guard, bound, captures, seen);
                     }
                     self.collect_free_vars_expr(&arm.body, bound, captures, seen);
-                    self.pop_bound_scope(bound);
+                    Self::pop_bound_scope(bound);
                 }
             }
             Expr::Block { stmts, tail, .. } => {
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 for stmt in stmts {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
                 if let Some(expr) = tail {
                     self.collect_free_vars_expr(expr, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
             Expr::Array { items, .. } | Expr::Tuple { items, .. } => {
                 for item in items {
@@ -2893,14 +2893,14 @@ impl Compiler {
             Expr::Closure { params, body, .. } => {
                 // Nested closures may reference symbols from ancestor scopes.
                 // Walk the nested body so those free vars are captured transitively.
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 if let Some(scope) = bound.last_mut() {
                     for param in params {
                         scope.insert(param.name.clone());
                     }
                 }
                 self.collect_free_vars_expr(body, bound, captures, seen);
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
         }
     }
@@ -2947,11 +2947,11 @@ impl Compiler {
                 condition, body, ..
             } => {
                 self.collect_free_vars_expr(condition, bound, captures, seen);
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 for stmt in body {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
             Stmt::If {
                 condition,
@@ -2960,31 +2960,31 @@ impl Compiler {
                 ..
             } => {
                 self.collect_free_vars_expr(condition, bound, captures, seen);
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 for stmt in then_branch {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
                 if let Some(else_branch) = else_branch {
-                    self.push_bound_scope(bound);
+                    Self::push_bound_scope(bound);
                     for stmt in else_branch {
                         self.collect_free_vars_stmt(stmt, bound, captures, seen);
                     }
-                    self.pop_bound_scope(bound);
+                    Self::pop_bound_scope(bound);
                 }
             }
             Stmt::For {
                 item, iter, body, ..
             } => {
                 self.collect_free_vars_expr(iter, bound, captures, seen);
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 if let Some(scope) = bound.last_mut() {
                     scope.insert(item.name.clone());
                 }
                 for stmt in body {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Expr { expr, .. } => {
@@ -3005,34 +3005,29 @@ impl Compiler {
                 name, value, body, ..
             } => {
                 self.collect_free_vars_expr(value, bound, captures, seen);
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 if let Some(scope) = bound.last_mut() {
                     scope.insert(name.name.clone());
                 }
                 for stmt in body {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
             Stmt::Yield { expr, .. } => {
                 self.collect_free_vars_expr(expr, bound, captures, seen);
             }
             Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
-                self.push_bound_scope(bound);
+                Self::push_bound_scope(bound);
                 for stmt in stmts {
                     self.collect_free_vars_stmt(stmt, bound, captures, seen);
                 }
-                self.pop_bound_scope(bound);
+                Self::pop_bound_scope(bound);
             }
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn bind_pattern_names(
-        &self,
-        pattern: &at_syntax::MatchPattern,
-        bound: &mut Vec<HashSet<String>>,
-    ) {
+    fn bind_pattern_names(pattern: &at_syntax::MatchPattern, bound: &mut Vec<HashSet<String>>) {
         let name = match pattern {
             at_syntax::MatchPattern::ResultOk(ident, _)
             | at_syntax::MatchPattern::ResultErr(ident, _)
@@ -3073,24 +3068,24 @@ impl Compiler {
             }
             at_syntax::MatchPattern::Tuple { items, .. } => {
                 for item in items {
-                    self.bind_pattern_names(item, bound);
+                    Self::bind_pattern_names(item, bound);
                 }
             }
             at_syntax::MatchPattern::Binding { name, pattern, .. } => {
                 if let Some(scope) = bound.last_mut() {
                     scope.insert(name.name.clone());
                 }
-                self.bind_pattern_names(pattern, bound);
+                Self::bind_pattern_names(pattern, bound);
             }
             _ => {}
         }
     }
 
-    fn push_bound_scope(&self, bound: &mut Vec<HashSet<String>>) {
+    fn push_bound_scope(bound: &mut Vec<HashSet<String>>) {
         bound.push(HashSet::new());
     }
 
-    fn pop_bound_scope(&self, bound: &mut Vec<HashSet<String>>) {
+    fn pop_bound_scope(bound: &mut Vec<HashSet<String>>) {
         bound.pop();
     }
 
@@ -7668,5 +7663,52 @@ f();
         vm.run(&program).expect("run program");
         let output = vm.get_output().unwrap();
         assert_eq!(output, vec!["body", "third", "second", "first"]);
+    }
+
+    #[test]
+    fn deeply_nested_async_three_levels() {
+        let source = r#"
+async fn level3() -> int {
+    return 10;
+}
+async fn level2() -> int {
+    let x = await level3();
+    return x + 20;
+}
+async fn level1() -> int {
+    let x = await level2();
+    return x + 30;
+}
+let result = await level1();
+print(result);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["60"]);
+    }
+
+    #[test]
+    fn block_body_closure_runs() {
+        let source = r#"
+let nums = [1, 2, 3, 4, 5];
+let result = map(nums, |n| {
+    let doubled = n * 2;
+    doubled + 1
+});
+assert_eq(result[0], 3);
+assert_eq(result[4], 11);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
     }
 }

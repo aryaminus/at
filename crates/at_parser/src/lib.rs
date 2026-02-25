@@ -1691,7 +1691,11 @@ impl<'a> Parser<'a> {
                 // || is lexed as OrOr; treat as zero-param closure
                 let span = self.current.span;
                 self.advance();
-                let body = self.parse_expr()?;
+                let body = if self.current.kind == TokenKind::LBrace {
+                    self.parse_block_expr()?
+                } else {
+                    self.parse_expr()?
+                };
                 Ok(Expr::Closure {
                     span,
                     id: self.alloc_id(),
@@ -1833,7 +1837,11 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::Pipe)?;
 
-        let body = self.parse_expr()?;
+        let body = if self.current.kind == TokenKind::LBrace {
+            self.parse_block_expr()?
+        } else {
+            self.parse_expr()?
+        };
         Ok(Expr::Closure {
             span,
             id: self.alloc_id(),
@@ -4324,5 +4332,55 @@ fn f() {
         if let Stmt::TypeAlias { name, .. } = &module.stmts[1] {
             assert_eq!(name.name, "Name");
         }
+    }
+
+    #[test]
+    fn block_body_closure_with_params() {
+        let source = r#"
+let f = |x| {
+    let y = x + 1;
+    y
+};
+"#;
+        let module = parse_module(source).expect("parse block-body closure");
+        assert_eq!(module.stmts.len(), 1);
+        if let Stmt::Let { value, .. } = &module.stmts[0] {
+            assert!(
+                matches!(value, Expr::Closure { .. }),
+                "expected Closure, got {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn block_body_closure_zero_params() {
+        let source = r#"
+let f = || {
+    let a = 1;
+    let b = 2;
+    a + b
+};
+"#;
+        let module = parse_module(source).expect("parse zero-param block closure");
+        assert_eq!(module.stmts.len(), 1);
+        if let Stmt::Let { value, .. } = &module.stmts[0] {
+            assert!(
+                matches!(value, Expr::Closure { .. }),
+                "expected Closure, got {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn block_body_closure_multi_params() {
+        let source = r#"
+let f = |a, b| {
+    a + b
+};
+"#;
+        let module = parse_module(source).expect("parse multi-param block closure");
+        assert_eq!(module.stmts.len(), 1);
     }
 }

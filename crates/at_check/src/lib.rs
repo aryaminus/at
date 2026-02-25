@@ -713,7 +713,7 @@ impl TypeChecker {
                         }
                     }
                     SimpleType::Map(key, inner) => {
-                        if !self.types_compatible(&key, &index_ty) {
+                        if !Self::types_compatible(&key, &index_ty) {
                             self.push_error(
                                 format!(
                                     "map index expects {}, got {}",
@@ -936,7 +936,7 @@ impl TypeChecker {
                     let existing = self.return_generator_inner.clone();
                     match existing {
                         Some(existing) => {
-                            if !self.types_compatible(&existing, &value_ty)
+                            if !Self::types_compatible(&existing, &value_ty)
                                 && !matches!(value_ty, SimpleType::Unknown)
                             {
                                 self.push_error(
@@ -1027,9 +1027,9 @@ impl TypeChecker {
                 }
                 let then_ty = self.check_expr(then_branch);
                 let else_ty = self.check_expr(else_branch);
-                if self.types_compatible(&then_ty, &else_ty) {
+                if Self::types_compatible(&then_ty, &else_ty) {
                     then_ty
-                } else if self.types_compatible(&else_ty, &then_ty)
+                } else if Self::types_compatible(&else_ty, &then_ty)
                     || then_ty == SimpleType::Unknown
                 {
                     else_ty
@@ -1150,7 +1150,7 @@ impl TypeChecker {
                 match &inner {
                     SimpleType::Result(ok, err) => {
                         if let SimpleType::Result(_, expected_err) = &self.current_return {
-                            if !self.types_compatible(expected_err, err)
+                            if !Self::types_compatible(expected_err, err)
                                 && !matches!(**expected_err, SimpleType::Unknown)
                             {
                                 self.push_error(
@@ -1218,7 +1218,7 @@ impl TypeChecker {
                 match try_ty {
                     SimpleType::Result(ok, _) => {
                         if !matches!(catch_ty, SimpleType::Unknown)
-                            && !self.types_compatible(&ok, &catch_ty)
+                            && !Self::types_compatible(&ok, &catch_ty)
                         {
                             self.push_error(
                                 format!(
@@ -1270,7 +1270,7 @@ impl TypeChecker {
                             if matches!(array_inner, SimpleType::Unknown) {
                                 array_inner = item_inner;
                             } else if !matches!(item_inner, SimpleType::Unknown)
-                                && !self.types_compatible(&array_inner, &item_inner)
+                                && !Self::types_compatible(&array_inner, &item_inner)
                             {
                                 self.push_error(
                                     format!(
@@ -1287,7 +1287,7 @@ impl TypeChecker {
                     if matches!(array_inner, SimpleType::Unknown) {
                         array_inner = item_ty;
                     } else if !matches!(item_ty, SimpleType::Unknown)
-                        && !self.types_compatible(&array_inner, &item_ty)
+                        && !Self::types_compatible(&array_inner, &item_ty)
                     {
                         self.push_error(
                             format!(
@@ -1348,7 +1348,7 @@ impl TypeChecker {
                         }
                     }
                     SimpleType::Map(key, value) => {
-                        if !self.types_compatible(&key, &index_ty) {
+                        if !Self::types_compatible(&key, &index_ty) {
                             self.push_error(
                                 format!(
                                     "map index expects {}, got {}",
@@ -1397,7 +1397,7 @@ impl TypeChecker {
                                     if matches!(key_ty, SimpleType::Unknown) {
                                         key_ty = found_key.clone();
                                     } else if !matches!(found_key, SimpleType::Unknown)
-                                        && !self.types_compatible(&key_ty, &found_key)
+                                        && !Self::types_compatible(&key_ty, &found_key)
                                     {
                                         self.push_error(
                                             format!(
@@ -1411,7 +1411,7 @@ impl TypeChecker {
                                     if matches!(value_ty, SimpleType::Unknown) {
                                         value_ty = found_value.clone();
                                     } else if !matches!(found_value, SimpleType::Unknown)
-                                        && !self.types_compatible(&value_ty, &found_value)
+                                        && !Self::types_compatible(&value_ty, &found_value)
                                     {
                                         self.push_error(
                                             format!(
@@ -1437,7 +1437,7 @@ impl TypeChecker {
                             if matches!(key_ty, SimpleType::Unknown) {
                                 key_ty = found_key;
                             } else if !matches!(found_key, SimpleType::Unknown)
-                                && !self.types_compatible(&key_ty, &found_key)
+                                && !Self::types_compatible(&key_ty, &found_key)
                             {
                                 self.push_error(
                                     format!(
@@ -1453,7 +1453,7 @@ impl TypeChecker {
                             if matches!(value_ty, SimpleType::Unknown) {
                                 value_ty = found_value;
                             } else if !matches!(found_value, SimpleType::Unknown)
-                                && !self.types_compatible(&value_ty, &found_value)
+                                && !Self::types_compatible(&value_ty, &found_value)
                             {
                                 self.push_error(
                                     format!(
@@ -1562,7 +1562,7 @@ impl TypeChecker {
                             (Some(expected_ty), Some(expr)) => {
                                 let value_ty = self.check_expr(expr);
                                 if let Some(param_name) =
-                                    self.infer_type_param_name(expected_ty, &param_names)
+                                    Self::infer_type_param_name(expected_ty, &param_names)
                                 {
                                     let entry =
                                         env.entry(param_name).or_insert(SimpleType::Unknown);
@@ -1660,7 +1660,7 @@ impl TypeChecker {
                             .find(|entry| entry.name.name == field.name.name)
                         {
                             if let Some(param_name) =
-                                self.infer_type_param_name(&expected.ty, &param_names)
+                                Self::infer_type_param_name(&expected.ty, &param_names)
                             {
                                 let entry = env.entry(param_name).or_insert(SimpleType::Unknown);
                                 if matches!(entry, SimpleType::Unknown) {
@@ -1924,7 +1924,7 @@ impl TypeChecker {
             BinaryOp::Eq | BinaryOp::Neq => {
                 if left_ty != SimpleType::Unknown
                     && right_ty != SimpleType::Unknown
-                    && !self.types_compatible(&left_ty, &right_ty)
+                    && !Self::types_compatible(&left_ty, &right_ty)
                 {
                     self.push_error(
                         format!(
@@ -1970,8 +1970,7 @@ impl TypeChecker {
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn types_compatible(&self, expected: &SimpleType, found: &SimpleType) -> bool {
+    fn types_compatible(expected: &SimpleType, found: &SimpleType) -> bool {
         if expected == found {
             return true;
         }
@@ -1987,40 +1986,40 @@ impl TypeChecker {
         }
         match (expected, found) {
             (SimpleType::Array(left), SimpleType::Array(right)) => {
-                self.types_compatible(left, right)
+                Self::types_compatible(left, right)
             }
             (SimpleType::Option(left), SimpleType::Option(right)) => {
-                self.types_compatible(left, right)
+                Self::types_compatible(left, right)
             }
             (SimpleType::Result(ok_left, err_left), SimpleType::Result(ok_right, err_right)) => {
-                self.types_compatible(ok_left, ok_right)
-                    && self.types_compatible(err_left, err_right)
+                Self::types_compatible(ok_left, ok_right)
+                    && Self::types_compatible(err_left, err_right)
             }
             (SimpleType::Union(left), other) => {
-                left.iter().any(|ty| self.types_compatible(ty, other))
+                left.iter().any(|ty| Self::types_compatible(ty, other))
             }
             (other, SimpleType::Union(right)) => {
-                right.iter().any(|ty| self.types_compatible(other, ty))
+                right.iter().any(|ty| Self::types_compatible(other, ty))
             }
             (SimpleType::Intersection(left), other) => {
-                left.iter().all(|ty| self.types_compatible(ty, other))
+                left.iter().all(|ty| Self::types_compatible(ty, other))
             }
             (other, SimpleType::Intersection(right)) => {
-                right.iter().all(|ty| self.types_compatible(other, ty))
+                right.iter().all(|ty| Self::types_compatible(other, ty))
             }
             (SimpleType::Map(left_key, left_val), SimpleType::Map(right_key, right_val)) => {
-                self.types_compatible(left_key, right_key)
-                    && self.types_compatible(left_val, right_val)
+                Self::types_compatible(left_key, right_key)
+                    && Self::types_compatible(left_val, right_val)
             }
             (SimpleType::Future(left), SimpleType::Future(right)) => {
-                self.types_compatible(left, right)
+                Self::types_compatible(left, right)
             }
             (SimpleType::Tuple(left), SimpleType::Tuple(right)) => {
                 left.len() == right.len()
                     && left
                         .iter()
                         .zip(right.iter())
-                        .all(|(l, r)| self.types_compatible(l, r))
+                        .all(|(l, r)| Self::types_compatible(l, r))
             }
             (
                 SimpleType::Function(params_left, ret_left),
@@ -2030,8 +2029,8 @@ impl TypeChecker {
                     && params_left
                         .iter()
                         .zip(params_right.iter())
-                        .all(|(left, right)| self.types_compatible(left, right))
-                    && self.types_compatible(ret_left, ret_right)
+                        .all(|(left, right)| Self::types_compatible(left, right))
+                    && Self::types_compatible(ret_left, ret_right)
             }
             (SimpleType::Custom(left, left_args), SimpleType::Custom(right, right_args)) => {
                 left == right
@@ -2039,7 +2038,7 @@ impl TypeChecker {
                     && left_args
                         .iter()
                         .zip(right_args.iter())
-                        .all(|(left, right)| self.types_compatible(left, right))
+                        .all(|(left, right)| Self::types_compatible(left, right))
             }
             _ => false,
         }
@@ -2133,7 +2132,7 @@ impl TypeChecker {
             ok: else_ok,
             err: else_err,
         };
-        if self.types_compatible(&then_ty, &else_ty) {
+        if Self::types_compatible(&then_ty, &else_ty) {
             self.merge_if_inners(if_span, &then_ty, then_inners, else_inners);
             then_ty
         } else if then_ty == SimpleType::Unknown {
@@ -2321,7 +2320,7 @@ impl TypeChecker {
                 if matches!(right, SimpleType::Unknown) && !matches!(left, SimpleType::Unknown) {
                     return Some(left);
                 }
-                if !self.types_compatible(&left, &right) {
+                if !Self::types_compatible(&left, &right) {
                     self.push_error(
                         format!(
                             "{}: expected {} but got {}",
@@ -2426,7 +2425,7 @@ impl TypeChecker {
 
         for arm in arms {
             self.push_scope();
-            let coverage_pattern = self.unwrap_binding_pattern(&arm.pattern);
+            let coverage_pattern = Self::unwrap_binding_pattern(&arm.pattern);
             if arm.guard.is_none() {
                 match coverage_pattern {
                     at_syntax::MatchPattern::Int(value, _) => {
@@ -2456,7 +2455,7 @@ impl TypeChecker {
                     at_syntax::MatchPattern::Tuple { items, .. } => {
                         if let SimpleType::Tuple(inner_items) = &value_ty {
                             if items.len() == inner_items.len()
-                                && items.iter().all(|item| self.pattern_is_catch_all(item))
+                                && items.iter().all(|item| Self::pattern_is_catch_all(item))
                             {
                                 has_wildcard = true;
                             }
@@ -2568,7 +2567,7 @@ impl TypeChecker {
                 let mut has_false = false;
                 for arm in arms {
                     if arm.guard.is_none() {
-                        let coverage_pattern = self.unwrap_binding_pattern(&arm.pattern);
+                        let coverage_pattern = Self::unwrap_binding_pattern(&arm.pattern);
                         if let at_syntax::MatchPattern::Bool(value, _) = coverage_pattern {
                             if *value {
                                 has_true = true;
@@ -2644,7 +2643,7 @@ impl TypeChecker {
                 let return_ty = if sig.type_params.is_empty() {
                     sig.return_ty
                 } else {
-                    self.apply_type_params(&sig.return_ty, &env)
+                    Self::apply_type_params(&sig.return_ty, &env)
                 };
                 return if sig.is_async {
                     SimpleType::Future(Box::new(return_ty))
@@ -2713,7 +2712,7 @@ impl TypeChecker {
                     let return_ty = if sig.type_params.is_empty() {
                         sig.return_ty
                     } else {
-                        self.apply_type_params(&sig.return_ty, &env)
+                        Self::apply_type_params(&sig.return_ty, &env)
                     };
                     return if sig.is_async {
                         SimpleType::Future(Box::new(return_ty))
@@ -2811,26 +2810,23 @@ impl TypeChecker {
         at_syntax::builtin_capability(base, name)
     }
 
-    #[allow(clippy::only_used_in_recursion)]
     fn unwrap_binding_pattern<'a>(
-        &self,
         pattern: &'a at_syntax::MatchPattern,
     ) -> &'a at_syntax::MatchPattern {
         match pattern {
             at_syntax::MatchPattern::Binding { pattern, .. } => {
-                self.unwrap_binding_pattern(pattern)
+                Self::unwrap_binding_pattern(pattern)
             }
             _ => pattern,
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn pattern_is_catch_all(&self, pattern: &at_syntax::MatchPattern) -> bool {
+    fn pattern_is_catch_all(pattern: &at_syntax::MatchPattern) -> bool {
         match pattern {
             at_syntax::MatchPattern::Wildcard(_) => true,
-            at_syntax::MatchPattern::Binding { pattern, .. } => self.pattern_is_catch_all(pattern),
+            at_syntax::MatchPattern::Binding { pattern, .. } => Self::pattern_is_catch_all(pattern),
             at_syntax::MatchPattern::Tuple { items, .. } => {
-                items.iter().all(|item| self.pattern_is_catch_all(item))
+                items.iter().all(|item| Self::pattern_is_catch_all(item))
             }
             _ => false,
         }
@@ -3116,7 +3112,7 @@ impl TypeChecker {
         for (index, arg) in args.iter().enumerate() {
             let expected_raw = sig.params.get(index);
             // Resolve type parameters so closure inference sees concrete types.
-            let expected_resolved = expected_raw.map(|e| self.apply_type_params(e, env));
+            let expected_resolved = expected_raw.map(|e| Self::apply_type_params(e, env));
 
             // When the expected param is a function type and the argument is a
             // closure literal, infer the closure's param types from the expected
@@ -3198,60 +3194,59 @@ impl TypeChecker {
         }
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn apply_type_params(&self, ty: &SimpleType, env: &HashMap<String, SimpleType>) -> SimpleType {
+    fn apply_type_params(ty: &SimpleType, env: &HashMap<String, SimpleType>) -> SimpleType {
         match ty {
             SimpleType::TypeParam(name) => env.get(name).cloned().unwrap_or(SimpleType::Unknown),
             SimpleType::Array(inner) => {
-                SimpleType::Array(Box::new(self.apply_type_params(inner, env)))
+                SimpleType::Array(Box::new(Self::apply_type_params(inner, env)))
             }
             SimpleType::Option(inner) => {
-                SimpleType::Option(Box::new(self.apply_type_params(inner, env)))
+                SimpleType::Option(Box::new(Self::apply_type_params(inner, env)))
             }
             SimpleType::Result(ok, err) => SimpleType::Result(
-                Box::new(self.apply_type_params(ok, env)),
-                Box::new(self.apply_type_params(err, env)),
+                Box::new(Self::apply_type_params(ok, env)),
+                Box::new(Self::apply_type_params(err, env)),
             ),
             SimpleType::Function(params, ret) => SimpleType::Function(
                 params
                     .iter()
-                    .map(|param| self.apply_type_params(param, env))
+                    .map(|param| Self::apply_type_params(param, env))
                     .collect(),
-                Box::new(self.apply_type_params(ret, env)),
+                Box::new(Self::apply_type_params(ret, env)),
             ),
             SimpleType::Tuple(items) => SimpleType::Tuple(
                 items
                     .iter()
-                    .map(|item| self.apply_type_params(item, env))
+                    .map(|item| Self::apply_type_params(item, env))
                     .collect(),
             ),
             SimpleType::Map(key, value) => SimpleType::Map(
-                Box::new(self.apply_type_params(key, env)),
-                Box::new(self.apply_type_params(value, env)),
+                Box::new(Self::apply_type_params(key, env)),
+                Box::new(Self::apply_type_params(value, env)),
             ),
             SimpleType::Future(inner) => {
-                SimpleType::Future(Box::new(self.apply_type_params(inner, env)))
+                SimpleType::Future(Box::new(Self::apply_type_params(inner, env)))
             }
             SimpleType::Union(types) => SimpleType::Union(
                 types
                     .iter()
-                    .map(|ty| self.apply_type_params(ty, env))
+                    .map(|ty| Self::apply_type_params(ty, env))
                     .collect(),
             ),
             SimpleType::Intersection(types) => SimpleType::Intersection(
                 types
                     .iter()
-                    .map(|ty| self.apply_type_params(ty, env))
+                    .map(|ty| Self::apply_type_params(ty, env))
                     .collect(),
             ),
             SimpleType::Custom(name, args) => SimpleType::Custom(
                 name.clone(),
                 args.iter()
-                    .map(|arg| self.apply_type_params(arg, env))
+                    .map(|arg| Self::apply_type_params(arg, env))
                     .collect(),
             ),
             SimpleType::Generator(inner) => {
-                SimpleType::Generator(Box::new(self.apply_type_params(inner, env)))
+                SimpleType::Generator(Box::new(Self::apply_type_params(inner, env)))
             }
             SimpleType::Int
             | SimpleType::Float
@@ -4006,7 +4001,7 @@ impl TypeChecker {
         message: &str,
         span: Option<Span>,
     ) -> bool {
-        if self.types_compatible(expected, found) {
+        if Self::types_compatible(expected, found) {
             return true;
         }
         self.push_error(
@@ -4031,7 +4026,7 @@ impl TypeChecker {
         if matches!(expected, SimpleType::Unknown) || matches!(found, SimpleType::Unknown) {
             return;
         }
-        if !self.types_compatible(expected, found) && !self.types_compatible(found, expected) {
+        if !Self::types_compatible(expected, found) && !Self::types_compatible(found, expected) {
             self.push_error(
                 format!(
                     "{}: expected {}, got {}",
@@ -4544,11 +4539,10 @@ impl TypeChecker {
         env
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn infer_type_param_name(&self, ty: &TypeRef, params: &HashSet<String>) -> Option<String> {
+    fn infer_type_param_name(ty: &TypeRef, params: &HashSet<String>) -> Option<String> {
         match ty {
             TypeRef::Named { name, .. } if params.contains(&name.name) => Some(name.name.clone()),
-            TypeRef::Qualified { ty, .. } => self.infer_type_param_name(ty, params),
+            TypeRef::Qualified { ty, .. } => Self::infer_type_param_name(ty, params),
             _ => None,
         }
     }
@@ -4659,7 +4653,7 @@ impl TypeChecker {
                 self.push_error(format!("cyclic type alias: {}", name.name), Some(name.span));
                 return None;
             }
-            if self.type_ref_contains_name(&alias, &name.name) {
+            if Self::type_ref_contains_name(&alias, &name.name) {
                 self.push_error(
                     format!("recursive type alias: {}", name.name),
                     Some(name.span),
@@ -4677,29 +4671,28 @@ impl TypeChecker {
         None
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn type_ref_contains_name(&self, ty: &TypeRef, target: &str) -> bool {
+    fn type_ref_contains_name(ty: &TypeRef, target: &str) -> bool {
         match ty {
-            TypeRef::Qualified { ty, .. } => self.type_ref_contains_name(ty, target),
+            TypeRef::Qualified { ty, .. } => Self::type_ref_contains_name(ty, target),
             TypeRef::Named { name, args } => {
                 if name.name == target {
                     return true;
                 }
                 args.iter()
-                    .any(|arg| self.type_ref_contains_name(arg, target))
+                    .any(|arg| Self::type_ref_contains_name(arg, target))
             }
             TypeRef::Union { types }
             | TypeRef::Intersection { types }
             | TypeRef::Tuple { items: types, .. } => types
                 .iter()
-                .any(|ty| self.type_ref_contains_name(ty, target)),
+                .any(|ty| Self::type_ref_contains_name(ty, target)),
             TypeRef::Function {
                 params, return_ty, ..
             } => {
                 params
                     .iter()
-                    .any(|ty| self.type_ref_contains_name(ty, target))
-                    || self.type_ref_contains_name(return_ty, target)
+                    .any(|ty| Self::type_ref_contains_name(ty, target))
+                    || Self::type_ref_contains_name(return_ty, target)
             }
         }
     }
@@ -4783,10 +4776,10 @@ impl TypeChecker {
         if matches!(right, SimpleType::Unknown) {
             return left.clone();
         }
-        if self.types_compatible(left, right) {
+        if Self::types_compatible(left, right) {
             return right.clone();
         }
-        if self.types_compatible(right, left) {
+        if Self::types_compatible(right, left) {
             return left.clone();
         }
         match (left, right) {

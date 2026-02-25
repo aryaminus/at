@@ -5,3 +5,24 @@ fn version() -> string {
 fn now() -> int needs { time } {
     return time.now();
 }
+
+fn min(a: int, b: int) -> int {
+    if a < b { return a; }
+    return b;
+}
+
+fn max(a: int, b: int) -> int {
+    if a > b { return a; }
+    return b;
+}
+
+fn abs(n: int) -> int {
+    if n < 0 { return -n; }
+    return n;
+}
+
+fn clamp(value: int, low: int, high: int) -> int {
+    if value < low { return low; }
+    if value > high { return high; }
+    return value;
+}
