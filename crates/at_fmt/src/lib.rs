@@ -236,7 +236,7 @@ fn format_function(
         out.push('}');
     }
     out.push(' ');
-    out.push_str("{");
+    out.push('{');
     out.push('\n');
     for stmt in &func.body {
         comment_state.emit_until(out, stmt_span(stmt));
@@ -268,10 +268,7 @@ fn stmt_span(stmt: &Stmt) -> usize {
         Stmt::Defer { expr, .. } => expr_span(expr).unwrap_or(0),
         Stmt::With { name, .. } => name.span.start,
         Stmt::Yield { expr, .. } => expr_span(expr).unwrap_or(0),
-        Stmt::Block { stmts, .. } => stmts
-            .first()
-            .and_then(|stmt| Some(stmt_span(stmt)))
-            .unwrap_or(0),
+        Stmt::Block { stmts, .. } => stmts.first().map(stmt_span).unwrap_or(0),
         Stmt::Test { .. } => 0,
     }
 }
@@ -559,7 +556,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}");
+            out.push('}');
             comment_state.emit_inline_between(out, while_span.start, while_span.end);
             if !out.ends_with('\n') {
                 out.push('\n');
@@ -620,7 +617,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 format_stmt(stmt, out, indent + 4, comment_state);
             }
             indent_to(out, indent);
-            out.push_str("}");
+            out.push('}');
             comment_state.emit_inline_between(out, for_span.start, for_span.end);
             if !out.ends_with('\n') {
                 out.push('\n');
@@ -707,7 +704,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             indent_to(out, indent);
             out.push('}');
             if !stmts.is_empty() {
-                let last = stmt_span(stmts.last().unwrap());
+                let last = stmt_span(stmts.last().expect("stmts non-empty"));
                 comment_state.emit_inline_between(out, last, last + 1);
             }
             if !out.ends_with('\n') {
@@ -726,7 +723,7 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
             indent_to(out, indent);
             out.push('}');
             if !body.is_empty() {
-                let last = stmt_span(body.last().unwrap());
+                let last = stmt_span(body.last().expect("body non-empty"));
                 comment_state.emit_inline_between(out, last, last + 1);
             }
             if !out.ends_with('\n') {
@@ -1483,11 +1480,11 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
                 collect_needs_expr(&field.value, needs, import_aliases);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                collect_needs_expr(expr, needs, import_aliases);
-            }
-        }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => collect_needs_expr(expr, needs, import_aliases),
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Closure { body, .. } => {
             collect_needs_expr(body, needs, import_aliases);
         }

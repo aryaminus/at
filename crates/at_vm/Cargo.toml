@@ -13,6 +13,7 @@ bincode = "1"
 sha2 = "0.10"
 hex = "0.4"
 ureq = "2"
+indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 at_parser = { path = "../at_parser" }

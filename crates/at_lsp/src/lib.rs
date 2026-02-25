@@ -1,26 +1,25 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 
-use at_lint;
 use at_parser::{parse_module, parse_module_with_errors, ParseError};
 use at_syntax::{Module, Span, TypeRef};
 use at_vm::Compiler;
+use crossbeam_channel::RecvTimeoutError;
 use lsp_server::{Connection, Message, Notification, Response};
 use lsp_types::{
     CodeAction, CodeActionParams, CompletionItem, CompletionItemKind, CompletionOptions,
-    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
-    DocumentHighlightKind, DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, Documentation, FoldingRange, FoldingRangeKind, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintParams, Location,
-    MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position, Range,
-    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
-    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentChangeOperation,
+    DocumentChanges, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Documentation, FoldingRange,
+    FoldingRangeKind, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
+    InlayHintParams, Location, MarkupContent, MarkupKind, OptionalVersionedTextDocumentIdentifier,
+    ParameterInformation, ParameterLabel, Position, Range, SemanticToken, SemanticTokenType,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, SignatureInformation, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentEdit, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Uri, WorkspaceFileOperationsServerCapabilities,
     WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
@@ -30,18 +29,21 @@ use sha2::{Digest, Sha256};
 const REMOTE_DIAGNOSTIC_CODE: &str = "LSP001";
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 150;
 static WORKSPACE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+const EMBEDDED_STDLIB_SOURCE: &str = include_str!("../../../stdlib/std.at");
+static REMOTE_FETCHES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static REMOTE_FETCH_COMPLETIONS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+type UriKey = String;
 
 #[derive(Default)]
 struct ServerState {
-    docs: HashMap<Uri, String>,
+    docs: HashMap<UriKey, String>,
     module_cache: HashMap<String, CachedModule>,
-    doc_cache: HashMap<Uri, DocCacheEntry>,
-    diagnostics_cache: HashMap<Uri, u64>,
-    diagnostics_last_publish: HashMap<Uri, Instant>,
+    doc_cache: HashMap<UriKey, DocCacheEntry>,
+    diagnostics_cache: HashMap<UriKey, String>,
+    diagnostics_last_publish: HashMap<UriKey, Instant>,
     cancelled_requests: HashSet<String>,
 }
-
-// Progress entry is stored as a token -> label string.
 
 impl ServerState {
     fn new(params: InitializeParams) -> Self {
@@ -65,26 +67,12 @@ impl ServerState {
     }
 }
 
-fn send_progress(
-    connection: &Connection,
-    token: &str,
-    title: &str,
-    percentage: Option<u32>,
-) -> Result<(), String> {
-    let value = serde_json::json!({
-        "token": token,
-        "value": {
-            "kind": "report",
-            "message": title,
-            "percentage": percentage,
-        }
-    });
-    let notification = Notification::new("$/progress".to_string(), value);
-    connection
-        .sender
-        .send(Message::Notification(notification))
-        .map_err(|err| err.to_string())?;
-    Ok(())
+fn uri_key(uri: &Uri) -> UriKey {
+    uri.to_string()
+}
+
+fn uri_from_key(key: &str) -> Option<Uri> {
+    key.parse().ok()
 }
 
 pub fn run_stdio() -> Result<(), String> {
@@ -182,7 +170,16 @@ pub fn run_stdio() -> Result<(), String> {
 
     let mut state = ServerState::new(initialize_params);
 
-    for message in &connection.receiver {
+    loop {
+        flush_remote_fetch_completions(&connection, &mut state)?;
+        let message = match connection
+            .receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+        {
+            Ok(message) => message,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match message {
             Message::Request(request) => {
                 if connection
@@ -209,9 +206,7 @@ pub fn run_stdio() -> Result<(), String> {
                 }
             }
             Message::Notification(notification) => {
-                if let Some((url, text)) =
-                    handle_notification(&connection, &mut state, &notification)?
-                {
+                if let Some((url, text)) = handle_notification(&mut state, &notification)? {
                     let module = get_cached_module(&text, &url, &mut state.doc_cache);
                     publish_diagnostics(
                         &connection,
@@ -231,8 +226,34 @@ pub fn run_stdio() -> Result<(), String> {
     Ok(())
 }
 
-fn handle_notification(
+fn flush_remote_fetch_completions(
     connection: &Connection,
+    state: &mut ServerState,
+) -> Result<(), String> {
+    let completed = take_remote_fetch_completions();
+    if completed.is_empty() {
+        return Ok(());
+    }
+    let docs: Vec<(Uri, String)> = state
+        .docs
+        .iter()
+        .filter_map(|(key, text)| uri_from_key(key).map(|uri| (uri, text.clone())))
+        .collect();
+    for (url, text) in docs {
+        let module = get_cached_module(&text, &url, &mut state.doc_cache);
+        publish_diagnostics(
+            connection,
+            &url,
+            &text,
+            module.as_ref(),
+            &mut state.diagnostics_cache,
+            &mut state.diagnostics_last_publish,
+        )?;
+    }
+    Ok(())
+}
+
+fn handle_notification(
     state: &mut ServerState,
     notification: &Notification,
 ) -> Result<Option<(Uri, String)>, String> {
@@ -243,9 +264,7 @@ fn handle_notification(
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
             let text = params.text_document.text;
-            state.docs.insert(url.clone(), text.clone());
-            let token = format!("diagnostics:{:?}", url);
-            let _ = send_progress(connection, &token, "Diagnostics updated", Some(100));
+            state.docs.insert(uri_key(&url), text.clone());
             Ok(Some((url, text)))
         }
         "textDocument/didChange" => {
@@ -253,10 +272,9 @@ fn handle_notification(
                 serde_json::from_value(notification.params.clone())
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
-            let text = merge_changes(state.docs.get(&url), params.content_changes);
-            state.docs.insert(url.clone(), text.clone());
-            let token = format!("diagnostics:{:?}", url);
-            let _ = send_progress(connection, &token, "Diagnostics updated", Some(100));
+            let key = uri_key(&url);
+            let text = merge_changes(state.docs.get(&key), params.content_changes);
+            state.docs.insert(key, text.clone());
             Ok(Some((url, text)))
         }
         "textDocument/didSave" => {
@@ -264,11 +282,12 @@ fn handle_notification(
                 serde_json::from_value(notification.params.clone())
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
+            let key = uri_key(&url);
             let text = if let Some(text) = params.text {
-                state.docs.insert(url.clone(), text.clone());
+                state.docs.insert(key, text.clone());
                 text
             } else {
-                state.docs.get(&url).cloned().unwrap_or_default()
+                state.docs.get(&key).cloned().unwrap_or_default()
             };
             Ok(Some((url, text)))
         }
@@ -277,10 +296,11 @@ fn handle_notification(
                 serde_json::from_value(notification.params.clone())
                     .map_err(|err| err.to_string())?;
             let url = params.text_document.uri;
-            state.docs.remove(&url);
-            state.doc_cache.remove(&url);
-            state.diagnostics_cache.remove(&url);
-            state.diagnostics_last_publish.remove(&url);
+            let key = uri_key(&url);
+            state.docs.remove(&key);
+            state.doc_cache.remove(&key);
+            state.diagnostics_cache.remove(&key);
+            state.diagnostics_last_publish.remove(&key);
             Ok(None)
         }
         "$/cancelRequest" => {
@@ -316,10 +336,14 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let hover = provide_hover(text, module.as_ref(), &mut state.module_cache, &params);
-                Response::new_ok(request.id.clone(), serde_json::to_value(hover).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(hover).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -333,7 +357,8 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let definition = provide_definition(
                     text,
@@ -344,7 +369,7 @@ fn handle_request(
                 );
                 Response::new_ok(
                     request.id.clone(),
-                    serde_json::to_value(definition).unwrap(),
+                    serde_json::to_value(definition).expect("serialize LSP response"),
                 )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
@@ -355,7 +380,8 @@ fn handle_request(
             let params: CompletionParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document_position.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let completion = provide_completion(
                     text,
@@ -366,7 +392,7 @@ fn handle_request(
                 );
                 Response::new_ok(
                     request.id.clone(),
-                    serde_json::to_value(completion).unwrap(),
+                    serde_json::to_value(completion).expect("serialize LSP response"),
                 )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
@@ -377,10 +403,14 @@ fn handle_request(
             let params: InlayHintParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let hints = provide_inlay_hints(text, module.as_ref());
-                Response::new_ok(request.id.clone(), serde_json::to_value(hints).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(hints).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -390,9 +420,13 @@ fn handle_request(
             let params: lsp_types::CodeActionParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let actions = provide_code_actions(text, &url, &params);
-                Response::new_ok(request.id.clone(), serde_json::to_value(actions).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(actions).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -406,11 +440,15 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let help =
                     provide_signature_help(text, module.as_ref(), &mut state.module_cache, &params);
-                Response::new_ok(request.id.clone(), serde_json::to_value(help).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(help).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -420,10 +458,14 @@ fn handle_request(
             let params: DocumentSymbolParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let symbols = provide_document_symbols(text, module.as_ref());
-                Response::new_ok(request.id.clone(), serde_json::to_value(symbols).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(symbols).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -433,9 +475,13 @@ fn handle_request(
             let params: SemanticTokensParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let tokens = provide_semantic_tokens(text);
-                Response::new_ok(request.id.clone(), serde_json::to_value(tokens).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(tokens).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -449,11 +495,12 @@ fn handle_request(
                 .text_document
                 .uri
                 .clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let highlights = provide_document_highlights(text, &params);
                 Response::new_ok(
                     request.id.clone(),
-                    serde_json::to_value(highlights).unwrap(),
+                    serde_json::to_value(highlights).expect("serialize LSP response"),
                 )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
@@ -464,10 +511,14 @@ fn handle_request(
             let params: FoldingRangeParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let module = get_cached_module(text, &url, &mut state.doc_cache);
                 let ranges = provide_folding_ranges(text, module.as_ref());
-                Response::new_ok(request.id.clone(), serde_json::to_value(ranges).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(ranges).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -477,9 +528,13 @@ fn handle_request(
             let params: lsp_types::DocumentFormattingParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let edits = provide_formatting(text, None);
-                Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(edits).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -489,9 +544,13 @@ fn handle_request(
             let params: lsp_types::DocumentRangeFormattingParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let edits = provide_formatting(text, Some(params.range));
-                Response::new_ok(request.id.clone(), serde_json::to_value(edits).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(edits).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -501,9 +560,13 @@ fn handle_request(
             let params: lsp_types::ReferenceParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document_position.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let locations = provide_references(text, &url, &params, &state.docs);
-                Response::new_ok(request.id.clone(), serde_json::to_value(locations).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(locations).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -513,9 +576,13 @@ fn handle_request(
             let params: lsp_types::TextDocumentPositionParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let prepare = provide_prepare_rename(text, &params);
-                Response::new_ok(request.id.clone(), serde_json::to_value(prepare).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(prepare).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -525,9 +592,13 @@ fn handle_request(
             let params: lsp_types::RenameParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let url = params.text_document_position.text_document.uri.clone();
-            let response = if let Some(text) = state.docs.get(&url) {
+            let key = uri_key(&url);
+            let response = if let Some(text) = state.docs.get(&key) {
                 let edit = provide_rename(text, &url, &params, &state.docs);
-                Response::new_ok(request.id.clone(), serde_json::to_value(edit).unwrap())
+                Response::new_ok(
+                    request.id.clone(),
+                    serde_json::to_value(edit).expect("serialize LSP response"),
+                )
             } else {
                 Response::new_ok(request.id.clone(), serde_json::Value::Null)
             };
@@ -537,8 +608,10 @@ fn handle_request(
             let params: WorkspaceSymbolParams =
                 serde_json::from_value(request.params.clone()).map_err(|err| err.to_string())?;
             let symbols = provide_workspace_symbols(&params, &state.docs);
-            let response =
-                Response::new_ok(request.id.clone(), serde_json::to_value(symbols).unwrap());
+            let response = Response::new_ok(
+                request.id.clone(),
+                serde_json::to_value(symbols).expect("serialize LSP response"),
+            );
             Ok(Some(response))
         }
         _ => Ok(None),
@@ -727,63 +800,34 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
         let mut name = String::new();
         name.push_str("fn ");
         name.push_str(&func.name.name);
-        #[allow(deprecated)]
-        let symbol = DocumentSymbol {
-            name,
-            detail: None,
-            kind: SymbolKind::FUNCTION,
-            range,
-            selection_range: range,
-            children: None,
-            tags: None,
-            deprecated: None,
-        };
-        symbols.push(symbol);
+        symbols.push(make_document_symbol(name, SymbolKind::FUNCTION, range));
     }
 
     for stmt in &module.stmts {
         match stmt {
             at_syntax::Stmt::Struct { name, .. } => {
                 let range = span_to_range(text, name.span);
-                #[allow(deprecated)]
-                symbols.push(DocumentSymbol {
-                    name: name.name.clone(),
-                    detail: None,
-                    kind: SymbolKind::STRUCT,
+                symbols.push(make_document_symbol(
+                    name.name.clone(),
+                    SymbolKind::STRUCT,
                     range,
-                    selection_range: range,
-                    children: None,
-                    tags: None,
-                    deprecated: None,
-                });
+                ));
             }
             at_syntax::Stmt::Enum { name, .. } => {
                 let range = span_to_range(text, name.span);
-                #[allow(deprecated)]
-                symbols.push(DocumentSymbol {
-                    name: name.name.clone(),
-                    detail: None,
-                    kind: SymbolKind::ENUM,
+                symbols.push(make_document_symbol(
+                    name.name.clone(),
+                    SymbolKind::ENUM,
                     range,
-                    selection_range: range,
-                    children: None,
-                    tags: None,
-                    deprecated: None,
-                });
+                ));
             }
             at_syntax::Stmt::TypeAlias { name, .. } => {
                 let range = span_to_range(text, name.span);
-                #[allow(deprecated)]
-                symbols.push(DocumentSymbol {
-                    name: name.name.clone(),
-                    detail: None,
-                    kind: SymbolKind::TYPE_PARAMETER,
+                symbols.push(make_document_symbol(
+                    name.name.clone(),
+                    SymbolKind::TYPE_PARAMETER,
                     range,
-                    selection_range: range,
-                    children: None,
-                    tags: None,
-                    deprecated: None,
-                });
+                ));
             }
             at_syntax::Stmt::Test { name, .. } => {
                 let range = Range {
@@ -796,22 +840,29 @@ fn provide_document_symbols(text: &str, module: Option<&Module>) -> Option<Docum
                         character: 0,
                     },
                 };
-                #[allow(deprecated)]
-                symbols.push(DocumentSymbol {
-                    name: format!("test {}", name),
-                    detail: None,
-                    kind: SymbolKind::METHOD,
+                symbols.push(make_document_symbol(
+                    format!("test {}", name),
+                    SymbolKind::METHOD,
                     range,
-                    selection_range: range,
-                    children: None,
-                    tags: None,
-                    deprecated: None,
-                });
+                ));
             }
             _ => {}
         }
     }
     Some(DocumentSymbolResponse::Nested(symbols))
+}
+
+fn make_document_symbol(name: String, kind: SymbolKind, range: Range) -> DocumentSymbol {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "detail": null,
+        "kind": kind,
+        "tags": null,
+        "range": range,
+        "selectionRange": range,
+        "children": null,
+    }))
+    .expect("document symbol json should deserialize")
 }
 
 fn semantic_tokens_legend() -> SemanticTokensLegend {
@@ -861,7 +912,7 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
 
     let mut offset = 0usize;
     while offset < text.len() {
-        let ch = text[offset..].chars().next().unwrap();
+        let ch = text[offset..].chars().next().expect("offset < text.len()");
         if ch.is_whitespace() {
             offset += ch.len_utf8();
             continue;
@@ -871,7 +922,7 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
             let start = offset_to_position(text, offset);
             offset += 1;
             while offset < text.len() {
-                let next = text[offset..].chars().next().unwrap();
+                let next = text[offset..].chars().next().expect("offset < text.len()");
                 offset += next.len_utf8();
                 if next == '"' {
                     break;
@@ -887,7 +938,7 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
             let start = offset;
             offset += ch.len_utf8();
             while offset < text.len() {
-                let next = text[offset..].chars().next().unwrap();
+                let next = text[offset..].chars().next().expect("offset < text.len()");
                 if !next.is_ascii_digit() && next != '.' {
                     break;
                 }
@@ -904,7 +955,7 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
             let start = offset;
             offset += ch.len_utf8();
             while offset < text.len() {
-                let next = text[offset..].chars().next().unwrap();
+                let next = text[offset..].chars().next().expect("offset < text.len()");
                 if !is_ident_continue(next) {
                     break;
                 }
@@ -914,9 +965,9 @@ fn provide_semantic_tokens(text: &str) -> SemanticTokens {
             let token_type = match ident {
                 "fn" | "let" | "set" | "using" | "if" | "else" | "match" | "while" | "for"
                 | "in" | "break" | "continue" | "return" | "import" | "as" | "struct" | "enum"
-                | "type" | "test" | "true" | "false" | "needs" | "tool" => {
-                    SemanticTokenType::KEYWORD
-                }
+                | "type" | "test" | "true" | "false" | "needs" | "tool" | "const" | "mut"
+                | "async" | "await" | "pub" | "throw" | "raise" | "defer" | "with" | "yield"
+                | "try" | "catch" | "finally" => SemanticTokenType::KEYWORD,
                 _ => SemanticTokenType::VARIABLE,
             };
             let start_pos = offset_to_position(text, start);
@@ -1027,32 +1078,41 @@ fn provide_folding_ranges(text: &str, module: Option<&Module>) -> Option<Vec<Fol
 }
 
 fn provide_formatting(text: &str, range: Option<Range>) -> Vec<TextEdit> {
-    let module = match parse_module(text) {
-        Ok(module) => module,
-        Err(_) => return Vec::new(),
-    };
-    let formatted = at_fmt::format_module(&module);
     match range {
         Some(range) => {
             let start = position_to_offset(text, range.start);
             let end = position_to_offset(text, range.end);
             if start <= end && end <= text.len() {
-                let new_text = formatted.clone();
+                // Range formatting must not replace content outside the requested range.
+                // If the selected slice is not independently parseable, skip edits.
+                let selected = &text[start..end];
+                let module = match parse_module(selected) {
+                    Ok(module) => module,
+                    Err(_) => return Vec::new(),
+                };
+                let new_text = at_fmt::format_module(&module);
                 vec![TextEdit { range, new_text }]
             } else {
                 Vec::new()
             }
         }
-        None => vec![TextEdit {
-            range: Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
+        None => {
+            let module = match parse_module(text) {
+                Ok(module) => module,
+                Err(_) => return Vec::new(),
+            };
+            let formatted = at_fmt::format_module(&module);
+            vec![TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: offset_to_position(text, text.len()),
                 },
-                end: offset_to_position(text, text.len()),
-            },
-            new_text: formatted,
-        }],
+                new_text: formatted,
+            }]
+        }
     }
 }
 
@@ -1223,7 +1283,9 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
     let mut actions = Vec::new();
 
     let config_source = load_lint_config_for_uri(url);
-    if let Err(lint_errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
+    if let Err(lint_errors) =
+        at_lint::lint_module_with_source_and_config(&module, Some(text), config_source.as_deref())
+    {
         let start = params.range.start;
         let end = params.range.end;
 
@@ -1239,21 +1301,22 @@ fn provide_code_actions(text: &str, url: &Uri, params: &CodeActionParams) -> Vec
                         kind: Some(lsp_types::CodeActionKind::QUICKFIX),
                         diagnostics: Some(vec![diagnostic]),
                         edit: Some(lsp_types::WorkspaceEdit {
-                            changes: Some({
-                                let mut map = HashMap::new();
-                                map.insert(
-                                    url.clone(),
-                                    vec![lsp_types::TextEdit {
+                            changes: None,
+                            document_changes: Some(DocumentChanges::Operations(vec![
+                                DocumentChangeOperation::Edit(TextDocumentEdit {
+                                    text_document: OptionalVersionedTextDocumentIdentifier {
+                                        uri: url.clone(),
+                                        version: None,
+                                    },
+                                    edits: vec![lsp_types::OneOf::Left(lsp_types::TextEdit {
                                         range: Range {
                                             start: fix_start,
                                             end: fix_end,
                                         },
                                         new_text: fix.replacement.clone(),
-                                    }],
-                                );
-                                map
-                            }),
-                            document_changes: None,
+                                    })],
+                                }),
+                            ])),
                             change_annotations: None,
                         }),
                         command: None,
@@ -1290,7 +1353,7 @@ struct CachedModule {
 
 #[derive(Clone)]
 struct DocCacheEntry {
-    hash: u64,
+    hash: String,
     module: Module,
 }
 
@@ -1382,17 +1445,18 @@ fn build_cached_module(module: &Module, source: String, mtime: Option<SystemTime
 fn get_cached_module(
     text: &str,
     uri: &Uri,
-    cache: &mut HashMap<Uri, DocCacheEntry>,
+    cache: &mut HashMap<UriKey, DocCacheEntry>,
 ) -> Option<Module> {
+    let key = uri_key(uri);
     let hash = hash_text(text);
-    if let Some(entry) = cache.get(uri) {
+    if let Some(entry) = cache.get(&key) {
         if entry.hash == hash {
             return Some(entry.module.clone());
         }
     }
     let module = parse_module(text).ok()?;
     cache.insert(
-        uri.clone(),
+        key,
         DocCacheEntry {
             hash,
             module: module.clone(),
@@ -1401,10 +1465,8 @@ fn get_cached_module(
     Some(module)
 }
 
-fn hash_text(text: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
+fn hash_text(text: &str) -> String {
+    hash_contents(text)
 }
 
 fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
@@ -1413,13 +1475,9 @@ fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
     }
 
     if path == "std" || path == "std.at" {
-        let root = workspace_root().or_else(|| std::env::current_dir().ok())?;
-        return Some(
-            root.join("stdlib")
-                .join("std.at")
-                .to_string_lossy()
-                .to_string(),
-        );
+        return ensure_stdlib_path()
+            .map(|path| path.to_string_lossy().to_string())
+            .ok();
     }
 
     let base_path = uri_to_path(base_uri)?;
@@ -1431,6 +1489,20 @@ fn resolve_import_path(base_uri: &Uri, path: &str) -> Option<String> {
         base_dir.join(candidate)
     };
     Some(resolved.to_string_lossy().to_string())
+}
+
+fn ensure_stdlib_path() -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("at").join("stdlib");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("std.at");
+    let write_file = match std::fs::read_to_string(&path) {
+        Ok(existing) => existing != EMBEDDED_STDLIB_SOURCE,
+        Err(_) => true,
+    };
+    if write_file {
+        std::fs::write(&path, EMBEDDED_STDLIB_SOURCE)?;
+    }
+    Ok(path)
 }
 
 fn workspace_root() -> Option<std::path::PathBuf> {
@@ -1457,7 +1529,7 @@ fn load_lint_config_for_uri(url: &Uri) -> Option<String> {
     None
 }
 
-fn remote_pending_message(resolved: &str) -> Option<String> {
+fn unresolved_remote_import_message(resolved: &str) -> Option<String> {
     if resolved.starts_with("http://") || resolved.starts_with("https://") {
         return Some(format!("remote import {resolved} is pending download",));
     }
@@ -1540,8 +1612,7 @@ fn resolve_legacy_cached_path(root: &std::path::Path, url: &str) -> Option<Strin
     let legacy = url
         .replace("https://", "")
         .replace("http://", "")
-        .replace('/', "_")
-        .replace(':', "_");
+        .replace(['/', ':'], "_");
     let path = root.join(".at").join("cache").join(legacy);
     if path.exists() {
         return Some(path.to_string_lossy().to_string());
@@ -1562,7 +1633,9 @@ fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Result<String, F
             request = request.set("If-Modified-Since", last_modified);
         }
     }
-    let response = request.call().map_err(FetchError::Http)?;
+    let response = request
+        .call()
+        .map_err(|err| FetchError::Http(Box::new(err)))?;
     let status = response.status();
     if status == 304 {
         if let Some((hash, _, _)) = cached_meta {
@@ -1600,8 +1673,7 @@ fn fetch_and_cache_remote(root: &std::path::Path, url: &str) -> Result<String, F
 }
 
 fn enqueue_remote_fetch(root: std::path::PathBuf, url: String) {
-    static FETCHES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let fetches = FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
+    let fetches = REMOTE_FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
     let mut pending = match fetches.lock() {
         Ok(guard) => guard,
         Err(err) => err.into_inner(),
@@ -1612,13 +1684,31 @@ fn enqueue_remote_fetch(root: std::path::PathBuf, url: String) {
     pending.insert(url.clone());
     std::thread::spawn(move || {
         let _ = fetch_and_cache_remote(&root, &url);
-        let fetches = FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
+        let completions = REMOTE_FETCH_COMPLETIONS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut done = match completions.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        done.push(url.clone());
+        let fetches = REMOTE_FETCHES.get_or_init(|| Mutex::new(HashSet::new()));
         let mut pending = match fetches.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         pending.remove(&url);
     });
+}
+
+fn take_remote_fetch_completions() -> Vec<String> {
+    let completions = REMOTE_FETCH_COMPLETIONS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut done = match completions.lock() {
+        Ok(guard) => guard,
+        Err(err) => err.into_inner(),
+    };
+    if done.is_empty() {
+        return Vec::new();
+    }
+    std::mem::take(&mut *done)
 }
 
 fn hash_contents(contents: &str) -> String {
@@ -1629,7 +1719,7 @@ fn hash_contents(contents: &str) -> String {
 
 #[derive(Debug)]
 enum FetchError {
-    Http(ureq::Error),
+    Http(Box<ureq::Error>),
     Status(u16),
     Io(std::io::Error),
 }
@@ -1780,7 +1870,7 @@ fn completion_prefix_at(text: &str, position: Position) -> String {
     }
     let mut start = offset;
     while start > 0 {
-        let prev = text[..start].chars().next_back().unwrap();
+        let prev = text[..start].chars().next_back().expect("start > 0");
         if !is_ident_continue(prev) {
             break;
         }
@@ -1822,9 +1912,10 @@ fn publish_diagnostics(
     url: &Uri,
     text: &str,
     module: Option<&Module>,
-    cache: &mut HashMap<Uri, u64>,
-    last_publish: &mut HashMap<Uri, Instant>,
+    cache: &mut HashMap<UriKey, String>,
+    last_publish: &mut HashMap<UriKey, Instant>,
 ) -> Result<(), String> {
+    let key = uri_key(url);
     let mut diagnostics = Vec::new();
     let (parsed_module, parse_errors) = match module.cloned() {
         Some(module) => (Some(module), Vec::new()),
@@ -1858,7 +1949,11 @@ fn publish_diagnostics(
             }
         }
         let config_source = load_lint_config_for_uri(url);
-        if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
+        if let Err(errors) = at_lint::lint_module_with_source_and_config(
+            &module,
+            Some(text),
+            config_source.as_deref(),
+        ) {
             for error in errors {
                 diagnostics.push(lint_error_to_diagnostic(text, &error));
             }
@@ -1870,18 +1965,18 @@ fn publish_diagnostics(
     }
 
     let now = Instant::now();
-    if let Some(last) = last_publish.get(url) {
+    if let Some(last) = last_publish.get(&key) {
         if now.duration_since(*last).as_millis() < DIAGNOSTIC_DEBOUNCE_MS as u128 {
             return Ok(());
         }
     }
 
     let hash = hash_diagnostics(&diagnostics);
-    if cache.get(url).copied() == Some(hash) {
+    if cache.get(&key).is_some_and(|entry| entry == &hash) {
         return Ok(());
     }
-    cache.insert(url.clone(), hash);
-    last_publish.insert(url.clone(), now);
+    cache.insert(key.clone(), hash);
+    last_publish.insert(key, now);
 
     let params = lsp_types::PublishDiagnosticsParams {
         uri: url.clone(),
@@ -2028,13 +2123,12 @@ fn function_hover_markdown(
 fn doc_comment_for_span(comments: &[at_syntax::Comment], span: Span) -> Option<String> {
     let mut best: Option<&at_syntax::Comment> = None;
     for comment in comments {
-        if comment.span.end <= span.start {
-            if best
+        if comment.span.end <= span.start
+            && best
                 .map(|current| comment.span.end > current.span.end)
                 .unwrap_or(true)
-            {
-                best = Some(comment);
-            }
+        {
+            best = Some(comment);
         }
     }
     let comment = best?;
@@ -2073,12 +2167,13 @@ fn ranges_overlap(
     starts_before_end && other_starts_before_end
 }
 
-fn hash_diagnostics(diagnostics: &[Diagnostic]) -> u64 {
-    let mut hasher = DefaultHasher::new();
+fn hash_diagnostics(diagnostics: &[Diagnostic]) -> String {
     if let Ok(value) = serde_json::to_vec(diagnostics) {
-        value.hash(&mut hasher);
+        let mut hasher = Sha256::new();
+        hasher.update(value);
+        return hex::encode(hasher.finalize());
     }
-    hasher.finish()
+    String::new()
 }
 
 fn cancel_id_key(id: &lsp_types::NumberOrString) -> String {
@@ -2113,7 +2208,7 @@ fn collect_remote_diagnostics(module: &Module, text: &str, url: &Uri) -> Option<
     for stmt in &module.stmts {
         if let at_syntax::Stmt::Import { path, alias, .. } = stmt {
             let resolved = resolve_import_path(base_uri, path)?;
-            if let Some(message) = remote_pending_message(&resolved) {
+            if let Some(message) = unresolved_remote_import_message(&resolved) {
                 let range = span_to_range(text, alias.span);
                 return Some(Diagnostic {
                     range,
@@ -2140,11 +2235,7 @@ fn parse_error_to_diagnostic(text: &str, err: ParseError) -> Diagnostic {
             expected,
             found,
             span,
-        } => (
-            format!("expected {expected}, found {found:?}"),
-            span,
-            "E001",
-        ),
+        } => (format!("expected {expected}, found {found}"), span, "E001"),
         ParseError::UnterminatedString { span } => {
             ("unterminated string".to_string(), span, "E002")
         }
@@ -2399,31 +2490,7 @@ fn position_to_offset(text: &str, position: Position) -> usize {
 }
 
 fn ident_at_offset(text: &str, offset: usize) -> Option<String> {
-    if offset > text.len() {
-        return None;
-    }
-    let mut start = offset;
-    let mut end = offset;
-
-    while start > 0 {
-        let prev = text[..start].chars().next_back()?;
-        if !is_ident_continue(prev) {
-            break;
-        }
-        start -= prev.len_utf8();
-    }
-
-    while end < text.len() {
-        let next = text[end..].chars().next()?;
-        if !is_ident_continue(next) {
-            break;
-        }
-        end += next.len_utf8();
-    }
-
-    if start == end {
-        return None;
-    }
+    let (start, end) = ident_bounds_at_offset(text, offset)?;
     Some(text[start..end].to_string())
 }
 
@@ -2530,16 +2597,62 @@ fn is_ident_continue(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+fn ident_bounds_at_offset(text: &str, offset: usize) -> Option<(usize, usize)> {
+    if offset > text.len() || text.is_empty() {
+        return None;
+    }
+
+    let mut cursor = offset;
+    let at_cursor = (cursor < text.len())
+        .then(|| text[cursor..].chars().next())
+        .flatten();
+    if !at_cursor.is_some_and(is_ident_continue) {
+        if cursor == 0 {
+            return None;
+        }
+        let prev = text[..cursor]
+            .char_indices()
+            .next_back()
+            .map(|(idx, _)| idx)?;
+        if !text[prev..].chars().next().is_some_and(is_ident_continue) {
+            return None;
+        }
+        cursor = prev;
+    }
+
+    let mut start = cursor;
+    while start > 0 {
+        let prev = text[..start].chars().next_back()?;
+        if !is_ident_continue(prev) {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+
+    let mut end = cursor;
+    while end < text.len() {
+        let next = text[end..].chars().next()?;
+        if !is_ident_continue(next) {
+            break;
+        }
+        end += next.len_utf8();
+    }
+
+    if start == end {
+        return None;
+    }
+    Some((start, end))
+}
+
 fn provide_prepare_rename(
     text: &str,
     params: &lsp_types::TextDocumentPositionParams,
 ) -> Option<lsp_types::PrepareRenameResponse> {
     let position = params.position;
     let offset = position_to_offset(text, position);
-    let name = ident_at_offset(text, offset)?;
-    let start = offset.saturating_sub(name.len());
+    let (start, end) = ident_bounds_at_offset(text, offset)?;
     let before = text[..start].chars().next_back();
-    let after = text[offset..].chars().next();
+    let after = text[end..].chars().next();
     let before_ok = before.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
     let after_ok = after.map(|ch| !is_ident_continue(ch)).unwrap_or(true);
     if !before_ok || !after_ok {
@@ -2547,7 +2660,7 @@ fn provide_prepare_rename(
     }
     let range = Range {
         start: offset_to_position(text, start),
-        end: offset_to_position(text, start + name.len()),
+        end: offset_to_position(text, end),
     };
     Some(lsp_types::PrepareRenameResponse::Range(range))
 }
@@ -2556,7 +2669,7 @@ fn provide_references(
     text: &str,
     url: &Uri,
     params: &lsp_types::ReferenceParams,
-    docs: &HashMap<Uri, String>,
+    docs: &HashMap<UriKey, String>,
 ) -> Vec<Location> {
     let position = params.text_document_position.position;
     let offset = position_to_offset(text, position);
@@ -2565,7 +2678,10 @@ fn provide_references(
         None => return Vec::new(),
     };
     let mut locations = Vec::new();
-    for (uri, source) in docs {
+    for (uri_key, source) in docs {
+        let Some(uri) = uri_from_key(uri_key) else {
+            continue;
+        };
         let mut cursor = 0usize;
         while cursor < source.len() {
             let Some(idx) = source[cursor..].find(&name) else {
@@ -2591,10 +2707,10 @@ fn provide_references(
         }
     }
     if params.context.include_declaration {
-        let start = offset.saturating_sub(name.len());
+        let (start, end) = ident_bounds_at_offset(text, offset).unwrap_or((offset, offset));
         let decl_range = Range {
             start: offset_to_position(text, start),
-            end: offset_to_position(text, start + name.len()),
+            end: offset_to_position(text, end),
         };
         locations.push(Location {
             uri: url.clone(),
@@ -2608,7 +2724,7 @@ fn provide_rename(
     text: &str,
     url: &Uri,
     params: &lsp_types::RenameParams,
-    docs: &HashMap<Uri, String>,
+    docs: &HashMap<UriKey, String>,
 ) -> lsp_types::WorkspaceEdit {
     let position = params.text_document_position.position;
     let offset = position_to_offset(text, position);
@@ -2622,8 +2738,11 @@ fn provide_rename(
             }
         }
     };
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (uri, source) in docs {
+    let mut document_changes = Vec::new();
+    for (uri_key, source) in docs {
+        let Some(uri) = uri_from_key(uri_key) else {
+            continue;
+        };
         let mut edits = Vec::new();
         let mut cursor = 0usize;
         while cursor < source.len() {
@@ -2649,50 +2768,61 @@ fn provide_rename(
             cursor = end;
         }
         if !edits.is_empty() {
-            changes.insert(uri.clone(), edits);
+            document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: None,
+                },
+                edits: edits
+                    .into_iter()
+                    .map(lsp_types::OneOf::Left)
+                    .collect::<Vec<_>>(),
+            }));
         }
     }
-    if changes.is_empty() {
-        changes.insert(
-            url.clone(),
-            vec![TextEdit {
+    if document_changes.is_empty() {
+        document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: url.clone(),
+                version: None,
+            },
+            edits: vec![lsp_types::OneOf::Left(TextEdit {
                 range: Range {
                     start: offset_to_position(text, offset),
                     end: offset_to_position(text, offset + name.len()),
                 },
                 new_text: params.new_name.clone(),
-            }],
-        );
+            })],
+        }));
     }
     lsp_types::WorkspaceEdit {
-        changes: Some(changes),
-        document_changes: None,
+        changes: None,
+        document_changes: Some(DocumentChanges::Operations(document_changes)),
         change_annotations: None,
     }
 }
 
 fn provide_workspace_symbols(
     params: &WorkspaceSymbolParams,
-    docs: &HashMap<Uri, String>,
+    docs: &HashMap<UriKey, String>,
 ) -> WorkspaceSymbolResponse {
     let query = params.query.to_lowercase();
     let mut symbols = Vec::new();
-    for (uri, source) in docs {
+    for (uri_key, source) in docs {
+        let Some(uri) = uri_from_key(uri_key) else {
+            continue;
+        };
         if let Ok(module) = parse_module(source) {
             for func in &module.functions {
                 if func.name.name.to_lowercase().contains(&query) {
-                    #[allow(deprecated)]
-                    symbols.push(SymbolInformation {
-                        name: func.name.name.clone(),
-                        kind: SymbolKind::FUNCTION,
-                        location: Location {
+                    symbols.push(make_symbol_information(
+                        func.name.name.clone(),
+                        SymbolKind::FUNCTION,
+                        Location {
                             uri: uri.clone(),
                             range: span_to_range(source, func.name.span),
                         },
-                        tags: None,
-                        container_name: None,
-                        deprecated: None,
-                    });
+                    ));
                 }
             }
             for stmt in &module.stmts {
@@ -2701,22 +2831,18 @@ fn provide_workspace_symbols(
                     | at_syntax::Stmt::Enum { name, .. }
                     | at_syntax::Stmt::TypeAlias { name, .. } => {
                         if name.name.to_lowercase().contains(&query) {
-                            #[allow(deprecated)]
-                            symbols.push(SymbolInformation {
-                                name: name.name.clone(),
-                                kind: match stmt {
+                            symbols.push(make_symbol_information(
+                                name.name.clone(),
+                                match stmt {
                                     at_syntax::Stmt::Enum { .. } => SymbolKind::ENUM,
                                     at_syntax::Stmt::TypeAlias { .. } => SymbolKind::TYPE_PARAMETER,
                                     _ => SymbolKind::STRUCT,
                                 },
-                                location: Location {
+                                Location {
                                     uri: uri.clone(),
                                     range: span_to_range(source, name.span),
                                 },
-                                tags: None,
-                                container_name: None,
-                                deprecated: None,
-                            });
+                            ));
                         }
                     }
                     _ => {}
@@ -2725,6 +2851,21 @@ fn provide_workspace_symbols(
         }
     }
     WorkspaceSymbolResponse::Flat(symbols)
+}
+
+fn make_symbol_information(
+    name: String,
+    kind: SymbolKind,
+    location: Location,
+) -> SymbolInformation {
+    serde_json::from_value(serde_json::json!({
+        "name": name,
+        "kind": kind,
+        "tags": null,
+        "location": location,
+        "containerName": null,
+    }))
+    .expect("symbol information json should deserialize")
 }
 
 struct FunctionInfo {
@@ -2866,7 +3007,7 @@ mod tests {
     fn make_state_with_doc(text: &str) -> ServerState {
         let init = InitializeParams::default();
         let mut state = ServerState::new(init);
-        state.docs.insert(test_uri(), text.to_string());
+        state.docs.insert(uri_key(&test_uri()), text.to_string());
         state.diagnostics_last_publish.clear();
         state
     }
@@ -3052,5 +3193,96 @@ mod tests {
         let local_offset = text.find("bar()").expect("def");
         let expected_start = offset_to_position(text, local_offset);
         assert_eq!(location.range.start, expected_start);
+    }
+
+    #[test]
+    fn range_formatting_only_rewrites_selected_region() {
+        let text = "let x=1;\nlet y=2;\n";
+        let end = text.find('\n').expect("newline") + 1;
+        let range = Range {
+            start: offset_to_position(text, 0),
+            end: offset_to_position(text, end),
+        };
+        let edits = provide_formatting(text, Some(range));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range, range);
+        assert!(edits[0].new_text.contains("let x = 1;"));
+        assert!(!edits[0].new_text.contains("let y"));
+    }
+
+    #[test]
+    fn prepare_rename_uses_identifier_bounds_from_mid_cursor() {
+        let text = "fn f() {\n  let target_name = 1;\n  target_name;\n}\n";
+        let ident_start = text.find("target_name").expect("identifier");
+        let mid = ident_start + 4;
+        let params = lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+            position: offset_to_position(text, mid),
+        };
+        let prepare = provide_prepare_rename(text, &params).expect("prepare rename");
+        let lsp_types::PrepareRenameResponse::Range(range) = prepare else {
+            panic!("expected range response");
+        };
+        assert_eq!(range.start, offset_to_position(text, ident_start));
+        assert_eq!(
+            range.end,
+            offset_to_position(text, ident_start + "target_name".len())
+        );
+    }
+
+    #[test]
+    fn references_include_declaration_range_from_mid_cursor() {
+        let text = "fn f() {\n  let target_name = 1;\n  target_name;\n}\n";
+        let ident_start = text.find("target_name").expect("identifier");
+        let mid = ident_start + 4;
+        let params = lsp_types::ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: test_uri() },
+                position: offset_to_position(text, mid),
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+        let mut docs = HashMap::new();
+        docs.insert(uri_key(&test_uri()), text.to_string());
+        let references = provide_references(text, &test_uri(), &params, &docs);
+        let decl_start = offset_to_position(text, ident_start);
+        let decl_end = offset_to_position(text, ident_start + "target_name".len());
+        assert!(
+            references
+                .iter()
+                .any(|loc| loc.range.start == decl_start && loc.range.end == decl_end),
+            "expected declaration range in references"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_include_extended_keywords() {
+        let keywords = [
+            "const", "mut", "async", "throw", "defer", "with", "yield", "pub", "try", "catch",
+            "finally", "await",
+        ];
+        let text = keywords.join(" ");
+        let tokens = provide_semantic_tokens(&text);
+        let legend = semantic_tokens_legend();
+        let keyword_index = legend
+            .token_types
+            .iter()
+            .position(|ty| *ty == SemanticTokenType::KEYWORD)
+            .expect("keyword token index") as u32;
+        let keyword_count = tokens
+            .data
+            .iter()
+            .filter(|token| token.token_type == keyword_index)
+            .count();
+        assert!(
+            keyword_count >= keywords.len(),
+            "expected at least {} keyword tokens, got {}",
+            keywords.len(),
+            keyword_count
+        );
     }
 }

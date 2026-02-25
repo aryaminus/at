@@ -1,13 +1,23 @@
-use std::cell::Cell;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
 
 const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
 const SUPPORTED_PROTOCOL_VERSION: &str = "2024-11-05";
+const LOG_LEVEL_DEBUG: u8 = 10;
+const LOG_LEVEL_INFO: u8 = 20;
+const LOG_LEVEL_NOTICE: u8 = 30;
+const LOG_LEVEL_WARNING: u8 = 40;
+const LOG_LEVEL_ERROR: u8 = 50;
+const LOG_LEVEL_CRITICAL: u8 = 60;
+const LOG_LEVEL_ALERT: u8 = 70;
+const LOG_LEVEL_EMERGENCY: u8 = 80;
 
 #[derive(Clone)]
+/// `Clone` is shallow: clones share handlers and runtime state via `Rc`/`Arc`.
 pub struct McpServer {
     name: String,
     version: String,
@@ -16,7 +26,9 @@ pub struct McpServer {
     tool_handler: Option<Rc<ToolHandler>>,
     resources: Vec<Resource>,
     prompts: Vec<Prompt>,
-    client_initialized: Cell<bool>,
+    client_initialized: Arc<AtomicBool>,
+    shutdown_requested: Arc<AtomicBool>,
+    log_level: Arc<AtomicU8>,
     completion_handler: Option<Rc<CompletionHandler>>,
     sample_handler: Option<Rc<SampleHandler>>,
 }
@@ -95,7 +107,9 @@ impl McpServer {
             tool_handler: None,
             resources: Vec::new(),
             prompts: Vec::new(),
-            client_initialized: Cell::new(false),
+            client_initialized: Arc::new(AtomicBool::new(false)),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            log_level: Arc::new(AtomicU8::new(LOG_LEVEL_INFO)),
             completion_handler: None,
             sample_handler: None,
         }
@@ -134,6 +148,9 @@ impl McpServer {
         mut writer: W,
         message: LogMessage,
     ) -> std::io::Result<()> {
+        if !self.should_emit_log(&message.level) {
+            return Ok(());
+        }
         let notification = json!({
             "jsonrpc": "2.0",
             "method": "logging/message",
@@ -143,10 +160,7 @@ impl McpServer {
                 "data": message.data,
             }
         });
-        let response_line = serde_json::to_string(&notification).unwrap_or_default();
-        writeln!(writer, "{}", response_line)?;
-        writer.flush()?;
-        Ok(())
+        write_json_line(&mut writer, &notification)
     }
 
     pub fn run_stdio(&self) -> std::io::Result<()> {
@@ -197,9 +211,7 @@ impl McpServer {
                         "message": "Invalid Request: request too large"
                     }
                 });
-                let response_line = serde_json::to_string(&response).unwrap_or_default();
-                writeln!(writer, "{}", response_line)?;
-                writer.flush()?;
+                write_json_line(&mut writer, &response)?;
                 continue;
             }
             let trimmed = line.trim();
@@ -217,9 +229,7 @@ impl McpServer {
                             "message": "Parse error"
                         }
                     });
-                    let response_line = serde_json::to_string(&response).unwrap_or_default();
-                    writeln!(writer, "{}", response_line)?;
-                    writer.flush()?;
+                    write_json_line(&mut writer, &response)?;
                     continue;
                 }
             };
@@ -234,9 +244,7 @@ impl McpServer {
                         "message": "Invalid Request: missing or invalid jsonrpc field"
                     }
                 });
-                let response_line = serde_json::to_string(&response).unwrap_or_default();
-                writeln!(writer, "{}", response_line)?;
-                writer.flush()?;
+                write_json_line(&mut writer, &response)?;
                 continue;
             }
 
@@ -250,9 +258,10 @@ impl McpServer {
                 // Handle notifications (messages without id)
                 match method {
                     "notifications/initialized" => {
-                        self.client_initialized.set(true);
+                        self.client_initialized.store(true, Ordering::Relaxed);
                         eprintln!("[at-mcp] client initialized");
                     }
+                    "exit" => return Ok(()),
                     _ => {
                         eprintln!("[at-mcp] ignoring notification: {}", method);
                     }
@@ -261,6 +270,24 @@ impl McpServer {
             }
 
             let response = match method {
+                "shutdown" => {
+                    self.shutdown_requested.store(true, Ordering::Relaxed);
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {}
+                    })
+                }
+                _ if self.shutdown_requested.load(Ordering::Relaxed) => {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32000,
+                            "message": "Server has been shut down"
+                        }
+                    })
+                }
                 "initialize" => {
                     if let Some(params) = message.get("params") {
                         if let Some(client_version) =
@@ -273,58 +300,33 @@ impl McpServer {
                                 );
                             }
                         }
-                        let mut result = json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
-                                "serverInfo": {
-                                    "name": self.name,
-                                    "version": self.version,
-                                },
-                                "capabilities": {
-                                    "tools": {},
-                                    "roots": {},
-                                    "completion": {},
-                                    "sampling": {},
-                                }
-                            }
-                        });
-
-                        // Only include instructions if context is present
-                        if let Some(context) = &self.context {
-                            result["result"]["instructions"] = json!(context);
-                        }
-
-                        result
-                    } else {
-                        let mut result = json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
-                                "serverInfo": {
-                                    "name": self.name,
-                                    "version": self.version,
-                                },
-                                "capabilities": {
-                                    "tools": {},
-                                    "roots": {},
-                                    "resources": {},
-                                    "prompts": {},
-                                    "completion": {},
-                                    "sampling": {},
-                                }
-                            }
-                        });
-
-                        // Only include instructions if context is present
-                        if let Some(context) = &self.context {
-                            result["result"]["instructions"] = json!(context);
-                        }
-
-                        result
                     }
+                    let mut result = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+                            "serverInfo": {
+                                "name": self.name,
+                                "version": self.version,
+                            },
+                            "capabilities": {
+                                "tools": {},
+                                "roots": {},
+                                "resources": {},
+                                "prompts": {},
+                                "completion": {},
+                                "sampling": {},
+                            }
+                        }
+                    });
+
+                    // Only include instructions if context is present
+                    if let Some(context) = &self.context {
+                        result["result"]["instructions"] = json!(context);
+                    }
+
+                    result
                 }
                 "resources/list" => json!({
                     "jsonrpc": "2.0",
@@ -347,15 +349,7 @@ impl McpServer {
                 }),
                 "resources/read" => {
                     let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
-                    let uri = params.get("uri").and_then(|value| value.as_str());
-                    if uri.is_none() {
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": { "code": -32602, "message": "Invalid params: uri must be a string" }
-                        })
-                    } else {
-                        let uri = uri.unwrap();
+                    if let Some(uri) = params.get("uri").and_then(|value| value.as_str()) {
                         let resource = self.resources.iter().find(|res| res.uri == uri);
                         if let Some(resource) = resource {
                             let content = if let Some(text) = &resource.text {
@@ -383,6 +377,12 @@ impl McpServer {
                                 "error": { "code": -32602, "message": "Unknown resource" }
                             })
                         }
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "Invalid params: uri must be a string" }
+                        })
                     }
                 }
                 "prompts/list" => json!({
@@ -402,15 +402,7 @@ impl McpServer {
                 }),
                 "prompts/get" => {
                     let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
-                    let name = params.get("name").and_then(|value| value.as_str());
-                    if name.is_none() {
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": { "code": -32602, "message": "Invalid params: name must be a string" }
-                        })
-                    } else {
-                        let name = name.unwrap();
+                    if let Some(name) = params.get("name").and_then(|value| value.as_str()) {
                         let prompt = self.prompts.iter().find(|prompt| prompt.name == name);
                         if let Some(prompt) = prompt {
                             let mut result = json!({
@@ -431,23 +423,31 @@ impl McpServer {
                                 "error": { "code": -32602, "message": "Unknown prompt" }
                             })
                         }
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32602, "message": "Invalid params: name must be a string" }
+                        })
                     }
                 }
                 "logging/setLevel" => {
                     let params = message.get("params").cloned().unwrap_or(JsonValue::Null);
                     let level = params.get("level").and_then(|value| value.as_str());
-                    if level.is_none() {
-                        json!({
+                    match level.and_then(parse_log_level) {
+                        Some(level) => {
+                            self.log_level.store(level, Ordering::Relaxed);
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {}
+                            })
+                        }
+                        None => json!({
                             "jsonrpc": "2.0",
                             "id": id,
-                            "error": { "code": -32602, "message": "Invalid params: level must be a string" }
-                        })
-                    } else {
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {}
-                        })
+                            "error": { "code": -32602, "message": "Invalid params: level must be one of debug|info|notice|warning|error|critical|alert|emergency" }
+                        }),
                     }
                 }
                 "tools/list" => json!({
@@ -654,19 +654,33 @@ impl McpServer {
                             }
                         })
                     } else {
-                        let name = params.get("name").and_then(|value| value.as_str());
-                        if name.is_none() {
+                        let completion_ref = params
+                            .get("ref")
+                            .and_then(|value| {
+                                value
+                                    .as_object()
+                                    .and_then(|obj| {
+                                        obj.get("name")
+                                            .or_else(|| obj.get("id"))
+                                            .or_else(|| obj.get("uri"))
+                                            .and_then(|entry| entry.as_str())
+                                    })
+                                    .or_else(|| value.as_str())
+                            })
+                            .or_else(|| params.get("name").and_then(|value| value.as_str()));
+                        if completion_ref.is_none() {
                             json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "error": {
                                     "code": -32602,
-                                    "message": "Invalid params: name must be a string"
+                                    "message": "Invalid params: expected ref.name (or legacy name) string"
                                 }
                             })
                         } else {
                             let arguments = params
                                 .get("arguments")
+                                .or_else(|| params.get("argument"))
                                 .cloned()
                                 .unwrap_or_else(|| json!({}));
                             if !arguments.is_object() {
@@ -679,7 +693,7 @@ impl McpServer {
                                     }
                                 })
                             } else {
-                                match (name, &self.completion_handler) {
+                                match (completion_ref, &self.completion_handler) {
                                     (Some(name), Some(handler)) => {
                                         match handler(name, &arguments) {
                                             Ok(items) => json!({
@@ -765,16 +779,49 @@ impl McpServer {
                 }),
             };
 
-            let response_line = serde_json::to_string(&response).unwrap_or_default();
-            writeln!(writer, "{}", response_line)?;
-            writer.flush()?;
+            write_json_line(&mut writer, &response)?;
         }
+    }
+}
+
+fn parse_log_level(level: &str) -> Option<u8> {
+    match level.to_ascii_lowercase().as_str() {
+        "debug" => Some(LOG_LEVEL_DEBUG),
+        "info" => Some(LOG_LEVEL_INFO),
+        "notice" => Some(LOG_LEVEL_NOTICE),
+        "warning" | "warn" => Some(LOG_LEVEL_WARNING),
+        "error" => Some(LOG_LEVEL_ERROR),
+        "critical" => Some(LOG_LEVEL_CRITICAL),
+        "alert" => Some(LOG_LEVEL_ALERT),
+        "emergency" => Some(LOG_LEVEL_EMERGENCY),
+        _ => None,
+    }
+}
+
+fn write_json_line<W: Write>(writer: &mut W, value: &JsonValue) -> std::io::Result<()> {
+    let line = serde_json::to_string(value).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize JSON-RPC message: {err}"),
+        )
+    })?;
+    writeln!(writer, "{line}")?;
+    writer.flush()?;
+    Ok(())
+}
+
+impl McpServer {
+    fn should_emit_log(&self, level: &str) -> bool {
+        let Some(message_level) = parse_log_level(level) else {
+            return true;
+        };
+        message_level >= self.log_level.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::McpServer;
+    use super::{LogMessage, McpServer, Prompt, Resource};
     use serde_json::json;
 
     #[test]
@@ -810,6 +857,290 @@ mod tests {
         assert_eq!(
             content[0].get("type").and_then(|v| v.as_str()),
             Some("text")
+        );
+    }
+
+    #[test]
+    fn initialize_capabilities_are_consistent() {
+        let input = format!(
+            "{}\n{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05"}
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "initialize"
+            })
+        );
+        let server = McpServer::new("at", "0.1.0");
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+        let output = String::from_utf8(output).expect("utf8");
+        let mut lines = output.lines();
+        let first: serde_json::Value =
+            serde_json::from_str(lines.next().expect("first response")).expect("json");
+        let second: serde_json::Value =
+            serde_json::from_str(lines.next().expect("second response")).expect("json");
+        let first_caps = first
+            .get("result")
+            .and_then(|value| value.get("capabilities"))
+            .cloned()
+            .expect("first capabilities");
+        let second_caps = second
+            .get("result")
+            .and_then(|value| value.get("capabilities"))
+            .cloned()
+            .expect("second capabilities");
+        assert_eq!(first_caps, second_caps);
+        assert!(first_caps.get("resources").is_some());
+        assert!(first_caps.get("prompts").is_some());
+    }
+
+    #[test]
+    fn completion_accepts_ref_object() {
+        let input = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "completion/complete",
+                "params": {
+                    "ref": {
+                        "type": "ref/tool",
+                        "name": "echo"
+                    },
+                    "argument": {
+                        "name": "value",
+                        "value": "hel"
+                    }
+                }
+            })
+        );
+        let server = McpServer::new("at", "0.1.0").with_completion_handler(|name, args| {
+            if name != "echo" {
+                return Err("unexpected completion target".to_string());
+            }
+            if args.get("name").and_then(|value| value.as_str()) != Some("value") {
+                return Err("missing argument payload".to_string());
+            }
+            Ok(vec!["hello".to_string(), "help".to_string()])
+        });
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+        let output = String::from_utf8(output).expect("utf8");
+        let line = output.lines().next().expect("response line");
+        let response: serde_json::Value = serde_json::from_str(line).expect("json");
+        let items = response
+            .get("result")
+            .and_then(|value| value.get("items"))
+            .and_then(|value| value.as_array())
+            .expect("completion items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn resources_and_prompts_methods_work() {
+        let input = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "resources/list"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": { "uri": "at://docs/readme" }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/list"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "prompts/get",
+                "params": { "name": "example" }
+            }),
+        );
+        let server = McpServer::new("at", "0.1.0")
+            .with_resources(vec![Resource {
+                uri: "at://docs/readme".to_string(),
+                name: "README".to_string(),
+                description: Some("Project docs".to_string()),
+                mime_type: Some("text/plain".to_string()),
+                text: Some("hello".to_string()),
+            }])
+            .with_prompts(vec![Prompt {
+                name: "example".to_string(),
+                description: Some("Sample prompt".to_string()),
+                messages: vec![json!({"role": "user", "content": "hi"})],
+            }]);
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+
+        let output = String::from_utf8(output).expect("utf8");
+        let responses: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        assert_eq!(responses.len(), 4);
+        assert_eq!(
+            responses[0]["result"]["resources"][0]["uri"].as_str(),
+            Some("at://docs/readme")
+        );
+        assert_eq!(
+            responses[1]["result"]["contents"][0]["text"].as_str(),
+            Some("hello")
+        );
+        assert_eq!(
+            responses[2]["result"]["prompts"][0]["name"].as_str(),
+            Some("example")
+        );
+        assert_eq!(
+            responses[3]["result"]["messages"][0]["content"].as_str(),
+            Some("hi")
+        );
+    }
+
+    #[test]
+    fn logging_set_level_filters_log_notifications() {
+        let request = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "logging/setLevel",
+                "params": { "level": "warning" }
+            })
+        );
+        let server = McpServer::new("at", "0.1.0");
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(request.as_bytes()), &mut output)
+            .expect("run server");
+        let response: serde_json::Value = serde_json::from_str(
+            String::from_utf8(output)
+                .expect("utf8")
+                .lines()
+                .next()
+                .expect("response"),
+        )
+        .expect("json");
+        assert!(response.get("result").is_some());
+
+        let mut info_output = Vec::new();
+        server
+            .notify_log_message(&mut info_output, LogMessage::info("ignored"))
+            .expect("log message");
+        assert!(info_output.is_empty(), "info should be filtered at warning");
+
+        let mut error_output = Vec::new();
+        server
+            .notify_log_message(&mut error_output, LogMessage::error("kept"))
+            .expect("log message");
+        let rendered = String::from_utf8(error_output).expect("utf8");
+        assert!(
+            rendered.contains("kept"),
+            "expected error log message to be emitted"
+        );
+    }
+
+    #[test]
+    fn shutdown_then_exit_stops_server() {
+        let input = format!(
+            "{}\n{}\n{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "shutdown"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "exit"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "ping"
+            }),
+        );
+        let server = McpServer::new("at", "0.1.0");
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 1, "server should stop processing after exit");
+        let response: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        assert!(response.get("result").is_some());
+    }
+
+    #[test]
+    fn malformed_input_returns_json_error_line() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"\n";
+        let server = McpServer::new("at", "0.1.0");
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+        let output = String::from_utf8(output).expect("utf8");
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].is_empty());
+        let response: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
+        assert_eq!(response["error"]["code"].as_i64(), Some(-32700));
+    }
+
+    #[test]
+    fn ping_and_roots_list_are_supported() {
+        let input = format!(
+            "{}\n{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "ping"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "roots/list"
+            }),
+        );
+        let server = McpServer::new("at", "0.1.0");
+        let mut output = Vec::new();
+        server
+            .run(std::io::Cursor::new(input.as_bytes()), &mut output)
+            .expect("run server");
+        let responses: Vec<serde_json::Value> = String::from_utf8(output)
+            .expect("utf8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        assert_eq!(responses[0]["id"].as_i64(), Some(10));
+        assert!(responses[0]["result"].is_object());
+        assert_eq!(responses[1]["id"].as_i64(), Some(11));
+        assert_eq!(
+            responses[1]["result"]["roots"]
+                .as_array()
+                .expect("roots array")
+                .len(),
+            0
         );
     }
 }

@@ -1,27 +1,37 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 
 use at_fmt::format_module;
 use at_mcp::{McpServer, Tool};
 use at_parser::parse_module_with_errors;
 use at_syntax::{Module, Stmt, TypeRef};
-use at_vm::{compile_entry_with_imports, format_value, Chunk, Compiler, Op, Program, Value, Vm};
+use at_vm::{
+    compile_entry_with_imports, format_value, Chunk, Compiler, MapKey, Op, Profiler, Program,
+    Value, Vm,
+};
 use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
+
+const EMBEDDED_STDLIB_SOURCE: &str = include_str!("../../../stdlib/std.at");
+const REMOTE_FETCH_TIMEOUT_SECS: u64 = 10;
+const REMOTE_FETCH_RETRIES: usize = 3;
+const REMOTE_FETCH_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn print_usage() {
     eprintln!("at - An agent-native programming language");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  at <file.at>                    Run a file");
-    eprintln!("  at run <file.at>                Run a file");
+    eprintln!("  at <file.at> [run options]      Run a file");
+    eprintln!("  at run <file.at> [run options]  Run a file");
     eprintln!("  at repl                         Start interactive REPL");
     eprintln!("  at fmt [--write] <file.at>      Format a file");
     eprintln!("  at test <file.at>               Run tests in a file");
-    eprintln!("  at check <file.at>              Type-check a file");
+    eprintln!("  at check <file.at> [options]    Type-check a file");
     eprintln!("  at lint <file.at>               Lint a file");
     eprintln!("  at bench <file.at>              Benchmark a file");
     eprintln!("  at deps <file.at>               Show dependencies");
@@ -32,7 +42,16 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -h, --help     Show this help message");
     eprintln!("  -V, --version  Show version information");
-    eprintln!("  --strict-types Enable strict type checks");
+    eprintln!("  --strict-types    Enable strict type checks (check command)");
+    eprintln!("  --no-strict-types Disable strict type checks (check command)");
+    eprintln!();
+    eprintln!("Run options:");
+    eprintln!("  -c, --capability <name>  Grant runtime capability (repeatable)");
+    eprintln!("  --profile-vm[=json]      Print VM execution profile (text or json)");
+    eprintln!();
+    eprintln!("Check options:");
+    eprintln!("  --strict-types           Enable strict type checks");
+    eprintln!("  --no-strict-types        Disable strict type checks");
 }
 
 fn main() {
@@ -52,18 +71,6 @@ fn main() {
         print_usage();
         std::process::exit(1);
     }
-
-    let command = &args[1];
-    if command == "--help" || command == "-h" {
-        print_usage();
-        std::process::exit(0);
-    }
-    if command == "--version" || command == "-V" || command == "-v" {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
-
-    let strict_types = args.iter().any(|arg| arg == "--strict-types");
 
     if args[1] == "mcp-server" {
         if args.len() > 2 {
@@ -109,8 +116,8 @@ fn main() {
                 );
             }
 
-            let program = std::sync::Arc::new(program);
-            let tool_execs = std::sync::Arc::new(tool_execs);
+            let program = std::rc::Rc::new(program);
+            let tool_execs = std::rc::Rc::new(tool_execs);
 
             let tool_handler = move |name: &str, arguments: &JsonValue| {
                 let exec = tool_execs
@@ -253,7 +260,7 @@ fn main() {
 
     if args[1] == "run" {
         if args.len() < 3 {
-            eprintln!("usage: at run <file.at>");
+            eprintln!("usage: at run <file.at> [--capability <name>] [--profile-vm[=json]]");
             std::process::exit(1);
         }
         run_file(&args[2], &args[3..]);
@@ -276,13 +283,14 @@ fn main() {
             std::process::exit(1);
         }
         let path = &args[path_index];
-        let module = match load_module(path) {
-            Ok(module) => module.module,
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
             Err(err) => {
-                eprintln!("{err}");
+                eprintln!("error reading {path}: {err}");
                 std::process::exit(1);
             }
         };
+        let module = parse_module_or_exit(&source, Some(path));
         let formatted = format_module(&module);
         if write {
             if let Err(err) = std::fs::write(path, formatted) {
@@ -420,7 +428,11 @@ fn main() {
         module.source_path = Some(path.to_string());
 
         let config_source = load_lint_config(path);
-        match at_lint::lint_module_with_config(&module, config_source.as_deref()) {
+        match at_lint::lint_module_with_source_and_config(
+            &module,
+            Some(&source),
+            config_source.as_deref(),
+        ) {
             Ok(()) => {
                 println!("no issues found");
             }
@@ -450,9 +462,11 @@ fn main() {
                     let mut fixed_module = parse_module_or_exit(&formatted_source, Some(path));
                     fixed_module.source_path = Some(path.to_string());
 
-                    if let Err(remaining) =
-                        at_lint::lint_module_with_config(&fixed_module, config_source.as_deref())
-                    {
+                    if let Err(remaining) = at_lint::lint_module_with_source_and_config(
+                        &fixed_module,
+                        Some(&formatted_source),
+                        config_source.as_deref(),
+                    ) {
                         let remaining_fixable = at_lint::count_fixable(&remaining);
                         let (errors, warnings, infos) = split_lint_by_severity(remaining);
                         let total = errors.len() + warnings.len() + infos.len();
@@ -487,10 +501,19 @@ fn main() {
 
     if args[1] == "check" {
         if args.len() < 3 {
-            eprintln!("usage: at check <file.at>");
+            eprintln!("usage: at check <file.at> [--strict-types|--no-strict-types]");
             std::process::exit(1);
         }
         let path = &args[2];
+        let check_options = parse_check_options(&args[3..]).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            eprintln!("usage: at check <file.at> [--strict-types|--no-strict-types]");
+            std::process::exit(1);
+        });
+        let strict_types = resolve_check_strict_types(path, &check_options).unwrap_or_else(|err| {
+            eprintln!("{err}");
+            std::process::exit(1);
+        });
         let source = match fs::read_to_string(path) {
             Ok(source) => source,
             Err(err) => {
@@ -500,13 +523,20 @@ fn main() {
         };
         let mut module = parse_module_or_exit(&source, Some(path));
         module.source_path = Some(path.to_string());
-        let config_source = load_lint_config(path);
-        if let Err(errors) = at_lint::lint_module_with_config(&module, config_source.as_deref()) {
-            let (errors, warnings, infos) = split_lint_by_severity(errors);
-            print_lint_bucket("error", errors, &source, Some(path));
+        let lint_config_source = load_lint_config_for_check(path, strict_types);
+        if let Err(errors) = at_lint::lint_module_with_source_and_config(
+            &module,
+            Some(&source),
+            lint_config_source.as_deref(),
+        ) {
+            let (error_list, warnings, infos) = split_lint_by_severity(errors);
+            let has_lint_errors = !error_list.is_empty();
+            print_lint_bucket("error", error_list, &source, Some(path));
             print_lint_bucket("warn", warnings, &source, Some(path));
             print_lint_bucket("info", infos, &source, Some(path));
-            std::process::exit(1);
+            if has_lint_errors {
+                std::process::exit(1);
+            }
         }
         let loaded = match load_module(path) {
             Ok(module) => module,
@@ -589,7 +619,10 @@ fn main() {
             let run_start = std::time::Instant::now();
             let mut vm = Vm::new();
             let _ = vm.run(&program).unwrap_or_else(|err| {
-                eprintln!("{}", format_runtime_error(&err, Some(&source)));
+                eprintln!(
+                    "{}",
+                    format_runtime_error(&err, Some(&program), Some(&source))
+                );
                 std::process::exit(1);
             });
             run_time += run_start.elapsed();
@@ -735,6 +768,121 @@ fn main() {
     run_file(&args[1], &args[2..]);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrictTypesOverride {
+    Default,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckOptions {
+    strict_types: StrictTypesOverride,
+}
+
+impl Default for CheckOptions {
+    fn default() -> Self {
+        Self {
+            strict_types: StrictTypesOverride::Default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CheckConfig {
+    strict_types: Option<bool>,
+}
+
+fn parse_check_options(args: &[String]) -> Result<CheckOptions, String> {
+    let mut options = CheckOptions::default();
+    for arg in args {
+        match arg.as_str() {
+            "--strict-types" => match options.strict_types {
+                StrictTypesOverride::Disabled => {
+                    return Err(
+                        "cannot combine --strict-types and --no-strict-types in one command"
+                            .to_string(),
+                    )
+                }
+                _ => options.strict_types = StrictTypesOverride::Enabled,
+            },
+            "--no-strict-types" => match options.strict_types {
+                StrictTypesOverride::Enabled => {
+                    return Err(
+                        "cannot combine --strict-types and --no-strict-types in one command"
+                            .to_string(),
+                    )
+                }
+                _ => options.strict_types = StrictTypesOverride::Disabled,
+            },
+            value if value.starts_with('-') => {
+                return Err(format!("unknown check option: {value}"))
+            }
+            value => return Err(format!("unexpected check argument: {value}")),
+        }
+    }
+    Ok(options)
+}
+
+fn resolve_check_strict_types(path: &str, options: &CheckOptions) -> Result<bool, String> {
+    let config = load_check_config(path)?;
+    Ok(resolve_strict_types_setting(
+        options.strict_types,
+        config.and_then(|value| value.strict_types),
+    ))
+}
+
+fn resolve_strict_types_setting(
+    strict_override: StrictTypesOverride,
+    strict_from_config: Option<bool>,
+) -> bool {
+    match strict_override {
+        StrictTypesOverride::Enabled => true,
+        StrictTypesOverride::Disabled => false,
+        StrictTypesOverride::Default => strict_from_config.unwrap_or(false),
+    }
+}
+
+fn check_lint_config_source(base: Option<&str>, strict_types: bool) -> Option<String> {
+    if strict_types {
+        return base.map(|value| value.to_string());
+    }
+
+    let mut table = if let Some(source) = base {
+        match source.parse::<toml::Value>() {
+            Ok(value) => value
+                .as_table()
+                .cloned()
+                .unwrap_or_else(toml::map::Map::new),
+            Err(_) => toml::map::Map::new(),
+        }
+    } else {
+        toml::map::Map::new()
+    };
+
+    let rules_key = "rules".to_string();
+    if !matches!(table.get(&rules_key), Some(toml::Value::Table(_))) {
+        table.insert(rules_key.clone(), toml::Value::Table(toml::map::Map::new()));
+    }
+    if let Some(toml::Value::Table(rules_table)) = table.get_mut(&rules_key) {
+        rules_table.insert(
+            "unknown_type_flow".to_string(),
+            toml::Value::String("off".to_string()),
+        );
+    }
+
+    let value = toml::Value::Table(table);
+    Some(
+        toml::to_string(&value)
+            .unwrap_or_else(|_| "[rules]\nunknown_type_flow = \"off\"\n".to_string()),
+    )
+}
+
+fn load_lint_config_for_check(path: &str, strict_types: bool) -> Option<String> {
+    let base = load_lint_config(path);
+    check_lint_config_source(base.as_deref(), strict_types)
+}
+
 fn parse_runs(args: &[String]) -> Option<u32> {
     let mut runs: Option<u32> = None;
     let mut index = 0;
@@ -767,6 +915,111 @@ fn parse_runs(args: &[String]) -> Option<u32> {
         }
     }
     Some(runs.unwrap_or(1))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunProfileFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Default)]
+struct RunOptions {
+    capabilities: HashSet<String>,
+    profile: Option<RunProfileFormat>,
+}
+
+fn parse_profile_format(value: &str) -> Result<RunProfileFormat, String> {
+    match value {
+        "text" => Ok(RunProfileFormat::Text),
+        "json" => Ok(RunProfileFormat::Json),
+        _ => Err(format!(
+            "invalid --profile-vm format: {value} (expected text or json)"
+        )),
+    }
+}
+
+fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
+    let mut options = RunOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-c" | "--capability" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --capability".to_string())?;
+                options.capabilities.insert(value.clone());
+                index += 2;
+            }
+            "--profile-vm" => {
+                options.profile = Some(RunProfileFormat::Text);
+                index += 1;
+            }
+            "--profile-vm-json" => {
+                options.profile = Some(RunProfileFormat::Json);
+                index += 1;
+            }
+            value if value.starts_with("--profile-vm=") => {
+                let format = value.trim_start_matches("--profile-vm=");
+                options.profile = Some(parse_profile_format(format)?);
+                index += 1;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown run option: {value}"));
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn sorted_profile_counts(counts: &HashMap<String, usize>) -> Vec<(String, usize)> {
+    let mut items: Vec<(String, usize)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items
+}
+
+fn print_vm_profile(profiler: &Profiler, format: RunProfileFormat) {
+    let function_counts = sorted_profile_counts(&profiler.function_counts);
+    let opcode_counts = sorted_profile_counts(&profiler.op_counts);
+    match format {
+        RunProfileFormat::Text => {
+            eprintln!("vm profile:");
+            eprintln!("  total instructions: {}", profiler.total_instructions);
+            if !function_counts.is_empty() {
+                eprintln!("  functions:");
+                for (name, count) in function_counts {
+                    eprintln!("    {name}: {count}");
+                }
+            }
+            if !opcode_counts.is_empty() {
+                eprintln!("  opcodes:");
+                for (name, count) in opcode_counts {
+                    eprintln!("    {name}: {count}");
+                }
+            }
+        }
+        RunProfileFormat::Json => {
+            let function_counts = function_counts
+                .into_iter()
+                .map(|(name, count)| json!({ "name": name, "count": count }))
+                .collect::<Vec<_>>();
+            let opcode_counts = opcode_counts
+                .into_iter()
+                .map(|(name, count)| json!({ "name": name, "count": count }))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "{}",
+                json!({
+                    "total_instructions": profiler.total_instructions,
+                    "function_counts": function_counts,
+                    "opcode_counts": opcode_counts,
+                })
+            );
+        }
+    }
 }
 
 fn run_repl() {
@@ -830,7 +1083,12 @@ fn run_repl() {
                 match vm.run(&program) {
                     Ok(Some(value)) => println!("{}", format_value(&value)),
                     Ok(None) => {}
-                    Err(err) => eprintln!("{}", format_runtime_error(&err, Some(&buffer))),
+                    Err(err) => {
+                        eprintln!(
+                            "{}",
+                            format_runtime_error(&err, Some(&program), Some(&buffer))
+                        )
+                    }
                 }
             }
             Err(lines) => {
@@ -849,6 +1107,16 @@ fn run_repl() {
 }
 
 fn run_file(path: &str, extra_args: &[String]) {
+    let run_options = parse_run_options(extra_args).unwrap_or_else(|err| {
+        eprintln!("{err}");
+        eprintln!("usage: at run <file.at> [--capability <name>] [--profile-vm[=json]]");
+        std::process::exit(1);
+    });
+    let RunOptions {
+        capabilities,
+        profile,
+    } = run_options;
+
     let source = match fs::read_to_string(path) {
         Ok(source) => source,
         Err(err) => {
@@ -870,48 +1138,59 @@ fn run_file(path: &str, extra_args: &[String]) {
         }
     };
 
-    let mut capabilities = std::collections::HashSet::new();
-    let mut i = 0;
-    while i < extra_args.len() {
-        if extra_args[i] == "-c" || extra_args[i] == "--capability" {
-            if i + 1 < extra_args.len() {
-                capabilities.insert(extra_args[i + 1].clone());
-                i += 2;
-            } else {
-                eprintln!("error: --capability requires a value");
-                std::process::exit(1);
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    let vm = if capabilities.is_empty() {
+    let mut vm = if capabilities.is_empty() {
         Vm::new()
     } else {
         Vm::with_capabilities(capabilities)
     };
-    let mut vm = vm;
-    match vm.run(&program) {
+    if profile.is_some() {
+        vm.enable_profiler();
+    }
+
+    let result = vm.run(&program);
+    if let Some(format) = profile {
+        if let Some(profiler) = vm.take_profiler() {
+            print_vm_profile(&profiler, format);
+        }
+    }
+
+    match result {
         Ok(Some(value)) => println!("{}", format_value(&value)),
         Ok(None) => {}
         Err(err) => {
-            eprintln!("{}", format_runtime_error(&err, Some(&source)));
+            eprintln!(
+                "{}",
+                format_runtime_error(&err, Some(&program), Some(&source))
+            );
             std::process::exit(1);
         }
     }
 }
 
-fn format_runtime_error(err: &at_vm::VmError, source: Option<&str>) -> String {
+fn format_runtime_error(
+    err: &at_vm::VmError,
+    program: Option<&Program>,
+    source: Option<&str>,
+) -> String {
     match err {
         at_vm::VmError::Runtime {
             message,
             span,
             stack,
         } => {
-            let mut output = if let (Some(span), Some(source)) = (span, source) {
-                if let Some((line, column)) = offset_to_line_col(source, span.start) {
-                    format!("runtime error: {message} at {line}:{column}")
+            let primary_path = stack
+                .as_ref()
+                .and_then(|frames| frames.first())
+                .and_then(|frame| frame.source_path.as_deref());
+            let mut output = if let Some(span) = span {
+                if let Some((path, line, column)) =
+                    span_location(program, source, primary_path, *span)
+                {
+                    if let Some(path) = path {
+                        format!("runtime error: {message} at {path}:{line}:{column}")
+                    } else {
+                        format!("runtime error: {message} at {line}:{column}")
+                    }
                 } else {
                     format!("runtime error: {message}")
                 }
@@ -924,9 +1203,15 @@ fn format_runtime_error(err: &at_vm::VmError, source: Option<&str>) -> String {
                     output.push_str("\nstack trace:");
                     for frame in stack {
                         let mut line = format!("\n  at {}", frame.name);
-                        if let (Some(span), Some(source)) = (frame.span, source) {
-                            if let Some((line_no, col)) = offset_to_line_col(source, span.start) {
-                                line.push_str(&format!(" ({line_no}:{col})"));
+                        if let Some(span) = frame.span {
+                            if let Some((path, line_no, col)) =
+                                span_location(program, source, frame.source_path.as_deref(), span)
+                            {
+                                if let Some(path) = path {
+                                    line.push_str(&format!(" ({path}:{line_no}:{col})"));
+                                } else {
+                                    line.push_str(&format!(" ({line_no}:{col})"));
+                                }
                             }
                         }
                         output.push_str(&line);
@@ -938,6 +1223,31 @@ fn format_runtime_error(err: &at_vm::VmError, source: Option<&str>) -> String {
         }
         other => format!("runtime error: {other:?}"),
     }
+}
+
+fn span_location<'a>(
+    program: Option<&'a Program>,
+    fallback_source: Option<&'a str>,
+    source_path: Option<&'a str>,
+    span: at_syntax::Span,
+) -> Option<(Option<&'a str>, usize, usize)> {
+    if let (Some(program), Some(path)) = (program, source_path) {
+        if let Some(source) = program.sources.get(path) {
+            if let Some((line, col)) = offset_to_line_col(source, span.start) {
+                return Some((Some(path), line, col));
+            }
+        }
+        if program.entry.as_deref() == Some(path) {
+            if let Some(source) = fallback_source {
+                if let Some((line, col)) = offset_to_line_col(source, span.start) {
+                    return Some((Some(path), line, col));
+                }
+            }
+        }
+    }
+    fallback_source.and_then(|source| {
+        offset_to_line_col(source, span.start).map(|(line, col)| (None, line, col))
+    })
 }
 
 fn format_parse_error(err: &at_parser::ParseError, source: &str, path: Option<&str>) -> String {
@@ -998,13 +1308,13 @@ fn parse_module_or_exit(source: &str, path: Option<&str>) -> Module {
     }
 }
 
-fn load_lint_config(path: &str) -> Option<String> {
+fn find_project_config(path: &str, file_name: &str) -> Option<PathBuf> {
     let file_path = Path::new(path);
     let mut dir = file_path.parent()?;
     loop {
-        let candidate = dir.join(".at-lint.toml");
+        let candidate = dir.join(file_name);
         if candidate.exists() {
-            return fs::read_to_string(candidate).ok();
+            return Some(candidate);
         }
         match dir.parent() {
             Some(parent) => dir = parent,
@@ -1012,6 +1322,43 @@ fn load_lint_config(path: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn load_lint_config(path: &str) -> Option<String> {
+    let config_path = find_project_config(path, ".at-lint.toml")?;
+    fs::read_to_string(config_path).ok()
+}
+
+fn load_check_config(path: &str) -> Result<Option<CheckConfig>, String> {
+    let Some(config_path) = find_project_config(path, ".at-check.toml") else {
+        return Ok(None);
+    };
+    let config_source = fs::read_to_string(&config_path)
+        .map_err(|err| format!("error reading {}: {err}", config_path.display()))?;
+    parse_check_config_source(&config_source, &config_path).map(Some)
+}
+
+fn parse_check_config_source(source: &str, config_path: &Path) -> Result<CheckConfig, String> {
+    let parsed: toml::Value = source
+        .parse()
+        .map_err(|err| format!("invalid {}: {err}", config_path.display()))?;
+    let Some(table) = parsed.as_table() else {
+        return Err(format!(
+            "invalid {}: expected a TOML table",
+            config_path.display()
+        ));
+    };
+    let strict_types = if let Some(value) = table.get("strict_types") {
+        Some(value.as_bool().ok_or_else(|| {
+            format!(
+                "invalid {}: strict_types must be true or false",
+                config_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    Ok(CheckConfig { strict_types })
 }
 
 fn split_lint_by_severity(
@@ -1213,7 +1560,7 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
                 }
                 let alias_name = alias.name.clone();
                 if path == "std" || path == "std.at" {
-                    let import_path = Path::new("stdlib").join("std.at");
+                    let import_path = ensure_stdlib_path()?;
                     let mut imported = load_module_inner(&import_path, visited)?;
                     prefix_module(&mut imported.module, &alias.name);
                     merged_imports.push(import_path.display().to_string());
@@ -1264,6 +1611,30 @@ fn load_module_inner(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Load
     })
 }
 
+fn ensure_stdlib_path() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("at").join("stdlib");
+    fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "error creating embedded stdlib directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join("std.at");
+    let write_file = match fs::read_to_string(&path) {
+        Ok(existing) => existing != EMBEDDED_STDLIB_SOURCE,
+        Err(_) => true,
+    };
+    if write_file {
+        fs::write(&path, EMBEDDED_STDLIB_SOURCE).map_err(|err| {
+            format!(
+                "error writing embedded stdlib file {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(path)
+}
+
 fn prefix_module(module: &mut Module, alias: &str) {
     for func in &mut module.functions {
         if func.is_pub {
@@ -1285,19 +1656,55 @@ fn prefix_module(module: &mut Module, alias: &str) {
 }
 
 fn fetch_remote(url: &str, base_dir: &Path) -> Result<PathBuf, String> {
-    if let Ok(path) = resolve_cached_path(base_dir, url) {
-        if path.exists() {
-            return Ok(path);
+    match resolve_cached_path(base_dir, url) {
+        Ok(path) if path.exists() => return Ok(path),
+        Ok(_) => {}
+        Err(_) => {}
+    }
+
+    for attempt in 1..=REMOTE_FETCH_RETRIES {
+        let request = ureq::get(url).timeout(Duration::from_secs(REMOTE_FETCH_TIMEOUT_SECS));
+        match request.call() {
+            Ok(response) => {
+                let contents = read_remote_response(url, response)?;
+                return store_remote_contents(url, &contents, base_dir);
+            }
+            Err(ureq::Error::Status(status, _response)) => {
+                if status >= 500 && attempt < REMOTE_FETCH_RETRIES {
+                    std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                    continue;
+                }
+                return Err(format!(
+                    "error fetching {url}: remote returned status {status}"
+                ));
+            }
+            Err(err) => {
+                if attempt < REMOTE_FETCH_RETRIES {
+                    std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                    continue;
+                }
+                return Err(format!("error fetching {url}: {err}"));
+            }
         }
     }
 
-    let response = ureq::get(url)
-        .call()
-        .map_err(|err| format!("error fetching {url}: {err}"))?;
-    let contents = response
-        .into_string()
+    Err(format!("error fetching {url}: exhausted retries"))
+}
+
+fn read_remote_response(url: &str, response: ureq::Response) -> Result<String, String> {
+    let mut reader = response.into_reader().take(REMOTE_FETCH_MAX_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
         .map_err(|err| format!("error reading response from {url}: {err}"))?;
-    store_remote_contents(url, &contents, base_dir)
+    if bytes.len() as u64 > REMOTE_FETCH_MAX_BYTES {
+        return Err(format!(
+            "error fetching {url}: response exceeds {} bytes",
+            REMOTE_FETCH_MAX_BYTES
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| format!("error reading response from {url}: body is not valid utf-8"))
 }
 
 fn store_remote_contents(url: &str, contents: &str, base_dir: &Path) -> Result<PathBuf, String> {
@@ -1320,7 +1727,21 @@ fn store_remote_contents(url: &str, contents: &str, base_dir: &Path) -> Result<P
 fn resolve_cached_path(base_dir: &Path, url: &str) -> Result<PathBuf, String> {
     let lockfile = load_lockfile(base_dir)?;
     if let Some(hash) = lockfile.entries.get(url) {
-        return Ok(cache_dir(base_dir).join(format!("{hash}.at")));
+        let path = cache_dir(base_dir).join(format!("{hash}.at"));
+        if path.exists() {
+            let contents = fs::read_to_string(&path)
+                .map_err(|err| format!("error reading {}: {err}", path.display()))?;
+            let actual = hash_contents(&contents);
+            if actual != *hash {
+                return Err(format!(
+                    "cached remote integrity check failed for {}: expected {}, found {}",
+                    path.display(),
+                    hash,
+                    actual
+                ));
+            }
+        }
+        return Ok(path);
     }
     Ok(cache_dir(base_dir).join(cache_file_name(url)))
 }
@@ -1412,8 +1833,7 @@ fn hash_contents(contents: &str) -> String {
 fn cache_file_name(url: &str) -> String {
     url.replace("https://", "")
         .replace("http://", "")
-        .replace('/', "_")
-        .replace(':', "_")
+        .replace(['/', ':'], "_")
 }
 
 fn parse_prune_options(args: &[String]) -> Result<PruneOptions, String> {
@@ -1462,24 +1882,75 @@ fn parse_prune_options(args: &[String]) -> Result<PruneOptions, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_prune_options, prune_cache, prune_cache_with_report, save_lockfile, Lockfile,
-        PruneOptions,
+        check_lint_config_source, parse_check_config_source, parse_check_options,
+        parse_prune_options, parse_run_options, prune_cache, prune_cache_with_report,
+        resolve_cached_path, resolve_strict_types_setting, save_lockfile, CheckOptions, Lockfile,
+        PruneOptions, RunProfileFormat, StrictTypesOverride,
     };
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
 
     fn at_binary() -> PathBuf {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        };
-        PathBuf::from(manifest_dir)
-            .join("../../target")
-            .join(profile)
-            .join("at")
+        static BIN: OnceLock<PathBuf> = OnceLock::new();
+        BIN.get_or_init(|| {
+            if let Some(path) = std::env::var_os("CARGO_BIN_EXE_at")
+                .map(PathBuf::from)
+                .filter(|path| path.exists())
+            {
+                return path;
+            }
+
+            let exe_suffix = std::env::consts::EXE_SUFFIX;
+            let current_exe = std::env::current_exe().expect("current test executable path");
+            let target_dir = current_exe
+                .parent()
+                .and_then(|path| path.parent())
+                .expect("target directory");
+            let profile_name = target_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("debug")
+                .to_string();
+            let binary = target_dir.join(format!("at{exe_suffix}"));
+            if binary.exists() {
+                return binary;
+            }
+
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+            let workspace_root = PathBuf::from(manifest_dir).join("../..");
+            let mut command = std::process::Command::new("cargo");
+            command.arg("build");
+            match profile_name.as_str() {
+                "debug" => {}
+                "release" => {
+                    command.arg("--release");
+                }
+                other => {
+                    command.arg("--profile").arg(other);
+                }
+            }
+            let status = command
+                .arg("-p")
+                .arg("at")
+                .arg("--bin")
+                .arg("at")
+                .current_dir(&workspace_root)
+                .status()
+                .expect("build at binary for integration tests");
+            assert!(
+                status.success(),
+                "failed to build at binary for integration tests (profile {profile_name})"
+            );
+            assert!(
+                binary.exists(),
+                "at binary not found after build (profile {profile_name}) at {}",
+                binary.display(),
+            );
+            binary
+        })
+        .clone()
     }
 
     #[test]
@@ -1533,6 +2004,143 @@ mod tests {
         assert_eq!(runs, 5);
     }
 
+    #[test]
+    fn parse_run_options_capabilities_and_profile_text() {
+        let options = parse_run_options(&[
+            "--capability".into(),
+            "time".into(),
+            "-c".into(),
+            "rng".into(),
+            "--profile-vm".into(),
+        ])
+        .expect("options");
+        assert!(options.capabilities.contains("time"));
+        assert!(options.capabilities.contains("rng"));
+        assert_eq!(options.profile, Some(RunProfileFormat::Text));
+    }
+
+    #[test]
+    fn parse_run_options_profile_json_value() {
+        let options = parse_run_options(&["--profile-vm=json".into()]).expect("options");
+        assert_eq!(options.profile, Some(RunProfileFormat::Json));
+    }
+
+    #[test]
+    fn parse_run_options_rejects_unknown_option() {
+        let err = parse_run_options(&["--unknown".into()]).expect_err("error");
+        assert!(err.contains("unknown run option"));
+    }
+
+    #[test]
+    fn parse_run_options_rejects_invalid_profile_format() {
+        let err = parse_run_options(&["--profile-vm=bad".into()]).expect_err("error");
+        assert!(err.contains("invalid --profile-vm format"));
+    }
+
+    #[test]
+    fn parse_check_options_defaults_to_config() {
+        let options = parse_check_options(&[]).expect("options");
+        assert_eq!(options.strict_types, StrictTypesOverride::Default);
+    }
+
+    #[test]
+    fn parse_check_options_parses_overrides() {
+        let enabled = parse_check_options(&["--strict-types".into()]).expect("enabled options");
+        assert_eq!(enabled.strict_types, StrictTypesOverride::Enabled);
+
+        let disabled =
+            parse_check_options(&["--no-strict-types".into()]).expect("disabled options");
+        assert_eq!(disabled.strict_types, StrictTypesOverride::Disabled);
+    }
+
+    #[test]
+    fn parse_check_options_rejects_conflicting_flags() {
+        let err = parse_check_options(&["--strict-types".into(), "--no-strict-types".into()])
+            .expect_err("error");
+        assert!(err.contains("cannot combine"));
+    }
+
+    #[test]
+    fn resolve_strict_types_setting_precedence() {
+        assert!(!resolve_strict_types_setting(
+            StrictTypesOverride::Default,
+            None
+        ));
+        assert!(resolve_strict_types_setting(
+            StrictTypesOverride::Default,
+            Some(true)
+        ));
+        assert!(!resolve_strict_types_setting(
+            StrictTypesOverride::Default,
+            Some(false)
+        ));
+        assert!(resolve_strict_types_setting(
+            StrictTypesOverride::Enabled,
+            Some(false)
+        ));
+        assert!(!resolve_strict_types_setting(
+            StrictTypesOverride::Disabled,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn parse_check_config_rejects_non_boolean_strict_types() {
+        let err = parse_check_config_source(
+            "strict_types = \"yes\"",
+            std::path::Path::new("/tmp/.at-check.toml"),
+        )
+        .expect_err("error");
+        assert!(err.contains("strict_types must be true or false"));
+    }
+
+    #[test]
+    fn check_lint_config_disables_unknown_type_flow_when_non_strict() {
+        let source = r#"
+let maybe = none();
+print(maybe);
+"#;
+        let module = at_parser::parse_module(source).expect("parse module");
+        let config = check_lint_config_source(None, false).expect("config");
+        let result = at_lint::lint_module_with_config(&module, Some(&config));
+        assert!(result.is_ok(), "expected unknown flow lint to be disabled");
+    }
+
+    #[test]
+    fn check_lint_config_keeps_unknown_type_flow_when_strict() {
+        let source = r#"
+let maybe = none();
+print(maybe);
+"#;
+        let module = at_parser::parse_module(source).expect("parse module");
+        let config = check_lint_config_source(None, true);
+        let errors = at_lint::lint_module_with_config(&module, config.as_deref())
+            .expect_err("expected unknown flow lint in strict mode path");
+        assert!(errors
+            .iter()
+            .any(|error| { matches!(error.rule, Some(at_lint::LintRule::UnknownTypeFlow)) }));
+    }
+
+    #[test]
+    fn check_lint_config_overrides_existing_unknown_type_flow_rule() {
+        let base = r#"
+[rules]
+unknown_type_flow = "error"
+"#;
+        let config = check_lint_config_source(Some(base), false).expect("config");
+        let parsed: toml::Value = config.parse().expect("parse generated config");
+        let rules = parsed
+            .get("rules")
+            .and_then(|value| value.as_table())
+            .expect("rules table");
+        assert_eq!(
+            rules
+                .get("unknown_type_flow")
+                .and_then(|value| value.as_str()),
+            Some("off")
+        );
+    }
+
     fn temp_base_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
@@ -1543,13 +2151,40 @@ mod tests {
         path
     }
 
-    fn write_cache_file(base: &PathBuf, hash: &str, size: usize) -> PathBuf {
+    fn write_cache_file(base: &Path, hash: &str, size: usize) -> PathBuf {
         let cache_dir = base.join(".at").join("cache");
         fs::create_dir_all(&cache_dir).expect("create cache dir");
         let path = cache_dir.join(format!("{hash}.at"));
         let contents = vec![b'x'; size];
         fs::write(&path, contents).expect("write cache file");
         path
+    }
+
+    #[test]
+    fn resolve_cached_path_rejects_hash_mismatch() {
+        let base = temp_base_dir("integrity_mismatch");
+        fs::create_dir_all(base.join(".at").join("cache")).expect("create cache");
+        let url = "https://example.com/pkg.at";
+        let expected_hash = "aaaa";
+        fs::write(
+            base.join(".at")
+                .join("cache")
+                .join(format!("{expected_hash}.at")),
+            "tampered",
+        )
+        .expect("write cache file");
+        save_lockfile(
+            &base,
+            &Lockfile {
+                version: super::LOCKFILE_VERSION,
+                entries: HashMap::from([(url.to_string(), expected_hash.to_string())]),
+            },
+        )
+        .expect("save lockfile");
+
+        let err = resolve_cached_path(&base, url).expect_err("expected integrity error");
+        assert!(err.contains("integrity check failed"));
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -1929,6 +2564,45 @@ mod tests {
     }
 
     #[test]
+    fn integration_fmt_does_not_inline_imported_modules() {
+        let temp_dir = std::env::temp_dir().join("at_test_fmt_import_preserve");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("main.at");
+        let lib = temp_dir.join("lib.at");
+        fs::write(
+            &file,
+            "import \"./lib.at\" as lib;\n\nfn main() {\n    return lib.helper();\n}\n",
+        )
+        .expect("write main file");
+        fs::write(&lib, "pub fn helper() -> int { return 1; }\n").expect("write lib file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("fmt")
+            .arg(&file)
+            .output()
+            .expect("run at binary");
+
+        assert!(
+            output.status.success(),
+            "fmt failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("import \"./lib.at\" as lib;"),
+            "expected import to be preserved, got: {}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("helper() -> int"),
+            "fmt should not inline imported module definitions: {}",
+            stdout
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
     fn integration_test_passing() {
         let temp_dir = std::env::temp_dir().join("at_test_pass");
         fs::create_dir_all(&temp_dir).ok();
@@ -2028,6 +2702,132 @@ mod tests {
     }
 
     #[test]
+    fn integration_check_warnings_do_not_fail() {
+        let temp_dir = std::env::temp_dir().join("at_test_check_warning_exit");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(
+            &file,
+            "fn main() -> int {\n    let unused = 1;\n    return 0;\n}\n\nmain();\n",
+        )
+        .expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("check")
+            .arg(&file)
+            .output()
+            .expect("run at binary");
+
+        assert!(
+            output.status.success(),
+            "warning-only check should succeed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[warn]"),
+            "expected warning output for unused local, got: {}",
+            stderr
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn integration_check_lint_errors_still_fail() {
+        let temp_dir = std::env::temp_dir().join("at_test_check_error_exit");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        // Duplicate function names produce a lint error (DuplicateFunction severity = Error).
+        fs::write(
+            &file,
+            "fn helper() -> int { return 1; }\nfn helper() -> int { return 2; }\nfn main() -> int { return helper(); }\nmain();\n",
+        )
+        .expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("check")
+            .arg(&file)
+            .output()
+            .expect("run at binary");
+
+        assert!(!output.status.success(), "expected lint error failure");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[error]"),
+            "expected lint error output, got: {}",
+            stderr
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn strict_types_from_config_enables_strict_mode() {
+        let temp_dir = std::env::temp_dir().join("at_test_check_strict_config");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(&file, "fn f() { let id = |x| x; id(1); }").expect("write test file");
+        fs::write(temp_dir.join(".at-check.toml"), "strict_types = true\n")
+            .expect("write check config");
+
+        let options = CheckOptions::default();
+        let strict =
+            super::resolve_check_strict_types(file.to_str().expect("valid utf-8 path"), &options)
+                .expect("resolve strict mode");
+        assert!(strict, "expected strict mode from config");
+
+        let module = at_parser::parse_module("fn f() { let id = |x| x; id(1); }")
+            .expect("parse test module");
+        let errors =
+            at_check::typecheck_modules_with_mode(&[module], at_check::TypecheckMode::Strict)
+                .expect_err("expected strict unknown flow errors");
+        assert!(errors
+            .iter()
+            .any(|err| err.message.contains("unknown in strict mode")));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn no_strict_types_flag_overrides_config() {
+        let temp_dir = std::env::temp_dir().join("at_test_check_no_strict_override");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(&file, "print(1);").expect("write test file");
+        fs::write(temp_dir.join(".at-check.toml"), "strict_types = true\n")
+            .expect("write check config");
+
+        let options = CheckOptions {
+            strict_types: StrictTypesOverride::Disabled,
+        };
+        let strict =
+            super::resolve_check_strict_types(file.to_str().expect("valid utf-8 path"), &options)
+                .expect("resolve strict mode");
+        assert!(!strict, "expected --no-strict-types override to win");
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn invalid_check_config_fails_fast() {
+        let temp_dir = std::env::temp_dir().join("at_test_check_invalid_config");
+        fs::create_dir_all(&temp_dir).ok();
+        let file = temp_dir.join("test.at");
+        fs::write(&file, "print(1);").expect("write test file");
+        fs::write(temp_dir.join(".at-check.toml"), "strict_types = \"yes\"\n")
+            .expect("write invalid check config");
+
+        let options = CheckOptions::default();
+        let err =
+            super::resolve_check_strict_types(file.to_str().expect("valid utf-8 path"), &options)
+                .expect_err("expected config parse failure");
+        assert!(err.contains("strict_types must be true or false"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
     fn integration_lint_clean() {
         let temp_dir = std::env::temp_dir().join("at_test_lint_clean");
         fs::create_dir_all(&temp_dir).ok();
@@ -2098,24 +2898,41 @@ mod tests {
     #[test]
     fn integration_examples_run() {
         let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-
-        let simple_files = ["sum.at", "arrays.at"];
-        for name in &simple_files {
-            let file = examples_dir.join(name);
-            if file.exists() {
-                let output = std::process::Command::new(at_binary())
-                    .arg("run")
-                    .arg(&file)
-                    .output()
-                    .expect("run at binary");
-
-                assert!(
-                    output.status.success(),
-                    "run {} failed: {:?}",
-                    name,
-                    String::from_utf8_lossy(&output.stderr)
-                );
+        let entries = std::fs::read_dir(&examples_dir).expect("read examples dir");
+        for entry in entries {
+            let entry = entry.expect("read example entry");
+            let file = entry.path();
+            if file.extension().and_then(|ext| ext.to_str()) != Some("at") {
+                continue;
             }
+            let name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+
+            let check_output = std::process::Command::new(at_binary())
+                .arg("check")
+                .arg(&file)
+                .output()
+                .expect("run at check");
+            assert!(
+                check_output.status.success(),
+                "check {} failed: {:?}",
+                name,
+                String::from_utf8_lossy(&check_output.stderr)
+            );
+
+            let run_output = std::process::Command::new(at_binary())
+                .arg("run")
+                .arg(&file)
+                .output()
+                .expect("run at binary");
+            assert!(
+                run_output.status.success(),
+                "run {} failed: {:?}",
+                name,
+                String::from_utf8_lossy(&run_output.stderr)
+            );
         }
     }
 
@@ -2162,6 +2979,62 @@ mod tests {
         assert!(
             output.status.success(),
             "self-import should be handled gracefully: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn integration_std_import_runs_outside_repo_layout() {
+        let temp_dir = std::env::temp_dir().join("at_test_std_import_run");
+        fs::create_dir_all(&temp_dir).ok();
+
+        let file = temp_dir.join("main.at");
+        fs::write(
+            &file,
+            "import \"std\" as std;\nfn main() -> string { return version(); }\nmain();\n",
+        )
+        .expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("run")
+            .arg(&file)
+            .current_dir(&temp_dir)
+            .output()
+            .expect("run at binary");
+
+        assert!(
+            output.status.success(),
+            "std import run should succeed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn integration_std_import_checks_outside_repo_layout() {
+        let temp_dir = std::env::temp_dir().join("at_test_std_import_check");
+        fs::create_dir_all(&temp_dir).ok();
+
+        let file = temp_dir.join("main.at");
+        fs::write(
+            &file,
+            "import \"std\" as std;\nfn main() -> string { return version(); }\nmain();\n",
+        )
+        .expect("write test file");
+
+        let output = std::process::Command::new(at_binary())
+            .arg("check")
+            .arg(&file)
+            .current_dir(&temp_dir)
+            .output()
+            .expect("run at binary");
+
+        assert!(
+            output.status.success(),
+            "std import check should succeed: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
 
@@ -2313,6 +3186,7 @@ fn prune_cache_with_report(base_dir: &Path, options: &PruneOptions) -> Result<Pr
     })
 }
 
+#[derive(Debug)]
 struct Lockfile {
     version: u32,
     entries: HashMap<String, String>,
@@ -2320,6 +3194,7 @@ struct Lockfile {
 
 const LOCKFILE_VERSION: u32 = 1;
 
+#[derive(Debug)]
 struct CacheEntry {
     path: PathBuf,
     hash: String,
@@ -2373,7 +3248,7 @@ fn type_ref_to_schema(ty: &TypeRef) -> serde_json::Value {
             let mut schema = match name.name.as_str() {
                 "array" => {
                     let mut base = type_name_to_schema("array");
-                    if let Some(value_schema) = args.get(0).map(type_ref_to_schema) {
+                    if let Some(value_schema) = args.first().map(type_ref_to_schema) {
                         if let Some(obj) = base.as_object_mut() {
                             obj.insert("items".to_string(), value_schema);
                         }
@@ -2382,7 +3257,7 @@ fn type_ref_to_schema(ty: &TypeRef) -> serde_json::Value {
                 }
                 "option" => {
                     let mut base = type_name_to_schema("option");
-                    if let Some(value_schema) = args.get(0).map(type_ref_to_schema) {
+                    if let Some(value_schema) = args.first().map(type_ref_to_schema) {
                         if let Some(obj) = base.as_object_mut() {
                             if let Some(props) = obj.get_mut("properties") {
                                 if let Some(props) = props.as_object_mut() {
@@ -2567,7 +3442,7 @@ fn json_to_value(value: &JsonValue, ty: Option<&str>) -> Result<Value, String> {
                 .get("entries")
                 .and_then(|value| value.as_array())
                 .ok_or_else(|| "map entries missing".to_string())?;
-            let mut values = Vec::with_capacity(entries.len());
+            let mut map = indexmap::IndexMap::with_capacity(entries.len());
             for entry in entries {
                 let entry_obj = entry
                     .as_object()
@@ -2578,9 +3453,12 @@ fn json_to_value(value: &JsonValue, ty: Option<&str>) -> Result<Value, String> {
                 let value = entry_obj
                     .get("value")
                     .ok_or_else(|| "map entry value missing".to_string())?;
-                values.push((json_to_value(key, None)?, json_to_value(value, None)?));
+                let key_value = json_to_value(key, None)?;
+                let map_key = MapKey::try_from_value(&key_value)
+                    .map_err(|msg| format!("unsupported map key: {msg}"))?;
+                map.insert(map_key, json_to_value(value, None)?);
             }
-            Ok(Value::Map(Rc::new(values)))
+            Ok(Value::Map(Rc::new(map)))
         }
         Some("option") => {
             if value.is_null() {
@@ -2652,7 +3530,7 @@ fn value_to_json(value: Value) -> JsonValue {
             let mut items = Vec::with_capacity(entries.len());
             for (key, value) in entries.iter() {
                 items.push(json!({
-                    "key": value_to_json(key.clone()),
+                    "key": value_to_json(key.to_value()),
                     "value": value_to_json(value.clone())
                 }));
             }
@@ -2680,6 +3558,7 @@ fn value_to_json(value: Value) -> JsonValue {
         Value::Closure(_) => JsonValue::String("<closure>".to_string()),
         Value::Future(_) => JsonValue::String("<future>".to_string()),
         Value::Generator(_) => JsonValue::String("<generator>".to_string()),
+        Value::TaskHandle(id) => JsonValue::String(format!("<task:{}>", id.0)),
         Value::Option(Some(inner)) => value_to_json((*inner).clone()),
         Value::Option(None) => JsonValue::Null,
         Value::Result(Ok(inner)) => json!({
@@ -2721,7 +3600,7 @@ fn print_deps_tree(
     for stmt in module.stmts {
         if let Stmt::Import { path, .. } = stmt {
             let import_path = if path == "std" || path == "std.at" {
-                Path::new("stdlib").join("std.at")
+                ensure_stdlib_path()?
             } else if path.starts_with("http://") || path.starts_with("https://") {
                 fetch_remote(&path, base_dir)?
             } else {

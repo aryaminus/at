@@ -799,3 +799,182 @@ pub fn walk_match_pattern<V: AstVisitor + ?Sized>(visitor: &mut V, pattern: &Mat
         MatchPattern::Binding { pattern, .. } => visitor.visit_match_pattern(pattern),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared builtin metadata registry
+// ---------------------------------------------------------------------------
+
+/// Canonical metadata for a single builtin function.
+///
+/// This is the single source of truth shared between the VM compiler
+/// (`at_vm`) and the type checker (`at_check`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinMeta {
+    /// Function name (e.g. `"now"`, `"len"`, `"keys"`).
+    pub name: &'static str,
+    /// Base/namespace for member-call builtins (e.g. `"time"`, `"rng"`).
+    /// Empty string `""` for free functions.
+    pub base: &'static str,
+    /// Required argument count.
+    pub arity: usize,
+    /// Required capability, if any (e.g. `"time"`, `"rng"`).
+    pub capability: Option<&'static str>,
+}
+
+/// Complete table of all builtin functions.
+///
+/// Order does not matter; lookups scan the table.  The table is small
+/// enough (< 30 entries) that a linear scan is fine.
+pub static BUILTIN_TABLE: &[BuiltinMeta] = &[
+    // Capability-gated member calls
+    BuiltinMeta {
+        name: "now",
+        base: "time",
+        arity: 0,
+        capability: Some("time"),
+    },
+    // time.fixed and rng.deterministic are pure constructors that create
+    // mock/deterministic providers — they do NOT require capabilities.
+    BuiltinMeta {
+        name: "fixed",
+        base: "time",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "deterministic",
+        base: "rng",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "uuid",
+        base: "rng",
+        arity: 0,
+        capability: Some("rng"),
+    },
+    // Free functions
+    BuiltinMeta {
+        name: "assert",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "assert_eq",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "print",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "next",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "len",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "append",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "contains",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "slice",
+        base: "",
+        arity: 3,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "split",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "trim",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "substring",
+        base: "",
+        arity: 3,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "char_at",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "to_upper",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "to_lower",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "parse_int",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "to_string",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "keys",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "values",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+];
+
+/// Look up a builtin by base namespace, name, and argument count.
+pub fn lookup_builtin(base: &str, name: &str, arity: usize) -> Option<&'static BuiltinMeta> {
+    BUILTIN_TABLE
+        .iter()
+        .find(|b| b.base == base && b.name == name && b.arity == arity)
+}
+
+/// Look up the required capability for a member-call builtin.
+pub fn builtin_capability(base: &str, name: &str) -> Option<&'static str> {
+    BUILTIN_TABLE
+        .iter()
+        .find(|b| b.base == base && b.name == name)
+        .and_then(|b| b.capability)
+}

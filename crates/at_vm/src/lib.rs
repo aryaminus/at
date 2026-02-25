@@ -1,15 +1,84 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use at_parser::parse_module;
 use at_syntax::{Expr, Function, Ident, Module, Span, Stmt};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use ureq;
 use uuid::Uuid;
+
+const EMBEDDED_STDLIB_SOURCE: &str = include_str!("../../../stdlib/std.at");
+const REMOTE_FETCH_TIMEOUT_SECS: u64 = 10;
+const REMOTE_FETCH_RETRIES: usize = 3;
+const REMOTE_FETCH_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year / 400
+    } else {
+        (adjusted_year - 399) / 400
+    };
+    let yoe = adjusted_year - era * 400;
+    let month_index = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * month_index + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn parse_fixed_timestamp(input: &str) -> Option<i64> {
+    let text = input.strip_suffix('Z')?;
+    let (date, time) = text.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts.next()?.parse().ok()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+
+    if !(1..=12).contains(&month) || !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
+        return None;
+    }
+    if !(0..=60).contains(&second) {
+        return None;
+    }
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=max_day).contains(&day) {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+fn deterministic_random_from_seed(seed: i64) -> i64 {
+    let mut value = (seed as u64) ^ 0x9E37_79B9_7F4A_7C15;
+    value ^= value >> 12;
+    value ^= value << 25;
+    value ^= value >> 27;
+    let mixed = value.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    (mixed >> 1) as i64
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -19,7 +88,7 @@ pub enum Value {
     Bool(bool),
     Array(Rc<Vec<Value>>),
     Tuple(Rc<Vec<Value>>),
-    Map(Rc<Vec<(Value, Value)>>),
+    Map(Rc<IndexMap<MapKey, Value>>),
     Struct(Rc<BTreeMap<String, Value>>),
     Enum {
         name: String,
@@ -31,7 +100,52 @@ pub enum Value {
     Closure(Rc<ClosureValue>),
     Future(Rc<FutureValue>),
     Generator(Rc<RefCell<GeneratorValue>>),
+    TaskHandle(TaskId),
     Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MapKey {
+    Int(i64),
+    Float(u64),
+    Bool(bool),
+    String(String),
+    Tuple(Vec<MapKey>),
+}
+
+impl MapKey {
+    pub fn try_from_value(value: &Value) -> Result<Self, String> {
+        match value {
+            Value::Int(v) => Ok(MapKey::Int(*v)),
+            Value::Float(v) => Ok(MapKey::Float(v.to_bits())),
+            Value::Bool(v) => Ok(MapKey::Bool(*v)),
+            Value::String(v) => Ok(MapKey::String(v.as_ref().clone())),
+            Value::Tuple(items) => {
+                let mut converted = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    converted.push(MapKey::try_from_value(item)?);
+                }
+                Ok(MapKey::Tuple(converted))
+            }
+            _ => Err(format!(
+                "unsupported map key type: {}",
+                type_name_of_value(value)
+            )),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        match self {
+            MapKey::Int(v) => Value::Int(*v),
+            MapKey::Float(bits) => Value::Float(f64::from_bits(*bits)),
+            MapKey::Bool(v) => Value::Bool(*v),
+            MapKey::String(v) => Value::String(Rc::new(v.clone())),
+            MapKey::Tuple(items) => {
+                let values = items.iter().map(MapKey::to_value).collect::<Vec<_>>();
+                Value::Tuple(Rc::new(values))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +173,10 @@ pub struct GeneratorValue {
     done: bool,
 }
 
+/// Unique identifier for a cooperative async task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId(pub u64);
+
 pub fn format_value(value: &Value) -> String {
     match value {
         Value::Int(value) => value.to_string(),
@@ -69,6 +187,7 @@ pub fn format_value(value: &Value) -> String {
         Value::Closure(_) => "<closure>".to_string(),
         Value::Future(_) => "<future>".to_string(),
         Value::Generator(_) => "<generator>".to_string(),
+        Value::TaskHandle(id) => format!("<task:{}>", id.0),
         Value::Array(items) => format!(
             "[{}]",
             items
@@ -80,7 +199,9 @@ pub fn format_value(value: &Value) -> String {
         Value::Map(entries) => {
             let items = entries
                 .iter()
-                .map(|(key, value)| format!("{}: {}", format_value(key), format_value(value)))
+                .map(|(key, value)| {
+                    format!("{}: {}", format_value(&key.to_value()), format_value(value))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("map {{{items}}}")
@@ -115,6 +236,27 @@ pub fn format_value(value: &Value) -> String {
         Value::Option(None) => "none".to_string(),
         Value::Result(Ok(inner)) => format!("ok({})", format_value(inner)),
         Value::Result(Err(inner)) => format!("err({})", format_value(inner)),
+    }
+}
+
+fn type_name_of_value(value: &Value) -> &'static str {
+    match value {
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::String(_) => "string",
+        Value::Bool(_) => "bool",
+        Value::Array(_) => "array",
+        Value::Tuple(_) => "tuple",
+        Value::Map(_) => "map",
+        Value::Struct(_) => "struct",
+        Value::Enum { .. } => "enum",
+        Value::Option(_) => "option",
+        Value::Result(_) => "result",
+        Value::Closure(_) => "closure",
+        Value::Future(_) => "future",
+        Value::Generator(_) => "generator",
+        Value::TaskHandle(_) => "task",
+        Value::Unit => "unit",
     }
 }
 
@@ -227,6 +369,8 @@ pub enum Builtin {
     ToLower,
     ParseInt,
     ToString,
+    Keys,
+    Values,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,6 +453,7 @@ pub struct FunctionChunk {
     pub params: usize,
     pub captures: usize,
     pub locals: usize,
+    pub source_path: Option<String>,
     pub needs: Vec<usize>,
     pub is_async: bool,
     pub is_generator: bool,
@@ -316,7 +461,7 @@ pub struct FunctionChunk {
     pub chunk: Chunk,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<FunctionChunk>,
     pub main: Chunk,
@@ -550,19 +695,6 @@ fn ensure_capability_order(program: &mut Program) {
     }
 }
 
-impl Default for Program {
-    fn default() -> Self {
-        Self {
-            functions: Vec::new(),
-            main: Chunk::default(),
-            main_locals: 0,
-            sources: HashMap::new(),
-            entry: None,
-            capability_names: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct LoopContext {
     breaks: Vec<usize>,
@@ -573,6 +705,7 @@ struct LoopContext {
 struct LoadedModule {
     module: Module,
     imports: Vec<String>,
+    function_sources: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -635,6 +768,7 @@ impl std::error::Error for VmError {}
 #[derive(Debug, Clone, PartialEq)]
 pub struct StackFrame {
     pub name: String,
+    pub source_path: Option<String>,
     pub span: Option<Span>,
 }
 
@@ -646,6 +780,10 @@ pub struct Compiler {
     scopes: Vec<HashMap<String, usize>>,
     const_scopes: Vec<HashSet<String>>,
     next_local: usize,
+    /// Slots freed by `pop_scope`, available for reuse.
+    free_slots: Vec<usize>,
+    /// Per-scope record of which slots were allocated in that scope.
+    scope_allocated: Vec<Vec<usize>>,
     functions: HashMap<String, usize>,
     function_arity: HashMap<String, usize>,
     function_needs: HashMap<String, Vec<usize>>,
@@ -660,6 +798,8 @@ pub struct Compiler {
     closure_chunks: Vec<FunctionChunk>,
     capability_ids: HashMap<String, usize>,
     capability_names: Vec<String>,
+    function_sources: HashMap<String, String>,
+    current_function_source: Option<String>,
 }
 
 impl Compiler {
@@ -714,6 +854,9 @@ impl Compiler {
         path.reverse();
         let mut all_segments = path;
         all_segments.extend(segments);
+
+        // Wrap temp slots in a dedicated scope so they are reclaimed after use.
+        self.push_scope();
 
         let mut temp_slots = Vec::with_capacity(all_segments.len());
         for _ in 0..all_segments.len() {
@@ -819,6 +962,9 @@ impl Compiler {
 
         chunk.push(Op::LoadLocal(updated_slot), Some(root_ident.span));
         chunk.push(Op::StoreLocal(slot), Some(root_ident.span));
+
+        // Reclaim temp slots for reuse.
+        self.pop_scope();
         Ok(())
     }
 
@@ -827,6 +973,8 @@ impl Compiler {
             scopes: Vec::new(),
             const_scopes: Vec::new(),
             next_local: 0,
+            free_slots: Vec::new(),
+            scope_allocated: Vec::new(),
             functions: HashMap::new(),
             function_arity: HashMap::new(),
             function_needs: HashMap::new(),
@@ -841,9 +989,19 @@ impl Compiler {
             closure_chunks: Vec::new(),
             capability_ids: HashMap::new(),
             capability_names: Vec::new(),
+            function_sources: HashMap::new(),
+            current_function_source: None,
         }
     }
+}
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Compiler {
     pub fn compile_module(&mut self, module: &Module) -> Result<Program, VmError> {
         let mut program = Program::default();
         program.sources.clear();
@@ -858,6 +1016,7 @@ impl Compiler {
         self.enums.clear();
         self.const_scopes.clear();
         self.current_function = None;
+        self.current_function_source = None;
         self.closure_chunks.clear();
         self.base_function_count = module.functions.len();
         self.capability_ids.clear();
@@ -907,15 +1066,17 @@ impl Compiler {
                 .collect();
             self.function_needs
                 .insert(func.name.name.clone(), needs.clone());
-            let is_generator = func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, Stmt::Yield { .. }));
+            let source_path = self
+                .function_sources
+                .get(&func.name.name)
+                .cloned()
+                .or_else(|| module.source_path.clone());
             program.functions.push(FunctionChunk {
                 name: func.name.name.clone(),
                 params: func.params.len(),
                 captures: 0,
                 locals: 0,
+                source_path,
                 needs,
                 is_async: func.is_async,
                 is_generator,
@@ -926,14 +1087,18 @@ impl Compiler {
 
         for (id, func) in module.functions.iter().enumerate() {
             self.current_function = Some(func.name.name.clone());
+            self.current_function_source = program.functions[id].source_path.clone();
             let (chunk, locals) = self.compile_function(func)?;
             self.current_function = None;
+            self.current_function_source = None;
             program.functions[id].chunk = chunk;
             program.functions[id].locals = locals;
         }
 
         self.scopes.clear();
         self.next_local = 0;
+        self.free_slots.clear();
+        self.scope_allocated.clear();
         self.push_scope();
         for stmt in &module.stmts {
             self.compile_stmt(stmt, &mut program.main)?;
@@ -998,6 +1163,8 @@ impl Compiler {
     pub fn compile_test_body(&mut self, stmts: &[Stmt]) -> Result<Chunk, VmError> {
         self.scopes.clear();
         self.next_local = 0;
+        self.free_slots.clear();
+        self.scope_allocated.clear();
         self.push_scope();
         let mut chunk = Chunk::default();
         for stmt in stmts {
@@ -1010,6 +1177,8 @@ impl Compiler {
     fn compile_function(&mut self, func: &Function) -> Result<(Chunk, usize), VmError> {
         self.scopes.clear();
         self.next_local = 0;
+        self.free_slots.clear();
+        self.scope_allocated.clear();
         self.push_scope();
         for param in &func.params {
             self.bind_local_checked(&param.name.name, param.name.span)?;
@@ -1028,10 +1197,7 @@ impl Compiler {
     fn add_transitive_needs(&mut self, callee_name: &str) {
         if let Some(current) = &self.current_function {
             if let Some(callee_needs) = self.function_needs.get(callee_name).cloned() {
-                let current_needs = self
-                    .function_needs
-                    .entry(current.clone())
-                    .or_insert_with(Vec::new);
+                let current_needs = self.function_needs.entry(current.clone()).or_default();
                 for need in callee_needs {
                     if !current_needs.contains(&need) {
                         current_needs.push(need);
@@ -1047,6 +1213,7 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt, chunk: &mut Chunk) -> Result<(), VmError> {
         match stmt {
+            // Imports are resolved by module loading before code generation.
             Stmt::Import { .. } => {}
             Stmt::TypeAlias { .. } => {}
             Stmt::Enum { .. } => {}
@@ -1904,7 +2071,7 @@ impl Compiler {
                 patch_jump(&mut chunk.code, jump_index, after_catch);
 
                 if let Some(finally_block) = finally_block {
-                    let _ = self.compile_expr(finally_block, chunk)?;
+                    self.compile_expr(finally_block, chunk)?;
                     chunk.push(Op::Pop, expr_span(finally_block));
                 }
             }
@@ -2482,11 +2649,15 @@ impl Compiler {
     ) -> Result<usize, VmError> {
         let saved_scopes = std::mem::take(&mut self.scopes);
         let saved_next_local = self.next_local;
+        let saved_free_slots = std::mem::take(&mut self.free_slots);
+        let saved_scope_allocated = std::mem::take(&mut self.scope_allocated);
         let saved_loop_stack = std::mem::take(&mut self.loop_stack);
         let saved_current_function = self.current_function.take();
 
         self.scopes = Vec::new();
         self.next_local = 0;
+        self.free_slots = Vec::new();
+        self.scope_allocated = Vec::new();
         self.loop_stack = Vec::new();
         self.push_scope();
 
@@ -2504,6 +2675,8 @@ impl Compiler {
 
         self.scopes = saved_scopes;
         self.next_local = saved_next_local;
+        self.free_slots = saved_free_slots;
+        self.scope_allocated = saved_scope_allocated;
         self.loop_stack = saved_loop_stack;
         self.current_function = saved_current_function;
 
@@ -2515,6 +2688,7 @@ impl Compiler {
             params: params.len(),
             captures: captures.len(),
             locals,
+            source_path: self.current_function_source.clone(),
             needs: Vec::new(),
             is_async: false,
             is_generator: false,
@@ -2688,7 +2862,18 @@ impl Compiler {
                     self.collect_free_vars_expr(&field.value, bound, captures, seen);
                 }
             }
-            Expr::Closure { .. } => {}
+            Expr::Closure { params, body, .. } => {
+                // Nested closures may reference symbols from ancestor scopes.
+                // Walk the nested body so those free vars are captured transitively.
+                self.push_bound_scope(bound);
+                if let Some(scope) = bound.last_mut() {
+                    for param in params {
+                        scope.insert(param.name.clone());
+                    }
+                }
+                self.collect_free_vars_expr(body, bound, captures, seen);
+                self.pop_bound_scope(bound);
+            }
         }
     }
 
@@ -2814,6 +2999,7 @@ impl Compiler {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn bind_pattern_names(
         &self,
         pattern: &at_syntax::MatchPattern,
@@ -2887,11 +3073,15 @@ impl Compiler {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.const_scopes.push(HashSet::new());
+        self.scope_allocated.push(Vec::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.const_scopes.pop();
+        if let Some(slots) = self.scope_allocated.pop() {
+            self.free_slots.extend(slots);
+        }
     }
 
     fn bind_local_checked(&mut self, name: &str, span: Span) -> Result<usize, VmError> {
@@ -2902,13 +3092,26 @@ impl Compiler {
                     Some(span),
                 ));
             }
-            let slot = self.next_local;
-            self.next_local += 1;
+            let slot = if let Some(reused) = self.free_slots.pop() {
+                reused
+            } else {
+                let s = self.next_local;
+                self.next_local += 1;
+                s
+            };
             scope.insert(name.to_string(), slot);
+            if let Some(alloc) = self.scope_allocated.last_mut() {
+                alloc.push(slot);
+            }
             return Ok(slot);
         }
-        let slot = self.next_local;
-        self.next_local += 1;
+        let slot = if let Some(reused) = self.free_slots.pop() {
+            reused
+        } else {
+            let s = self.next_local;
+            self.next_local += 1;
+            s
+        };
         Ok(slot)
     }
 
@@ -2990,7 +3193,9 @@ impl Compiler {
         module: &Module,
         sources: HashMap<String, String>,
         entry: Option<String>,
+        function_sources: HashMap<String, String>,
     ) -> Result<Program, VmError> {
+        self.function_sources = function_sources;
         let mut program = self.compile_module(module)?;
         program.sources = sources;
         program.entry = entry;
@@ -3002,7 +3207,7 @@ pub fn compile_entry_with_imports(path: &str) -> Result<Program, VmError> {
     let (loaded, sources) = load_module_with_sources(path)?;
     let entry = loaded.module.source_path.clone();
     let mut compiler = Compiler::new();
-    compiler.compile_module_with_sources(&loaded.module, sources, entry)
+    compiler.compile_module_with_sources(&loaded.module, sources, entry, loaded.function_sources)
 }
 
 fn load_module_with_sources(
@@ -3033,6 +3238,7 @@ fn load_module_inner(
                 source_path: Some(normalized_str),
             },
             imports: Vec::new(),
+            function_sources: HashMap::new(),
         });
     }
 
@@ -3046,6 +3252,10 @@ fn load_module_inner(
     let mut merged_functions = module.functions.clone();
     let mut merged_stmts = Vec::new();
     let mut merged_imports = Vec::new();
+    let mut merged_function_sources = HashMap::new();
+    for func in &merged_functions {
+        merged_function_sources.insert(func.name.name.clone(), normalized_str.clone());
+    }
     let mut seen_aliases = HashSet::new();
     let base_dir = normalized
         .parent()
@@ -3061,7 +3271,8 @@ fn load_module_inner(
                     ));
                 }
                 let import_path = if path == "std" || path == "std.at" {
-                    base_dir.join("stdlib").join("std.at")
+                    ensure_stdlib_path()
+                        .map_err(|message| compile_error(message, Some(alias.span)))?
                 } else if path.starts_with("http://") || path.starts_with("https://") {
                     fetch_remote(&path, base_dir)
                         .map_err(|message| compile_error(message, Some(alias.span)))?
@@ -3070,9 +3281,24 @@ fn load_module_inner(
                 };
                 let mut imported =
                     load_module_inner(&import_path.to_string_lossy(), visited, sources)?;
+                let public_function_names: Vec<String> = imported
+                    .module
+                    .functions
+                    .iter()
+                    .filter(|func| func.is_pub)
+                    .map(|func| func.name.name.clone())
+                    .collect();
                 prefix_module(&mut imported.module, &alias.name);
+                for name in public_function_names {
+                    if let Some(source_path) = imported.function_sources.remove(&name) {
+                        imported
+                            .function_sources
+                            .insert(format!("{}.{}", alias.name, name), source_path);
+                    }
+                }
                 merged_imports.push(import_path.to_string_lossy().to_string());
                 merged_imports.extend(imported.imports);
+                merged_function_sources.extend(imported.function_sources);
                 merged_functions.extend(imported.module.functions);
                 merged_stmts.extend(imported.module.stmts);
                 continue;
@@ -3090,7 +3316,32 @@ fn load_module_inner(
             source_path: Some(normalized_str),
         },
         imports: merged_imports,
+        function_sources: merged_function_sources,
     })
+}
+
+fn ensure_stdlib_path() -> Result<std::path::PathBuf, String> {
+    let dir = std::env::temp_dir().join("at").join("stdlib");
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "error creating embedded stdlib directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join("std.at");
+    let write_file = match std::fs::read_to_string(&path) {
+        Ok(existing) => existing != EMBEDDED_STDLIB_SOURCE,
+        Err(_) => true,
+    };
+    if write_file {
+        std::fs::write(&path, EMBEDDED_STDLIB_SOURCE).map_err(|err| {
+            format!(
+                "error writing embedded stdlib file {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(path)
 }
 
 fn prefix_module(module: &mut Module, alias: &str) {
@@ -3114,18 +3365,53 @@ fn prefix_module(module: &mut Module, alias: &str) {
 }
 
 fn fetch_remote(url: &str, base_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = resolve_cached_path(base_dir, url) {
-        if path.exists() {
-            return Ok(path);
+    match resolve_cached_path(base_dir, url) {
+        Ok(path) if path.exists() => return Ok(path),
+        Ok(_) => {}
+        Err(_) => {}
+    }
+    for attempt in 1..=REMOTE_FETCH_RETRIES {
+        let request = ureq::get(url).timeout(Duration::from_secs(REMOTE_FETCH_TIMEOUT_SECS));
+        match request.call() {
+            Ok(response) => {
+                let contents = read_remote_response(url, response)?;
+                return store_remote_contents(url, &contents, base_dir);
+            }
+            Err(ureq::Error::Status(status, _response)) => {
+                if status >= 500 && attempt < REMOTE_FETCH_RETRIES {
+                    std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                    continue;
+                }
+                return Err(format!(
+                    "error fetching {url}: remote returned status {status}"
+                ));
+            }
+            Err(err) => {
+                if attempt < REMOTE_FETCH_RETRIES {
+                    std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                    continue;
+                }
+                return Err(format!("error fetching {url}: {err}"));
+            }
         }
     }
-    let response = ureq::get(url)
-        .call()
-        .map_err(|err| format!("error fetching {url}: {err}"))?;
-    let contents = response
-        .into_string()
+    Err(format!("error fetching {url}: exhausted retries"))
+}
+
+fn read_remote_response(url: &str, response: ureq::Response) -> Result<String, String> {
+    let mut reader = response.into_reader().take(REMOTE_FETCH_MAX_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
         .map_err(|err| format!("error reading response from {url}: {err}"))?;
-    store_remote_contents(url, &contents, base_dir)
+    if bytes.len() as u64 > REMOTE_FETCH_MAX_BYTES {
+        return Err(format!(
+            "error fetching {url}: response exceeds {} bytes",
+            REMOTE_FETCH_MAX_BYTES
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| format!("error reading response from {url}: body is not valid utf-8"))
 }
 
 fn store_remote_contents(
@@ -3153,7 +3439,21 @@ fn resolve_cached_path(
 ) -> Result<std::path::PathBuf, String> {
     let lockfile = load_lockfile(base_dir)?;
     if let Some(hash) = lockfile.entries.get(url) {
-        return Ok(cache_dir(base_dir).join(format!("{hash}.at")));
+        let path = cache_dir(base_dir).join(format!("{hash}.at"));
+        if path.exists() {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|err| format!("error reading {}: {err}", path.display()))?;
+            let actual = hash_contents(&contents);
+            if actual != *hash {
+                return Err(format!(
+                    "cached remote integrity check failed for {}: expected {}, found {}",
+                    path.display(),
+                    hash,
+                    actual
+                ));
+            }
+        }
+        return Ok(path);
     }
     Ok(cache_dir(base_dir).join(cache_file_name(url)))
 }
@@ -3175,8 +3475,11 @@ fn hash_contents(contents: &str) -> String {
 
 #[derive(Debug, Default, Clone)]
 struct Lockfile {
+    version: u32,
     entries: HashMap<String, String>,
 }
+
+const LOCKFILE_VERSION: u32 = 1;
 
 fn lockfile_path(base_dir: &std::path::Path) -> std::path::PathBuf {
     base_dir.join(".at").join("lock")
@@ -3185,28 +3488,48 @@ fn lockfile_path(base_dir: &std::path::Path) -> std::path::PathBuf {
 fn load_lockfile(base_dir: &std::path::Path) -> Result<Lockfile, String> {
     let path = lockfile_path(base_dir);
     if !path.exists() {
-        return Ok(Lockfile::default());
+        return Ok(Lockfile {
+            version: LOCKFILE_VERSION,
+            entries: HashMap::new(),
+        });
     }
     let contents = std::fs::read_to_string(&path)
         .map_err(|err| format!("error reading {}: {err}", path.display()))?;
     let mut entries = HashMap::new();
+    let mut version = 0;
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let url = match parts.next() {
+        let token = match parts.next() {
             Some(value) => value.to_string(),
             None => continue,
         };
-        let hash = match parts.next() {
-            Some(value) => value.to_string(),
-            None => continue,
-        };
-        entries.insert(url, hash);
+        if token == "version" {
+            let value = match parts.next() {
+                Some(value) => value,
+                None => continue,
+            };
+            version = value
+                .parse::<u32>()
+                .map_err(|_| format!("invalid lockfile version: {value}"))?;
+            continue;
+        }
+        if let Some(hash) = parts.next() {
+            entries.insert(token, hash.to_string());
+        }
     }
-    Ok(Lockfile { entries })
+    if version > LOCKFILE_VERSION {
+        return Err(format!("unsupported lockfile version: {version}"));
+    }
+    let version = if version == 0 {
+        LOCKFILE_VERSION
+    } else {
+        version
+    };
+    Ok(Lockfile { version, entries })
 }
 
 fn save_lockfile(base_dir: &std::path::Path, lockfile: &Lockfile) -> Result<(), String> {
@@ -3215,10 +3538,13 @@ fn save_lockfile(base_dir: &std::path::Path, lockfile: &Lockfile) -> Result<(), 
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("error creating lockfile dir: {err}"))?;
     }
-    let mut lines = Vec::new();
-    for (url, hash) in &lockfile.entries {
-        lines.push(format!("{url} {hash}"));
-    }
+    let mut lines: Vec<String> = lockfile
+        .entries
+        .iter()
+        .map(|(url, hash)| format!("{url} {hash}"))
+        .collect();
+    lines.sort();
+    lines.insert(0, format!("version {}", lockfile.version));
     std::fs::write(path, lines.join("\n"))
         .map_err(|err| format!("error writing lockfile: {err}"))?;
     Ok(())
@@ -3234,6 +3560,60 @@ struct Frame {
     capability_scopes: Vec<Vec<usize>>,
 }
 
+/// A cooperative task: a suspended async computation with its own
+/// stack and call frames.  Tasks are scheduled round-robin by the
+/// [`Scheduler`] and make progress in instruction-quantum slices.
+#[derive(Debug, Clone)]
+struct Task {
+    id: TaskId,
+    frames: Vec<Frame>,
+    stack: Vec<Value>,
+    /// Whether the task has finished execution.
+    done: bool,
+}
+
+/// Single-threaded, deterministic cooperative scheduler.
+///
+/// Maintains a FIFO ready queue of [`Task`]s and runs each for up to
+/// `quantum` instructions before rotating to the next.
+#[derive(Debug)]
+struct Scheduler {
+    ready: std::collections::VecDeque<Task>,
+    next_task_id: u64,
+    /// Maximum instructions per task time-slice.
+    quantum: usize,
+    /// Results of completed tasks, keyed by [`TaskId`].
+    completed: HashMap<TaskId, Value>,
+}
+
+impl Scheduler {
+    fn new() -> Self {
+        Self {
+            ready: std::collections::VecDeque::new(),
+            next_task_id: 0,
+            quantum: 1024,
+            completed: HashMap::new(),
+        }
+    }
+
+    fn spawn(&mut self, frames: Vec<Frame>, stack: Vec<Value>) -> TaskId {
+        let id = TaskId(self.next_task_id);
+        self.next_task_id += 1;
+        self.ready.push_back(Task {
+            id,
+            frames,
+            stack,
+            done: false,
+        });
+        id
+    }
+
+    fn reset(&mut self) {
+        self.ready.clear();
+        self.completed.clear();
+    }
+}
+
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
@@ -3245,6 +3625,7 @@ pub struct Vm {
     output_buffer: Option<Rc<RefCell<Vec<String>>>>,
     debugger: Option<Rc<RefCell<dyn DebuggerHook>>>,
     profiler: Option<Profiler>,
+    scheduler: Scheduler,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3256,8 +3637,11 @@ pub struct Profiler {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionMode {
-    RunToCompletion,
-    RunUntilYield,
+    ToCompletion,
+    UntilYield,
+    /// Run until an `await` on an unresolved future is encountered,
+    /// then return `Ok(None)` so the scheduler can context-switch.
+    UntilSuspend,
 }
 
 impl Vm {
@@ -3269,7 +3653,12 @@ impl Vm {
         }
     }
 
-    fn run_future(&mut self, program: &Program, future: &FutureValue) -> Result<Value, VmError> {
+    /// Prepare a [`Frame`] for the given future's async function.
+    fn prepare_future_frame(
+        &mut self,
+        program: &Program,
+        future: &FutureValue,
+    ) -> Result<Frame, VmError> {
         let func = program.functions.get(future.func_id).ok_or_else(|| {
             self.runtime_error(
                 format!("invalid function id: {}", future.func_id),
@@ -3301,30 +3690,148 @@ impl Vm {
         for (idx, value) in future.args.iter().cloned().enumerate() {
             locals[func.captures + idx] = value;
         }
-        let capabilities = future.capabilities.clone();
-        let saved_stack = std::mem::take(&mut self.stack);
-        let saved_frames = std::mem::take(&mut self.frames);
-        let saved_instruction_count = self.instruction_count;
-
-        self.stack = Vec::new();
-        self.frames = Vec::new();
-        self.instruction_count = 0;
-        self.frames.push(Frame {
+        Ok(Frame {
             chunk_id: future.func_id,
             ip: 0,
             locals,
-            capabilities,
+            capabilities: future.capabilities.clone(),
             defers: Vec::new(),
             capability_scopes: Vec::new(),
-        });
-        let result = self
-            .run_with_existing_frames(program, ExecutionMode::RunToCompletion)?
-            .unwrap_or(Value::Unit);
+        })
+    }
 
-        self.stack = saved_stack;
-        self.frames = saved_frames;
-        self.instruction_count = saved_instruction_count;
-        Ok(result)
+    /// Spawn a future as a scheduler [`Task`] and run it.  Returns the
+    /// result immediately if the task completes within one quantum, or
+    /// `None` if it suspended (hit a nested `await`).
+    fn run_spawned_task(
+        &mut self,
+        program: &Program,
+        task_id: TaskId,
+    ) -> Result<Option<Value>, VmError> {
+        // Already completed (e.g. by a prior scheduler round)?
+        if let Some(val) = self.scheduler.completed.remove(&task_id) {
+            return Ok(Some(val));
+        }
+        let task_pos = self.scheduler.ready.iter().position(|t| t.id == task_id);
+        let mut task = match task_pos {
+            Some(pos) => self
+                .scheduler
+                .ready
+                .remove(pos)
+                .expect("position was just found"),
+            None => {
+                return Err(self.runtime_error(
+                    format!("task {} not found", task_id.0),
+                    None,
+                    program,
+                ));
+            }
+        };
+
+        let saved_stack = std::mem::take(&mut self.stack);
+        let saved_frames = std::mem::take(&mut self.frames);
+
+        self.stack = std::mem::take(&mut task.stack);
+        self.frames = std::mem::take(&mut task.frames);
+
+        let result = match self.run_with_existing_frames(program, ExecutionMode::UntilSuspend) {
+            Ok(val) => val,
+            Err(err) => {
+                self.stack = saved_stack;
+                self.frames = saved_frames;
+                return Err(err);
+            }
+        };
+
+        if self.frames.is_empty() {
+            // Task completed.
+            let value = result.unwrap_or(Value::Unit);
+            self.scheduler.completed.insert(task_id, value.clone());
+            self.stack = saved_stack;
+            self.frames = saved_frames;
+            Ok(Some(value))
+        } else {
+            // Task suspended — save and re-enqueue.
+            task.stack = std::mem::take(&mut self.stack);
+            task.frames = std::mem::take(&mut self.frames);
+            self.scheduler.ready.push_back(task);
+            self.stack = saved_stack;
+            self.frames = saved_frames;
+            Ok(None)
+        }
+    }
+
+    /// Run the scheduler round-robin until the target task completes.
+    fn scheduler_drain_until(
+        &mut self,
+        program: &Program,
+        target_id: TaskId,
+    ) -> Result<Value, VmError> {
+        loop {
+            if let Some(val) = self.scheduler.completed.remove(&target_id) {
+                return Ok(val);
+            }
+            if self.scheduler.ready.is_empty() {
+                return Err(self.runtime_error(
+                    format!("deadlock: task {} never completed", target_id.0),
+                    None,
+                    program,
+                ));
+            }
+            // Round-robin: run the next ready task for one quantum.
+            let mut task = self
+                .scheduler
+                .ready
+                .pop_front()
+                .expect("ready queue non-empty");
+            if task.done {
+                continue;
+            }
+            let task_id = task.id;
+
+            let saved_stack = std::mem::take(&mut self.stack);
+            let saved_frames = std::mem::take(&mut self.frames);
+
+            self.stack = std::mem::take(&mut task.stack);
+            self.frames = std::mem::take(&mut task.frames);
+
+            let result = match self.run_with_existing_frames(program, ExecutionMode::UntilSuspend) {
+                Ok(val) => val,
+                Err(err) => {
+                    self.stack = saved_stack;
+                    self.frames = saved_frames;
+                    return Err(err);
+                }
+            };
+
+            if self.frames.is_empty() {
+                let value = result.unwrap_or(Value::Unit);
+                self.scheduler.completed.insert(task_id, value);
+                task.done = true;
+            } else {
+                task.stack = std::mem::take(&mut self.stack);
+                task.frames = std::mem::take(&mut self.frames);
+                self.scheduler.ready.push_back(task);
+            }
+
+            self.stack = saved_stack;
+            self.frames = saved_frames;
+        }
+    }
+
+    /// Run a future to completion using the cooperative scheduler.
+    ///
+    /// The future is spawned as a [`Task`].  If it encounters nested
+    /// `await` expressions, they are recursively spawned as sub-tasks
+    /// and the scheduler round-robins between them.
+    fn run_future(&mut self, program: &Program, future: &FutureValue) -> Result<Value, VmError> {
+        let frame = self.prepare_future_frame(program, future)?;
+        let task_id = self.scheduler.spawn(vec![frame], Vec::new());
+
+        match self.run_spawned_task(program, task_id)? {
+            Some(value) => Ok(value),
+            None => self.scheduler_drain_until(program, task_id),
+        }
     }
 
     fn run_generator(
@@ -3367,7 +3874,7 @@ impl Vm {
         for frame in &mut self.frames {
             frame.capabilities = generator.capabilities.clone();
         }
-        let result = self.run_with_existing_frames(program, ExecutionMode::RunUntilYield)?;
+        let result = self.run_with_existing_frames(program, ExecutionMode::UntilYield)?;
         generator.stack = std::mem::take(&mut self.stack);
         generator.frames = std::mem::take(&mut self.frames);
         for frame in &mut generator.frames {
@@ -3402,14 +3909,26 @@ impl Vm {
             .iter()
             .rev()
             .map(|frame| {
-                let (name, span) = if frame.chunk_id == usize::MAX {
-                    ("<main>".to_string(), span_at(&program.main, frame.ip))
+                let (name, source_path, span) = if frame.chunk_id == usize::MAX {
+                    (
+                        "<main>".to_string(),
+                        program.entry.clone(),
+                        span_at(&program.main, frame.ip),
+                    )
                 } else if let Some(func) = program.functions.get(frame.chunk_id) {
-                    (func.name.clone(), span_at(&func.chunk, frame.ip))
+                    (
+                        func.name.clone(),
+                        func.source_path.clone(),
+                        span_at(&func.chunk, frame.ip),
+                    )
                 } else {
-                    ("<unknown>".to_string(), None)
+                    ("<unknown>".to_string(), None, None)
                 };
-                StackFrame { name, span }
+                StackFrame {
+                    name,
+                    source_path,
+                    span,
+                }
             })
             .collect()
     }
@@ -3426,9 +3945,18 @@ impl Vm {
             output_buffer: None,
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
+}
 
+impl Default for Vm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vm {
     pub fn with_capabilities(capabilities: HashSet<String>) -> Self {
         let mut ids = HashSet::new();
         for capability in capabilities {
@@ -3447,6 +3975,7 @@ impl Vm {
             output_buffer: None,
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
 
@@ -3462,6 +3991,7 @@ impl Vm {
             output_buffer: None,
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
 
@@ -3477,6 +4007,7 @@ impl Vm {
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
 
@@ -3496,6 +4027,7 @@ impl Vm {
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
 
@@ -3511,6 +4043,7 @@ impl Vm {
             output_buffer: Some(Rc::new(RefCell::new(Vec::new()))),
             debugger: None,
             profiler: None,
+            scheduler: Scheduler::new(),
         }
     }
 
@@ -3526,6 +4059,12 @@ impl Vm {
         vm
     }
 
+    pub fn enable_profiler(&mut self) {
+        if self.profiler.is_none() {
+            self.profiler = Some(Profiler::default());
+        }
+    }
+
     pub fn take_profiler(&mut self) -> Option<Profiler> {
         self.profiler.take()
     }
@@ -3534,6 +4073,7 @@ impl Vm {
         self.stack.clear();
         self.frames.clear();
         self.instruction_count = 0;
+        self.scheduler.reset();
         let locals = self.take_locals(program.main_locals);
         let capabilities = self.initial_capabilities.clone();
         self.frames.push(Frame {
@@ -3544,7 +4084,7 @@ impl Vm {
             defers: Vec::new(),
             capability_scopes: Vec::new(),
         });
-        self.run_with_existing_frames(program, ExecutionMode::RunToCompletion)
+        self.run_with_existing_frames(program, ExecutionMode::ToCompletion)
     }
 
     fn run_with_existing_frames(
@@ -3552,6 +4092,30 @@ impl Vm {
         program: &Program,
         mode: ExecutionMode,
     ) -> Result<Option<Value>, VmError> {
+        let result = self.run_dispatch_loop(program, mode);
+        // Enrich runtime errors with a stack trace built from the live VM state.
+        // This replaces the previous per-instruction thread-local approach.
+        match result {
+            Err(VmError::Runtime {
+                message,
+                span,
+                stack: None,
+            }) => Err(VmError::Runtime {
+                message,
+                span,
+                stack: Some(self.build_stack_trace(program)),
+            }),
+            other => other,
+        }
+    }
+
+    fn run_dispatch_loop(
+        &mut self,
+        program: &Program,
+        mode: ExecutionMode,
+    ) -> Result<Option<Value>, VmError> {
+        let quantum = self.scheduler.quantum;
+        let mut quantum_counter: usize = 0;
         loop {
             // Check execution limit
             if let Some(max) = self.max_instructions {
@@ -3559,6 +4123,13 @@ impl Vm {
                     return Err(VmError::ExecutionLimit {
                         message: format!("execution limit exceeded: {} instructions", max),
                     });
+                }
+            }
+            // Quantum preemption for cooperative scheduling.
+            if mode == ExecutionMode::UntilSuspend {
+                quantum_counter += 1;
+                if quantum_counter > quantum {
+                    return Ok(None);
                 }
             }
             self.instruction_count += 1;
@@ -3603,8 +4174,8 @@ impl Vm {
                     .entry(func_name.to_string())
                     .or_insert(0) += 1;
                 if let Some(op) = chunk.code.get(frame_ip) {
-                    let name = format!("{:?}", op);
-                    *profiler.op_counts.entry(name).or_insert(0) += 1;
+                    let name = Self::opcode_name(op);
+                    *profiler.op_counts.entry(name.to_string()).or_insert(0) += 1;
                 }
             }
 
@@ -3634,14 +4205,14 @@ impl Vm {
                             capability_scopes: Vec::new(),
                         });
                         let _ =
-                            self.run_with_existing_frames(program, ExecutionMode::RunToCompletion)?;
+                            self.run_with_existing_frames(program, ExecutionMode::ToCompletion)?;
                     }
                 }
                 return Ok(result);
             }
 
-            set_stack_trace(self.build_stack_trace(program));
-            set_current_span(span_at(chunk, frame_ip));
+            // Stack trace and span are built on-demand only when an error
+            // occurs, avoiding per-instruction allocation overhead.
 
             let mut advance = true;
             match &chunk.code[frame_ip] {
@@ -3978,18 +4549,42 @@ impl Vm {
                             }
                             let now = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
-                                .unwrap()
+                                .map_err(|_| {
+                                    runtime_error_at(
+                                        "system clock is before unix epoch".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    )
+                                })?
                                 .as_secs() as i64;
                             Value::Int(now)
                         }
                         Builtin::TimeFixed => {
-                            let _ = self.stack.pop().ok_or_else(|| {
+                            let value = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
                                     "stack underflow".to_string(),
                                     span_at(chunk, frame_ip),
                                 )
                             })?;
-                            Value::String(Rc::new("time.fixed".to_string()))
+                            match value {
+                                Value::String(timestamp) => {
+                                    let seconds = parse_fixed_timestamp(timestamp.as_str()).ok_or_else(
+                                        || {
+                                            runtime_error_at(
+                                                "time.fixed expects RFC3339 UTC like 2026-01-01T00:00:00Z"
+                                                    .to_string(),
+                                                span_at(chunk, frame_ip),
+                                            )
+                                        },
+                                    )?;
+                                    Value::Int(seconds)
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "time.fixed expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
                         }
                         Builtin::RngDeterministic => {
                             let value = self.stack.pop().ok_or_else(|| {
@@ -3999,7 +4594,9 @@ impl Vm {
                                 )
                             })?;
                             match value {
-                                Value::Int(seed) => Value::Int(seed),
+                                Value::Int(seed) => {
+                                    Value::Int(deterministic_random_from_seed(seed))
+                                }
                                 _ => {
                                     return Err(runtime_error_at(
                                         "invalid builtin usage".to_string(),
@@ -4205,10 +4802,11 @@ impl Vm {
                             })?;
                             match value {
                                 Value::Array(items) => Value::Int(items.len() as i64),
+                                Value::Map(entries) => Value::Int(entries.len() as i64),
                                 Value::String(value) => Value::Int(value.len() as i64),
                                 _ => {
                                     return Err(runtime_error_at(
-                                        "len expects array or string".to_string(),
+                                        "len expects array, map, or string".to_string(),
                                         span_at(chunk, frame_ip),
                                     ))
                                 }
@@ -4521,6 +5119,47 @@ impl Vm {
                             })?;
                             Value::String(Rc::new(format_value(&value)))
                         }
+                        Builtin::Keys => {
+                            let map = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match map {
+                                Value::Map(entries) => {
+                                    let keys =
+                                        entries.keys().map(MapKey::to_value).collect::<Vec<_>>();
+                                    Value::Array(Rc::new(keys))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "keys expects map".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Values => {
+                            let map = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match map {
+                                Value::Map(entries) => {
+                                    let values = entries.values().cloned().collect::<Vec<_>>();
+                                    Value::Array(Rc::new(values))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "values expects map".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
                         Builtin::Next => {
                             let gen = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
@@ -4620,12 +5259,54 @@ impl Vm {
                     })?;
                     match value {
                         Value::Future(future) => {
-                            let result = self.run_future(program, &future)?;
-                            self.stack.push(result);
+                            // Spawn the future as a task.
+                            let frame = self.prepare_future_frame(program, &future)?;
+                            let task_id = self.scheduler.spawn(vec![frame], Vec::new());
+
+                            // Try to run it — may complete immediately.
+                            match self.run_spawned_task(program, task_id)? {
+                                Some(result) => {
+                                    self.stack.push(result);
+                                }
+                                None => {
+                                    // Task suspended.  In UntilSuspend mode,
+                                    // propagate the suspension so the scheduler
+                                    // can context-switch to another task.
+                                    if mode == ExecutionMode::UntilSuspend {
+                                        // Stay at the Await instruction so it
+                                        // re-executes on resume, picks up the
+                                        // TaskHandle, and resolves the completed
+                                        // value from the scheduler.
+                                        self.frames[frame_index].ip = frame_ip;
+                                        self.stack.push(Value::TaskHandle(task_id));
+                                        return Ok(None);
+                                    }
+                                    // ToCompletion — drain until done.
+                                    let result = self.scheduler_drain_until(program, task_id)?;
+                                    self.stack.push(result);
+                                }
+                            }
+                        }
+                        Value::TaskHandle(task_id) => {
+                            // Resuming after suspension — check completion.
+                            if let Some(result) = self.scheduler.completed.remove(&task_id) {
+                                self.stack.push(result);
+                            } else if mode == ExecutionMode::UntilSuspend {
+                                // Still pending — suspend again.
+                                self.frames[frame_index].ip = frame_ip;
+                                self.stack.push(Value::TaskHandle(task_id));
+                                return Ok(None);
+                            } else {
+                                let result = self.scheduler_drain_until(program, task_id)?;
+                                self.stack.push(result);
+                            }
                         }
                         other => {
                             return Err(self.runtime_error(
-                                format!("await expects future, got {}", format_value(&other)),
+                                format!(
+                                    "await expects future or task, got {}",
+                                    format_value(&other)
+                                ),
                                 self.current_span(program),
                                 program,
                             ))
@@ -4636,7 +5317,7 @@ impl Vm {
                     let value = self.stack.pop().ok_or_else(|| {
                         runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
                     })?;
-                    if mode == ExecutionMode::RunUntilYield {
+                    if mode == ExecutionMode::UntilYield {
                         self.frames[frame_index].ip = frame_ip + 1;
                         return Ok(Some(value));
                     }
@@ -4904,7 +5585,7 @@ impl Vm {
                             span_at(chunk, frame_ip),
                         ));
                     }
-                    let mut entries = Vec::with_capacity(*count);
+                    let mut entries = IndexMap::with_capacity(*count);
                     for _ in 0..*count {
                         let value = self.stack.pop().ok_or_else(|| {
                             runtime_error_at(
@@ -4918,9 +5599,11 @@ impl Vm {
                                 span_at(chunk, frame_ip),
                             )
                         })?;
-                        entries.push((key, value));
+                        let map_key = MapKey::try_from_value(&key).map_err(|message| {
+                            runtime_error_at(message, span_at(chunk, frame_ip))
+                        })?;
+                        entries.insert(map_key, value);
                     }
-                    entries.reverse();
                     self.stack.push(Value::Map(Rc::new(entries)));
                 }
                 Op::ArraySpread(count) => {
@@ -4975,11 +5658,13 @@ impl Vm {
                         chunks.push(value);
                     }
                     chunks.reverse();
-                    let mut entries = Vec::new();
+                    let mut entries = IndexMap::new();
                     for item in chunks {
                         match item {
                             Value::Map(values) => {
-                                entries.extend(values.iter().cloned());
+                                for (key, value) in values.iter() {
+                                    entries.insert(key.clone(), value.clone());
+                                }
                             }
                             _ => {
                                 return Err(runtime_error_at(
@@ -5025,13 +5710,10 @@ impl Vm {
                             self.stack.push(value);
                         }
                         Value::Map(entries) => {
-                            let mut found = None;
-                            for (key, value) in entries.iter() {
-                                if *key == index_value {
-                                    found = Some(value.clone());
-                                    break;
-                                }
-                            }
+                            let key = MapKey::try_from_value(&index_value).map_err(|message| {
+                                runtime_error_at(message, span_at(chunk, frame_ip))
+                            })?;
+                            let found = entries.get(&key).cloned();
                             if let Some(value) = found {
                                 self.stack.push(value);
                             } else {
@@ -5083,9 +5765,10 @@ impl Vm {
                                     span_at(chunk, frame_ip),
                                 ));
                             }
-                            let mut new_items = (*items).clone();
-                            new_items[idx] = value;
-                            self.stack.push(Value::Array(Rc::new(new_items)));
+                            let mut items = items.clone();
+                            let item_values = Rc::make_mut(&mut items);
+                            item_values[idx] = value;
+                            self.stack.push(Value::Array(items));
                         }
                         Value::Tuple(items) => {
                             let index = match index_value {
@@ -5110,24 +5793,20 @@ impl Vm {
                                     span_at(chunk, frame_ip),
                                 ));
                             }
-                            let mut new_items = (*items).clone();
-                            new_items[idx] = value;
-                            self.stack.push(Value::Tuple(Rc::new(new_items)));
+                            let mut items = items.clone();
+                            let item_values = Rc::make_mut(&mut items);
+                            item_values[idx] = value;
+                            self.stack.push(Value::Tuple(items));
                         }
                         Value::Map(entries) => {
-                            let mut new_entries = (*entries).clone();
-                            let mut updated = false;
-                            for (key, existing) in new_entries.iter_mut() {
-                                if *key == index_value {
-                                    *existing = value.clone();
-                                    updated = true;
-                                    break;
-                                }
-                            }
-                            if !updated {
-                                new_entries.push((index_value, value));
-                            }
-                            self.stack.push(Value::Map(Rc::new(new_entries)));
+                            let key = MapKey::try_from_value(&index_value).map_err(|message| {
+                                runtime_error_at(message, span_at(chunk, frame_ip))
+                            })?;
+                            let mut entries = entries.clone();
+                            let map_entries: &mut IndexMap<MapKey, Value> =
+                                Rc::make_mut(&mut entries);
+                            map_entries.insert(key, value);
+                            self.stack.push(Value::Map(entries));
                         }
                         _ => {
                             return Err(runtime_error_at(
@@ -5203,9 +5882,10 @@ impl Vm {
                     })?;
                     match base_value {
                         Value::Array(items) => {
-                            let mut new_items = (*items).clone();
+                            let mut items = items.clone();
+                            let item_values = Rc::make_mut(&mut items);
                             let mut pending = Some(value);
-                            for item in &mut new_items {
+                            for item in item_values.iter_mut() {
                                 match item {
                                     Value::Tuple(tuple_items) => {
                                         if tuple_items.len() != 2 {
@@ -5247,17 +5927,17 @@ impl Vm {
                                 }
                             }
                             if let Some(value) = pending {
-                                new_items.push(Value::Tuple(Rc::new(vec![
+                                item_values.push(Value::Tuple(Rc::new(vec![
                                     Value::String(Rc::new(field.clone())),
                                     value,
                                 ])));
                             }
-                            self.stack.push(Value::Array(Rc::new(new_items)));
+                            self.stack.push(Value::Array(items));
                         }
                         Value::Struct(fields) => {
-                            let mut new_fields = (*fields).clone();
-                            new_fields.insert(field.clone(), value);
-                            self.stack.push(Value::Struct(Rc::new(new_fields)));
+                            let mut fields = fields.clone();
+                            Rc::make_mut(&mut fields).insert(field.clone(), value);
+                            self.stack.push(Value::Struct(fields));
                         }
                         _ => {
                             return Err(runtime_error_at(
@@ -5442,7 +6122,12 @@ impl Vm {
                                 Op::BitXor => left ^ right,
                                 Op::Shl => left << right,
                                 Op::Shr => left >> right,
-                                _ => unreachable!(),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "invalid bitwise operator".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
                             };
                             self.stack.push(Value::Int(result));
                         }
@@ -5697,7 +6382,9 @@ impl Vm {
                     advance = false;
                 }
                 Op::Return => {
-                    let value = self.stack.pop().unwrap_or(Value::Unit);
+                    let value = self.stack.pop().ok_or_else(|| {
+                        runtime_error_at("stack underflow".to_string(), span_at(chunk, frame_ip))
+                    })?;
                     self.pop_frame();
                     if self.frames.is_empty() {
                         return Ok(Some(value));
@@ -5785,6 +6472,77 @@ impl Vm {
             }
         }
     }
+
+    fn opcode_name(op: &Op) -> &'static str {
+        match op {
+            Op::Const(_) => "Const",
+            Op::LoadLocal(_) => "LoadLocal",
+            Op::StoreLocal(_) => "StoreLocal",
+            Op::GrantCapability(_) => "GrantCapability",
+            Op::PushCapabilityScope => "PushCapabilityScope",
+            Op::PopCapabilityScope => "PopCapabilityScope",
+            Op::Call(_, _) => "Call",
+            Op::CallAsync(_, _) => "CallAsync",
+            Op::CallGenerator(_, _) => "CallGenerator",
+            Op::Builtin(_) => "Builtin",
+            Op::Try => "Try",
+            Op::Throw => "Throw",
+            Op::Defer => "Defer",
+            Op::Add => "Add",
+            Op::Sub => "Sub",
+            Op::Mul => "Mul",
+            Op::Div => "Div",
+            Op::Mod => "Mod",
+            Op::Array(_) => "Array",
+            Op::ArraySpread(_) => "ArraySpread",
+            Op::Tuple(_) => "Tuple",
+            Op::Index => "Index",
+            Op::StoreIndex => "StoreIndex",
+            Op::StoreMember(_) => "StoreMember",
+            Op::Struct(_) => "Struct",
+            Op::GetMember(_) => "GetMember",
+            Op::Enum { .. } => "Enum",
+            Op::Closure(_, _) => "Closure",
+            Op::CallValue(_) => "CallValue",
+            Op::Await => "Await",
+            Op::Yield => "Yield",
+            Op::Range(_) => "Range",
+            Op::Map(_) => "Map",
+            Op::MapSpread(_) => "MapSpread",
+            Op::IsType(_) => "IsType",
+            Op::Cast(_) => "Cast",
+            Op::Eq => "Eq",
+            Op::Neq => "Neq",
+            Op::Lt => "Lt",
+            Op::Lte => "Lte",
+            Op::Gt => "Gt",
+            Op::Gte => "Gte",
+            Op::BitAnd => "BitAnd",
+            Op::BitOr => "BitOr",
+            Op::BitXor => "BitXor",
+            Op::Shl => "Shl",
+            Op::Shr => "Shr",
+            Op::Neg => "Neg",
+            Op::Not => "Not",
+            Op::ToBool => "ToBool",
+            Op::MatchResultOk(_) => "MatchResultOk",
+            Op::MatchResultErr(_) => "MatchResultErr",
+            Op::MatchOptionSome(_) => "MatchOptionSome",
+            Op::MatchOptionNone(_) => "MatchOptionNone",
+            Op::MatchStruct(_, _) => "MatchStruct",
+            Op::MatchEnum { .. } => "MatchEnum",
+            Op::MatchInt(_, _) => "MatchInt",
+            Op::MatchBool(_, _) => "MatchBool",
+            Op::MatchString(_, _) => "MatchString",
+            Op::MatchTuple(_, _) => "MatchTuple",
+            Op::MatchFail => "MatchFail",
+            Op::JumpIfFalse(_) => "JumpIfFalse",
+            Op::Jump(_) => "Jump",
+            Op::Return => "Return",
+            Op::Pop => "Pop",
+            Op::Halt => "Halt",
+        }
+    }
 }
 
 impl Vm {
@@ -5826,41 +6584,20 @@ impl Vm {
     }
 }
 
-thread_local! {
-    static STACK_TRACE: RefCell<Option<Vec<StackFrame>>> = RefCell::new(None);
-    static CURRENT_SPAN: RefCell<Option<Span>> = RefCell::new(None);
-}
-
-fn set_stack_trace(trace: Vec<StackFrame>) {
-    STACK_TRACE.with(|cell| {
-        *cell.borrow_mut() = Some(trace);
-    });
-}
-
-fn set_current_span(span: Option<Span>) {
-    CURRENT_SPAN.with(|cell| {
-        *cell.borrow_mut() = span;
-    });
-}
-
-fn current_stack_trace() -> Option<Vec<StackFrame>> {
-    STACK_TRACE.with(|cell| cell.borrow().clone())
-}
-
-fn current_span() -> Option<Span> {
-    CURRENT_SPAN.with(|cell| *cell.borrow())
-}
-
 fn span_at(chunk: &Chunk, ip: usize) -> Option<Span> {
     chunk.spans.get(ip).cloned().flatten()
 }
 
+/// Create a runtime error with span but without stack trace.
+///
+/// The stack trace is attached later by the execution loop when it catches
+/// the error and has access to the live VM frame state.  This avoids the
+/// cost of building a stack trace on every instruction.
 fn runtime_error_at(message: String, span: Option<Span>) -> VmError {
-    let span = span.or_else(current_span);
     VmError::Runtime {
         message,
         span,
-        stack: current_stack_trace(),
+        stack: None,
     }
 }
 
@@ -5932,7 +6669,7 @@ impl TypeCheck {
             TypeCheck::Struct => "struct".to_string(),
             TypeCheck::Option => "option".to_string(),
             TypeCheck::Result => "result".to_string(),
-            TypeCheck::Enum(name) => format!("{name}"),
+            TypeCheck::Enum(name) => name.to_string(),
         }
     }
 }
@@ -5965,35 +6702,56 @@ fn patch_jump(code: &mut [Op], index: usize, target: usize) {
 }
 
 fn map_builtin(base: &str, name: &str, args: usize) -> Option<Builtin> {
-    match (base, name, args) {
-        ("time", "now", 0) => Some(Builtin::TimeNow),
-        ("time", "fixed", 1) => Some(Builtin::TimeFixed),
-        ("rng", "deterministic", 1) => Some(Builtin::RngDeterministic),
-        ("rng", "uuid", 0) => Some(Builtin::RngUuid),
-        ("", "assert", 1) => Some(Builtin::Assert),
-        ("", "assert_eq", 2) => Some(Builtin::AssertEq),
-        ("", "print", 1) => Some(Builtin::Print),
-        ("", "next", 1) => Some(Builtin::Next),
-        ("", "len", 1) => Some(Builtin::Len),
-        ("", "append", 2) => Some(Builtin::Append),
-        ("", "contains", 2) => Some(Builtin::Contains),
-        ("", "slice", 3) => Some(Builtin::Slice),
-        ("", "split", 2) => Some(Builtin::Split),
-        ("", "trim", 1) => Some(Builtin::Trim),
-        ("", "substring", 3) => Some(Builtin::Substring),
-        ("", "char_at", 2) => Some(Builtin::CharAt),
-        ("", "to_upper", 1) => Some(Builtin::ToUpper),
-        ("", "to_lower", 1) => Some(Builtin::ToLower),
-        ("", "parse_int", 1) => Some(Builtin::ParseInt),
-        ("", "to_string", 1) => Some(Builtin::ToString),
+    // Verify the builtin exists in the shared registry (single source of truth).
+    let _meta = at_syntax::lookup_builtin(base, name, args)?;
+    // Map the registry entry to the VM's Builtin enum.
+    match (base, name) {
+        ("time", "now") => Some(Builtin::TimeNow),
+        ("time", "fixed") => Some(Builtin::TimeFixed),
+        ("rng", "deterministic") => Some(Builtin::RngDeterministic),
+        ("rng", "uuid") => Some(Builtin::RngUuid),
+        ("", "assert") => Some(Builtin::Assert),
+        ("", "assert_eq") => Some(Builtin::AssertEq),
+        ("", "print") => Some(Builtin::Print),
+        ("", "next") => Some(Builtin::Next),
+        ("", "len") => Some(Builtin::Len),
+        ("", "append") => Some(Builtin::Append),
+        ("", "contains") => Some(Builtin::Contains),
+        ("", "slice") => Some(Builtin::Slice),
+        ("", "split") => Some(Builtin::Split),
+        ("", "trim") => Some(Builtin::Trim),
+        ("", "substring") => Some(Builtin::Substring),
+        ("", "char_at") => Some(Builtin::CharAt),
+        ("", "to_upper") => Some(Builtin::ToUpper),
+        ("", "to_lower") => Some(Builtin::ToLower),
+        ("", "parse_int") => Some(Builtin::ParseInt),
+        ("", "to_string") => Some(Builtin::ToString),
+        ("", "keys") => Some(Builtin::Keys),
+        ("", "values") => Some(Builtin::Values),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Compiler, Vm, VmError};
+    use super::{
+        compile_entry_with_imports, load_lockfile, resolve_cached_path, save_lockfile, Compiler,
+        Lockfile, Op, Vm, VmError, LOCKFILE_VERSION,
+    };
     use at_parser::parse_module;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_base_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        path.push(format!("at_vm_lockfile_{name}_{nanos}"));
+        path
+    }
 
     #[test]
     fn match_fail_has_span() {
@@ -6072,7 +6830,7 @@ fn f() -> int {
             .compile_module(&module)
             .expect("compile module");
         let chunk = &program.functions[0].chunk;
-        assert!(matches!(chunk.code.get(0), Some(super::Op::Const(_))));
+        assert!(matches!(chunk.code.first(), Some(super::Op::Const(_))));
         assert!(matches!(chunk.code.get(1), Some(super::Op::StoreLocal(_))));
     }
 
@@ -6155,6 +6913,57 @@ f();
         match err {
             VmError::Runtime { message, .. } => {
                 assert!(message.contains("missing capability: time"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_time_fixed_parses_timestamp() {
+        let source = r#"
+assert_eq(time.fixed("2026-01-01T00:00:00Z"), 1767225600);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn runtime_rng_deterministic_is_stable() {
+        let source = r#"
+assert_eq(rng.deterministic(7), 3664756328581923162);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn runtime_errors_on_missing_rng_capability() {
+        let source = r#"
+fn f() -> string {
+    return rng.uuid();
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected runtime error");
+        match err {
+            VmError::Runtime { message, .. } => {
+                assert!(message.contains("missing capability: rng"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -6248,5 +7057,331 @@ assert_eq(next(g), none());
         let mut vm = Vm::new();
         let result = vm.run(&program).expect("run program");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn nested_closure_can_capture_from_grandparent_scope() {
+        let source = r#"
+fn run() -> int {
+    let base = 41;
+    return (|_u| (|_v| (|_w| base + 1)(0))(0))(0);
+}
+
+assert_eq(run(), 42);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let result = vm.run(&program).expect("run program");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn lockfile_round_trip_writes_version_header() {
+        let base = temp_base_dir("round_trip");
+        let mut entries = HashMap::new();
+        entries.insert("https://example.com/a.at".to_string(), "aaaa".to_string());
+        entries.insert("https://example.com/b.at".to_string(), "bbbb".to_string());
+        save_lockfile(
+            &base,
+            &Lockfile {
+                version: LOCKFILE_VERSION,
+                entries: entries.clone(),
+            },
+        )
+        .expect("save lockfile");
+        let raw = fs::read_to_string(base.join(".at").join("lock")).expect("read lockfile");
+        assert_eq!(raw.lines().next(), Some("version 1"));
+        let loaded = load_lockfile(&base).expect("load lockfile");
+        assert_eq!(loaded.version, LOCKFILE_VERSION);
+        assert_eq!(loaded.entries, entries);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn lockfile_loader_accepts_legacy_format() {
+        let base = temp_base_dir("legacy");
+        fs::create_dir_all(base.join(".at")).expect("create base");
+        fs::write(
+            base.join(".at").join("lock"),
+            "https://example.com/a.at aaaa\nhttps://example.com/b.at bbbb\n",
+        )
+        .expect("write lockfile");
+        let loaded = load_lockfile(&base).expect("load lockfile");
+        assert_eq!(loaded.version, LOCKFILE_VERSION);
+        assert_eq!(
+            loaded
+                .entries
+                .get("https://example.com/a.at")
+                .map(String::as_str),
+            Some("aaaa")
+        );
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn lockfile_loader_rejects_newer_version() {
+        let base = temp_base_dir("unsupported");
+        fs::create_dir_all(base.join(".at")).expect("create base");
+        fs::write(base.join(".at").join("lock"), "version 99\n").expect("write lockfile");
+        let err = load_lockfile(&base).expect_err("expected error");
+        assert!(err.contains("unsupported lockfile version"));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_cached_path_rejects_hash_mismatch() {
+        let base = temp_base_dir("integrity_mismatch");
+        fs::create_dir_all(base.join(".at").join("cache")).expect("create cache");
+        let url = "https://example.com/pkg.at";
+        let expected_hash = "abcd";
+        fs::write(
+            base.join(".at")
+                .join("cache")
+                .join(format!("{expected_hash}.at")),
+            "tampered",
+        )
+        .expect("write cache file");
+        fs::write(
+            base.join(".at").join("lock"),
+            format!("version 1\n{url} {expected_hash}\n"),
+        )
+        .expect("write lockfile");
+
+        let err = resolve_cached_path(&base, url).expect_err("expected integrity error");
+        assert!(err.contains("integrity check failed"));
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn std_import_compiles_outside_repo_layout() {
+        let base = temp_base_dir("std_import_compile");
+        fs::create_dir_all(&base).expect("create base");
+        let file = base.join("main.at");
+        fs::write(&file, "import \"std\" as std;\nversion();\n").expect("write source");
+        let program =
+            compile_entry_with_imports(file.to_string_lossy().as_ref()).expect("compile program");
+        assert!(!program.functions.is_empty());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn runtime_stack_trace_includes_source_path_when_available() {
+        let source = r#"
+fn fail() {
+    let x = none();
+    return match x {
+        some(v) => v,
+    };
+}
+
+fail();
+"#;
+        let mut module = parse_module(source).expect("parse module");
+        module.source_path = Some("/tmp/stack_trace_source.at".to_string());
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected runtime error");
+        match err {
+            VmError::Runtime { stack, .. } => {
+                let stack = stack.expect("stack trace");
+                assert_eq!(
+                    stack.first().and_then(|frame| frame.source_path.as_deref()),
+                    Some("/tmp/stack_trace_source.at")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profiler_groups_opcode_counts_by_kind() {
+        let source = r#"
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+add(1, 2);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_profiler();
+        let result = vm.run(&program).expect("run program");
+        assert!(result.is_none());
+
+        let profiler = vm.take_profiler().expect("profiler");
+        assert!(profiler.total_instructions > 0);
+        assert!(profiler.op_counts.contains_key("Const"));
+        assert!(profiler.op_counts.contains_key("Call"));
+        assert!(profiler.function_counts.contains_key("<main>"));
+        assert!(profiler.function_counts.contains_key("add"));
+        assert!(profiler
+            .op_counts
+            .keys()
+            .all(|name| !name.contains('(') && !name.contains('{')));
+    }
+
+    #[test]
+    fn return_without_stack_value_errors() {
+        let source = "fn f() { return 1; }\nf();\n";
+        let module = parse_module(source).expect("parse module");
+        let mut program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        program.main.code = vec![Op::Return];
+        program.main.spans = vec![None];
+        program.main.constants.clear();
+
+        let mut vm = Vm::new();
+        let err = vm.run(&program).expect_err("expected stack underflow");
+        match err {
+            VmError::Runtime { message, .. } => assert!(message.contains("stack underflow")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ── Async scheduler tests ───────────────────────────────────────
+
+    #[test]
+    fn async_await_returns_value() {
+        let source = r#"
+async fn compute() -> int {
+    return 42;
+}
+let result = await compute();
+print(result);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["42"]);
+    }
+
+    #[test]
+    fn nested_awaits_work() {
+        let source = r#"
+async fn inner() -> int {
+    return 10;
+}
+async fn outer() -> int {
+    let x = await inner();
+    return x + 5;
+}
+let result = await outer();
+print(result);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["15"]);
+    }
+
+    #[test]
+    fn await_ordering_is_deterministic() {
+        let source = r#"
+async fn a() -> int { return 1; }
+async fn b() -> int { return 2; }
+let fa = a();
+let fb = b();
+let ra = await fa;
+let rb = await fb;
+print(ra + rb);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        for _ in 0..10 {
+            let mut vm = Vm::with_output_capture();
+            vm.run(&program).expect("run program");
+            let output = vm.get_output().unwrap();
+            assert_eq!(output, vec!["3"]);
+        }
+    }
+
+    #[test]
+    fn max_instructions_respected_across_tasks() {
+        let source = r#"
+async fn spin() -> int {
+    let i = 0;
+    while i < 100000 {
+        set i = i + 1;
+    }
+    return i;
+}
+let result = await spin();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_execution_limit(100);
+        let result = vm.run(&program);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scheduler_completes_spawned_tasks() {
+        let source = r#"
+async fn add(a: int, b: int) -> int {
+    return a + b;
+}
+let result = await add(3, 4);
+print(result);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["7"]);
+    }
+
+    #[test]
+    fn async_quantum_preemption_resumes_correctly() {
+        // Inner async function does enough work to exceed the scheduler
+        // quantum (1024 instructions), forcing the parent task to suspend
+        // via the Future-spawned-but-not-yet-complete path of Op::Await.
+        // Regression test: before the fix, the parent would store a raw
+        // TaskHandle into a local variable instead of the resolved value.
+        let source = r#"
+async fn heavy() -> int {
+    let i = 0;
+    while i < 2000 {
+        set i = i + 1;
+    }
+    return i;
+}
+async fn wrapper() -> int {
+    let x = await heavy();
+    return x + 1;
+}
+let result = await wrapper();
+print(result);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let program = Compiler::new()
+            .compile_module(&module)
+            .expect("compile module");
+        let mut vm = Vm::with_output_capture();
+        vm.run(&program).expect("run program");
+        let output = vm.get_output().unwrap();
+        assert_eq!(output, vec!["2001"]);
     }
 }

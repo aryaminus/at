@@ -103,6 +103,109 @@ impl TokenKind {
     }
 }
 
+impl std::fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Keywords
+            TokenKind::Fn => write!(f, "`fn`"),
+            TokenKind::Needs => write!(f, "`needs`"),
+            TokenKind::Test => write!(f, "`test`"),
+            TokenKind::Using => write!(f, "`using`"),
+            TokenKind::Tool => write!(f, "`tool`"),
+            TokenKind::Import => write!(f, "`import`"),
+            TokenKind::As => write!(f, "`as`"),
+            TokenKind::Is => write!(f, "`is`"),
+            TokenKind::Try => write!(f, "`try`"),
+            TokenKind::Await => write!(f, "`await`"),
+            TokenKind::Async => write!(f, "`async`"),
+            TokenKind::Catch => write!(f, "`catch`"),
+            TokenKind::Finally => write!(f, "`finally`"),
+            TokenKind::Match => write!(f, "`match`"),
+            TokenKind::While => write!(f, "`while`"),
+            TokenKind::For => write!(f, "`for`"),
+            TokenKind::In => write!(f, "`in`"),
+            TokenKind::If => write!(f, "`if`"),
+            TokenKind::Else => write!(f, "`else`"),
+            TokenKind::Set => write!(f, "`set`"),
+            TokenKind::Struct => write!(f, "`struct`"),
+            TokenKind::Type => write!(f, "`type`"),
+            TokenKind::Enum => write!(f, "`enum`"),
+            TokenKind::Break => write!(f, "`break`"),
+            TokenKind::Continue => write!(f, "`continue`"),
+            TokenKind::Return => write!(f, "`return`"),
+            TokenKind::Throw => write!(f, "`throw`"),
+            TokenKind::Raise => write!(f, "`raise`"),
+            TokenKind::Defer => write!(f, "`defer`"),
+            TokenKind::With => write!(f, "`with`"),
+            TokenKind::Yield => write!(f, "`yield`"),
+            TokenKind::Let => write!(f, "`let`"),
+            TokenKind::Const => write!(f, "`const`"),
+            TokenKind::Mut => write!(f, "`mut`"),
+            TokenKind::Pub => write!(f, "`pub`"),
+            // Boolean literals
+            TokenKind::True => write!(f, "`true`"),
+            TokenKind::False => write!(f, "`false`"),
+            // Data-carrying literals
+            TokenKind::Ident(name) => write!(f, "identifier `{name}`"),
+            TokenKind::Int(value) => write!(f, "integer literal `{value}`"),
+            TokenKind::Float(value) => write!(f, "float literal `{value}`"),
+            TokenKind::String(value) => write!(f, "string literal \"{value}\""),
+            // Operators
+            TokenKind::Plus => write!(f, "`+`"),
+            TokenKind::Minus => write!(f, "`-`"),
+            TokenKind::Star => write!(f, "`*`"),
+            TokenKind::Slash => write!(f, "`/`"),
+            TokenKind::Percent => write!(f, "`%`"),
+            TokenKind::AndAnd => write!(f, "`&&`"),
+            TokenKind::OrOr => write!(f, "`||`"),
+            TokenKind::Ampersand => write!(f, "`&`"),
+            TokenKind::Pipe => write!(f, "`|`"),
+            TokenKind::Caret => write!(f, "`^`"),
+            TokenKind::Shl => write!(f, "`<<`"),
+            TokenKind::Shr => write!(f, "`>>`"),
+            TokenKind::AmpersandEquals => write!(f, "`&=`"),
+            TokenKind::PipeEquals => write!(f, "`|=`"),
+            TokenKind::CaretEquals => write!(f, "`^=`"),
+            TokenKind::ShlEquals => write!(f, "`<<=`"),
+            TokenKind::ShrEquals => write!(f, "`>>=`"),
+            TokenKind::EqualEqual => write!(f, "`==`"),
+            TokenKind::Bang => write!(f, "`!`"),
+            TokenKind::BangEqual => write!(f, "`!=`"),
+            TokenKind::Less => write!(f, "`<`"),
+            TokenKind::LessEqual => write!(f, "`<=`"),
+            TokenKind::Greater => write!(f, "`>`"),
+            TokenKind::GreaterEqual => write!(f, "`>=`"),
+            TokenKind::Equals => write!(f, "`=`"),
+            TokenKind::FatArrow => write!(f, "`=>`"),
+            TokenKind::Arrow => write!(f, "`->`"),
+            // Punctuation
+            TokenKind::Colon => write!(f, "`:`"),
+            TokenKind::ColonColon => write!(f, "`::`"),
+            TokenKind::Question => write!(f, "`?`"),
+            TokenKind::At => write!(f, "`@`"),
+            TokenKind::LParen => write!(f, "`(`"),
+            TokenKind::RParen => write!(f, "`)`"),
+            TokenKind::LBracket => write!(f, "`[`"),
+            TokenKind::RBracket => write!(f, "`]`"),
+            TokenKind::LBrace => write!(f, "`{{`"),
+            TokenKind::RBrace => write!(f, "`}}`"),
+            TokenKind::Comma => write!(f, "`,`"),
+            TokenKind::Dot => write!(f, "`.`"),
+            TokenKind::DotDotDot => write!(f, "`...`"),
+            TokenKind::DotDot => write!(f, "`..`"),
+            TokenKind::DotDotEquals => write!(f, "`..=`"),
+            TokenKind::Semicolon => write!(f, "`;`"),
+            // Special
+            TokenKind::Comment => write!(f, "comment"),
+            TokenKind::Invalid(ch) => write!(f, "invalid token `{ch}`"),
+            TokenKind::UnterminatedString => write!(f, "unterminated string"),
+            TokenKind::UnterminatedBlockComment => write!(f, "unterminated block comment"),
+            TokenKind::InvalidNumber => write!(f, "invalid number"),
+            TokenKind::Eof => write!(f, "end of file"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -137,7 +240,7 @@ impl std::fmt::Display for ParseError {
             } => {
                 write!(
                     f,
-                    "parse error at {}: expected {}, found {:?}",
+                    "parse error at {}: expected {}, found {}",
                     span.start, expected, found
                 )
             }
@@ -220,12 +323,21 @@ impl<'a> Parser<'a> {
                         self.recover_to_function_end();
                     }
                 },
-                TokenKind::Pub => match self.parse_stmt() {
-                    Ok(stmt) => stmts.push(stmt),
-                    Err(err) => {
-                        errors.push(err);
-                        self.recover_to_stmt_boundary();
-                    }
+                TokenKind::Pub => match self.peek_kind() {
+                    TokenKind::Fn | TokenKind::Async => match self.parse_function(false) {
+                        Ok(func) => functions.push(func),
+                        Err(err) => {
+                            errors.push(err);
+                            self.recover_to_function_end();
+                        }
+                    },
+                    _ => match self.parse_stmt() {
+                        Ok(stmt) => stmts.push(stmt),
+                        Err(err) => {
+                            errors.push(err);
+                            self.recover_to_stmt_boundary();
+                        }
+                    },
                 },
                 TokenKind::Tool => match self.parse_tool_function() {
                     Ok(func) => functions.push(func),
@@ -243,7 +355,7 @@ impl<'a> Parser<'a> {
                 },
             }
         }
-        errors.extend(self.recovered_errors.drain(..));
+        errors.append(&mut self.recovered_errors);
         (
             Module {
                 id: self.alloc_id(),
@@ -263,8 +375,12 @@ impl<'a> Parser<'a> {
             match self.current.kind {
                 TokenKind::Fn | TokenKind::Async => functions.push(self.parse_function(false)?),
                 TokenKind::Pub => {
-                    let stmt = self.parse_stmt()?;
-                    stmts.push(stmt);
+                    if matches!(self.peek_kind(), TokenKind::Fn | TokenKind::Async) {
+                        functions.push(self.parse_function(false)?);
+                    } else {
+                        let stmt = self.parse_stmt()?;
+                        stmts.push(stmt);
+                    }
                 }
                 TokenKind::Tool => functions.push(self.parse_tool_function()?),
                 _ => {
@@ -366,20 +482,7 @@ impl<'a> Parser<'a> {
                 Ok(stmt)
             }
             _ => {
-                let expr = match self.parse_expr() {
-                    Ok(expr) => expr,
-                    Err(err) => {
-                        if self.collect_errors {
-                            self.recovered_errors.push(err);
-                            self.recover_to_stmt_boundary();
-                            return Ok(Stmt::Expr {
-                                id: self.alloc_id(),
-                                expr: Expr::Bool(false, self.current.span, self.alloc_id()),
-                            });
-                        }
-                        return Err(err);
-                    }
-                };
+                let expr = self.parse_expr()?;
                 self.expect(TokenKind::Semicolon)?;
                 Ok(Stmt::Expr {
                     id: self.alloc_id(),
@@ -441,7 +544,9 @@ impl<'a> Parser<'a> {
 
     fn parse_tool_function(&mut self) -> Result<Function, ParseError> {
         self.advance();
+        let mut async_span = None;
         let is_async = if self.current.kind == TokenKind::Async {
+            async_span = Some(self.current.span);
             self.advance();
             true
         } else {
@@ -452,7 +557,7 @@ impl<'a> Parser<'a> {
             return Err(ParseError::UnexpectedToken {
                 expected: "async tool fn is not supported".to_string(),
                 found: TokenKind::Async,
-                span: self.current.span,
+                span: async_span.unwrap_or(self.current.span),
             });
         }
         self.parse_function(true)
@@ -536,22 +641,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::Equals)?;
-        let value = match self.parse_expr() {
-            Ok(expr) => expr,
-            Err(err) => {
-                if self.collect_errors {
-                    self.recovered_errors.push(err);
-                    self.recover_to_stmt_boundary();
-                    return Ok(Stmt::Let {
-                        id: self.alloc_id(),
-                        name: ident,
-                        ty,
-                        value: Expr::Bool(false, self.current.span, self.alloc_id()),
-                    });
-                }
-                return Err(err);
-            }
-        };
+        let value = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Let {
             id: self.alloc_id(),
@@ -571,22 +661,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::Equals)?;
-        let value = match self.parse_expr() {
-            Ok(expr) => expr,
-            Err(err) => {
-                if self.collect_errors {
-                    self.recovered_errors.push(err);
-                    self.recover_to_stmt_boundary();
-                    return Ok(Stmt::Const {
-                        id: self.alloc_id(),
-                        name: ident,
-                        ty,
-                        value: Expr::Bool(false, self.current.span, self.alloc_id()),
-                    });
-                }
-                return Err(err);
-            }
-        };
+        let value = self.parse_expr()?;
         self.expect(TokenKind::Semicolon)?;
         Ok(Stmt::Const {
             id: self.alloc_id(),
@@ -855,7 +930,13 @@ impl<'a> Parser<'a> {
                     TokenKind::Caret => (at_syntax::BinaryOp::BitXor, self.current.span),
                     TokenKind::Shl => (at_syntax::BinaryOp::Shl, self.current.span),
                     TokenKind::Shr => (at_syntax::BinaryOp::Shr, self.current.span),
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "compound assignment operator".to_string(),
+                            found: self.current.kind.clone(),
+                            span: self.current.span,
+                        });
+                    }
                 };
                 self.advance();
                 self.expect(TokenKind::Equals)?;
@@ -872,7 +953,13 @@ impl<'a> Parser<'a> {
                     TokenKind::CaretEquals => (at_syntax::BinaryOp::BitXor, self.current.span),
                     TokenKind::ShlEquals => (at_syntax::BinaryOp::Shl, self.current.span),
                     TokenKind::ShrEquals => (at_syntax::BinaryOp::Shr, self.current.span),
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "bitwise assignment operator".to_string(),
+                            found: self.current.kind.clone(),
+                            span: self.current.span,
+                        });
+                    }
                 };
                 self.advance();
                 Some((op, span))
@@ -958,7 +1045,11 @@ impl<'a> Parser<'a> {
                     value,
                 })
             }
-            _ => unreachable!(),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "set target".to_string(),
+                found: self.current.kind.clone(),
+                span: self.current.span,
+            }),
         }
     }
 
@@ -1148,16 +1239,13 @@ impl<'a> Parser<'a> {
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        loop {
-            let (op, span) = match self.current.kind {
-                TokenKind::OrOr => (at_syntax::BinaryOp::Or, self.current.span),
-                _ => break,
-            };
+        while matches!(self.current.kind, TokenKind::OrOr) {
+            let span = self.current.span;
             self.advance();
             let right = self.parse_and()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op,
+                op: at_syntax::BinaryOp::Or,
                 op_span: span,
                 id: self.alloc_id(),
                 right: Box::new(right),
@@ -1168,16 +1256,13 @@ impl<'a> Parser<'a> {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_equality()?;
-        loop {
-            let (op, span) = match self.current.kind {
-                TokenKind::AndAnd => (at_syntax::BinaryOp::And, self.current.span),
-                _ => break,
-            };
+        while matches!(self.current.kind, TokenKind::AndAnd) {
+            let span = self.current.span;
             self.advance();
             let right = self.parse_equality()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op,
+                op: at_syntax::BinaryOp::And,
                 op_span: span,
                 id: self.alloc_id(),
                 right: Box::new(right),
@@ -1228,7 +1313,8 @@ impl<'a> Parser<'a> {
             Ok(items.remove(0))
         } else {
             let start = expr_span_start(&items[0]).unwrap_or(self.current.span.start);
-            let end = expr_span_end(items.last().unwrap()).unwrap_or(self.current.span.end);
+            let end = expr_span_end(items.last().expect("items non-empty after ops"))
+                .unwrap_or(self.current.span.end);
             Ok(Expr::ChainedComparison {
                 span: Span::new(start, end),
                 id: self.alloc_id(),
@@ -1240,16 +1326,13 @@ impl<'a> Parser<'a> {
 
     fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bitwise_xor()?;
-        loop {
-            let (op, span) = match self.current.kind {
-                TokenKind::Pipe => (at_syntax::BinaryOp::BitOr, self.current.span),
-                _ => break,
-            };
+        while matches!(self.current.kind, TokenKind::Pipe) {
+            let span = self.current.span;
             self.advance();
             let right = self.parse_bitwise_xor()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op,
+                op: at_syntax::BinaryOp::BitOr,
                 op_span: span,
                 id: self.alloc_id(),
                 right: Box::new(right),
@@ -1260,16 +1343,13 @@ impl<'a> Parser<'a> {
 
     fn parse_bitwise_xor(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bitwise_and()?;
-        loop {
-            let (op, span) = match self.current.kind {
-                TokenKind::Caret => (at_syntax::BinaryOp::BitXor, self.current.span),
-                _ => break,
-            };
+        while matches!(self.current.kind, TokenKind::Caret) {
+            let span = self.current.span;
             self.advance();
             let right = self.parse_bitwise_and()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op,
+                op: at_syntax::BinaryOp::BitXor,
                 op_span: span,
                 id: self.alloc_id(),
                 right: Box::new(right),
@@ -1280,16 +1360,13 @@ impl<'a> Parser<'a> {
 
     fn parse_bitwise_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_shift()?;
-        loop {
-            let (op, span) = match self.current.kind {
-                TokenKind::Ampersand => (at_syntax::BinaryOp::BitAnd, self.current.span),
-                _ => break,
-            };
+        while matches!(self.current.kind, TokenKind::Ampersand) {
+            let span = self.current.span;
             self.advance();
             let right = self.parse_shift()?;
             expr = Expr::Binary {
                 left: Box::new(expr),
-                op,
+                op: at_syntax::BinaryOp::BitAnd,
                 op_span: span,
                 id: self.alloc_id(),
                 right: Box::new(right),
@@ -1678,7 +1755,7 @@ impl<'a> Parser<'a> {
                 }
                 let mut expr_str = String::new();
                 let mut depth = 1;
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     if ch == '{' {
                         depth += 1;
                         expr_str.push(ch);
@@ -1881,13 +1958,20 @@ impl<'a> Parser<'a> {
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
             match &self.current.kind {
                 TokenKind::Import
+                | TokenKind::Pub
                 | TokenKind::Type
+                | TokenKind::Enum
                 | TokenKind::Let
                 | TokenKind::Const
                 | TokenKind::Using
                 | TokenKind::Set
                 | TokenKind::Struct
                 | TokenKind::Return
+                | TokenKind::Throw
+                | TokenKind::Raise
+                | TokenKind::Defer
+                | TokenKind::With
+                | TokenKind::Yield
                 | TokenKind::Test
                 | TokenKind::While
                 | TokenKind::For
@@ -2024,7 +2108,6 @@ impl<'a> Parser<'a> {
             return Ok(MatchPattern::Bool(false, self.alloc_id()));
         }
         if let TokenKind::Int(value) = self.current.kind {
-            let value = value;
             self.advance();
             return Ok(MatchPattern::Int(value, self.alloc_id()));
         }
@@ -2038,7 +2121,6 @@ impl<'a> Parser<'a> {
             self.advance();
             match self.current.kind {
                 TokenKind::Int(value) => {
-                    let value = value;
                     self.advance();
                     return Ok(MatchPattern::Int(-value, self.alloc_id()));
                 }
@@ -2502,6 +2584,22 @@ impl<'a> Parser<'a> {
                 continue;
             }
             break;
+        }
+    }
+
+    fn peek_kind(&self) -> TokenKind {
+        let mut lexer = self.lexer.clone();
+        let mut pending_token = self.pending_token.clone();
+        loop {
+            let token = if let Some(token) = pending_token.take() {
+                token
+            } else {
+                lexer.next_token()
+            };
+            if token.kind.is_comment() {
+                continue;
+            }
+            return token.kind;
         }
     }
 
@@ -3069,7 +3167,7 @@ impl<'a> Lexer<'a> {
                 self.bump();
             } else if ch == '.' && !has_dot {
                 // Check if next char is a digit (for float) or not (member access)
-                if self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                if self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     has_dot = true;
                     value.push(ch);
                     self.bump();
@@ -3314,6 +3412,14 @@ fn expr_span_end(expr: &Expr) -> Option<usize> {
     }
 }
 
+fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_module, parse_module_with_errors};
@@ -3358,6 +3464,32 @@ fn f() {
 }
 "#;
         assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_statement_keywords_inside_block_expressions() {
+        let source = r#"
+fn f() {
+    let a = if true {
+        defer print("cleanup");
+        throw err("boom");
+        0
+    } else {
+        0
+    };
+    let b = if true {
+        with time = time.fixed("2026-01-01T00:00:00Z") {
+            yield time.now();
+        }
+        1
+    } else {
+        1
+    };
+    return a + b;
+}
+"#;
+        let result = parse_module(source);
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
@@ -3471,6 +3603,25 @@ tool fn greet(name: string) -> string {
     }
 
     #[test]
+    fn rejects_async_tool_function_with_async_span() {
+        let source = r#"
+tool async fn greet(name: string) -> string {
+    return name;
+}
+"#;
+        let (_module, errors) = parse_module_with_errors(source);
+        let err = errors
+            .into_iter()
+            .find(|err| matches!(err, super::ParseError::UnexpectedToken { expected, .. } if expected.contains("async tool fn is not supported")))
+            .expect("expected async tool parse error");
+        let super::ParseError::UnexpectedToken { span, .. } = err else {
+            panic!("unexpected parse error");
+        };
+        let async_offset = source.find("async").expect("async keyword");
+        assert_eq!(span.start, async_offset);
+    }
+
+    #[test]
     fn parses_import_with_alias() {
         let source = r#"
 import "./lib.at" as lib;
@@ -3480,6 +3631,46 @@ fn f() {
 }
 "#;
         assert!(parse_module(source).is_ok());
+    }
+
+    #[test]
+    fn parses_pub_functions() {
+        let source = r#"
+pub fn add(a: int, b: int) -> int {
+    return a + b;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert_eq!(module.functions.len(), 1);
+        assert!(module.functions[0].is_pub);
+    }
+
+    #[test]
+    fn parses_pub_async_functions() {
+        let source = r#"
+pub async fn fetch() -> int {
+    return 1;
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert_eq!(module.functions.len(), 1);
+        assert!(module.functions[0].is_pub);
+        assert!(module.functions[0].is_async);
+    }
+
+    #[test]
+    fn parses_mixed_pub_declarations() {
+        let source = r#"
+pub import "./lib.at" as lib;
+
+pub fn call() {
+    return lib.foo();
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        assert_eq!(module.functions.len(), 1);
+        assert!(module.functions[0].is_pub);
+        assert_eq!(module.stmts.len(), 1);
     }
 
     #[test]
@@ -3587,7 +3778,7 @@ fn f() {
 "#;
         let module = parse_module(source).expect("parse should succeed");
         // This should be caught by linter, not parser
-        assert!(module.functions.len() > 0);
+        assert!(!module.functions.is_empty());
     }
 
     #[test]
@@ -3784,12 +3975,20 @@ fn f() {
             errors.len()
         );
     }
-}
 
-fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
+    #[test]
+    fn error_recovery_skips_invalid_stmt_without_placeholder_nodes() {
+        let source = r#"
+fn f() {
+    let broken = ;
+    let ok = 1;
+    ok;
 }
-
-fn is_ident_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
+"#;
+        let (module, errors) = parse_module_with_errors(source);
+        assert!(!errors.is_empty());
+        assert_eq!(module.functions.len(), 1);
+        let body = &module.functions[0].body;
+        assert_eq!(body.len(), 2);
+    }
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use at_syntax::{Expr, Ident, InterpPart, Module, Span, Stmt};
+use at_syntax::{Expr, Ident, InterpPart, MatchPattern, Module, Span, Stmt};
 
 /// An edit to apply to fix a lint error
 #[derive(Debug, Clone)]
@@ -30,6 +30,7 @@ pub enum LintRule {
     ImportOrder,
     MissingImportPath,
     DuplicateFunction,
+    DuplicateLocal,
     UnusedFunction,
     UnusedLocal,
     UnusedMatchBinding,
@@ -37,6 +38,7 @@ pub enum LintRule {
     UnnecessaryNeeds,
     ShadowedBinding,
     MissingReturn,
+    UnknownTypeFlow,
     DeadBranch,
     NamingConvention,
     UnusedSetTarget,
@@ -46,6 +48,8 @@ pub enum LintRule {
     FunctionLength,
     NestingDepth,
     CyclomaticComplexity,
+    LegacyExceptionSurface,
+    UnqualifiedImportCall,
 }
 
 impl LintRule {
@@ -57,6 +61,7 @@ impl LintRule {
             "import_order" => Some(LintRule::ImportOrder),
             "missing_import_path" => Some(LintRule::MissingImportPath),
             "duplicate_function" => Some(LintRule::DuplicateFunction),
+            "duplicate_local" => Some(LintRule::DuplicateLocal),
             "unused_function" => Some(LintRule::UnusedFunction),
             "unused_local" => Some(LintRule::UnusedLocal),
             "unused_match_binding" => Some(LintRule::UnusedMatchBinding),
@@ -64,6 +69,7 @@ impl LintRule {
             "unnecessary_needs" => Some(LintRule::UnnecessaryNeeds),
             "shadowed_binding" => Some(LintRule::ShadowedBinding),
             "missing_return" => Some(LintRule::MissingReturn),
+            "unknown_type_flow" => Some(LintRule::UnknownTypeFlow),
             "dead_branch" => Some(LintRule::DeadBranch),
             "naming_convention" => Some(LintRule::NamingConvention),
             "unused_set_target" => Some(LintRule::UnusedSetTarget),
@@ -73,6 +79,8 @@ impl LintRule {
             "function_length" => Some(LintRule::FunctionLength),
             "nesting_depth" => Some(LintRule::NestingDepth),
             "cyclomatic_complexity" => Some(LintRule::CyclomaticComplexity),
+            "legacy_exception_surface" => Some(LintRule::LegacyExceptionSurface),
+            "unqualified_import_call" => Some(LintRule::UnqualifiedImportCall),
             _ => None,
         }
     }
@@ -85,7 +93,7 @@ struct LintConfig {
     suppressions: LintSuppressions,
 }
 
-impl LintConfig {
+impl Default for LintConfig {
     fn default() -> Self {
         let rules = [
             LintRule::DuplicateImportAlias,
@@ -94,6 +102,7 @@ impl LintConfig {
             LintRule::ImportOrder,
             LintRule::MissingImportPath,
             LintRule::DuplicateFunction,
+            LintRule::DuplicateLocal,
             LintRule::UnusedFunction,
             LintRule::UnusedLocal,
             LintRule::UnusedMatchBinding,
@@ -101,6 +110,7 @@ impl LintConfig {
             LintRule::UnnecessaryNeeds,
             LintRule::ShadowedBinding,
             LintRule::MissingReturn,
+            LintRule::UnknownTypeFlow,
             LintRule::DeadBranch,
             LintRule::NamingConvention,
             LintRule::UnusedSetTarget,
@@ -110,6 +120,8 @@ impl LintConfig {
             LintRule::FunctionLength,
             LintRule::NestingDepth,
             LintRule::CyclomaticComplexity,
+            LintRule::LegacyExceptionSurface,
+            LintRule::UnqualifiedImportCall,
         ];
         let mut enabled = HashSet::new();
         let mut severity = HashMap::new();
@@ -123,12 +135,15 @@ impl LintConfig {
                 | LintRule::UnnecessaryNeeds
                 | LintRule::ShadowedBinding
                 | LintRule::MissingReturn
+                | LintRule::UnknownTypeFlow
                 | LintRule::DeadBranch
                 | LintRule::NamingConvention
                 | LintRule::UnusedSetTarget
                 | LintRule::InfiniteLoop
                 | LintRule::BooleanLiteralComparison
-                | LintRule::EmptyBody => LintSeverity::Warn,
+                | LintRule::EmptyBody
+                | LintRule::LegacyExceptionSurface
+                | LintRule::UnqualifiedImportCall => LintSeverity::Warn,
                 LintRule::ImportOrder => LintSeverity::Info,
                 LintRule::FunctionLength
                 | LintRule::NestingDepth
@@ -143,7 +158,9 @@ impl LintConfig {
             suppressions: LintSuppressions::default(),
         }
     }
+}
 
+impl LintConfig {
     fn strict() -> Self {
         let mut config = Self::default();
         for rule in [
@@ -154,6 +171,7 @@ impl LintConfig {
             LintRule::UnnecessaryNeeds,
             LintRule::ShadowedBinding,
             LintRule::MissingReturn,
+            LintRule::UnknownTypeFlow,
             LintRule::DeadBranch,
             LintRule::NamingConvention,
             LintRule::UnusedSetTarget,
@@ -163,6 +181,8 @@ impl LintConfig {
             LintRule::FunctionLength,
             LintRule::NestingDepth,
             LintRule::CyclomaticComplexity,
+            LintRule::LegacyExceptionSurface,
+            LintRule::UnqualifiedImportCall,
         ] {
             config.severity.insert(rule, LintSeverity::Error);
         }
@@ -235,11 +255,19 @@ struct LintSuppressions {
     global_all: bool,
     global: HashSet<LintRule>,
     spans: Vec<LintSuppression>,
+    lines: Vec<LintLineSuppression>,
+    line_starts: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
 struct LintSuppression {
     span: Span,
+    rules: Option<HashSet<LintRule>>,
+}
+
+#[derive(Debug, Clone)]
+struct LintLineSuppression {
+    line: usize,
     rules: Option<HashSet<LintRule>>,
 }
 
@@ -256,12 +284,35 @@ impl LintSuppressions {
                 && suppression
                     .rules
                     .as_ref()
-                    .map_or(true, |rules| rules.contains(&rule))
+                    .is_none_or(|rules| rules.contains(&rule))
             {
                 return true;
             }
         }
+        if let Some(line) = self.line_for_offset(span.start) {
+            for suppression in &self.lines {
+                if suppression.line == line
+                    && suppression
+                        .rules
+                        .as_ref()
+                        .is_none_or(|rules| rules.contains(&rule))
+                {
+                    return true;
+                }
+            }
+        }
         false
+    }
+
+    fn line_for_offset(&self, offset: usize) -> Option<usize> {
+        if self.line_starts.is_empty() {
+            return None;
+        }
+        match self.line_starts.binary_search(&offset) {
+            Ok(index) => Some(index),
+            Err(0) => Some(0),
+            Err(index) => Some(index.saturating_sub(1)),
+        }
     }
 }
 
@@ -400,17 +451,23 @@ impl LintResult {
 }
 
 pub fn lint_module(module: &Module) -> Result<(), Vec<LintError>> {
-    lint_module_with_config(module, None)
+    lint_module_with_source_and_config(module, None, None)
 }
 
 pub fn lint_module_with_config(
     module: &Module,
     config_source: Option<&str>,
 ) -> Result<(), Vec<LintError>> {
-    let config = config_source
-        .map(LintConfig::load)
-        .unwrap_or_else(LintConfig::default);
-    let suppressions = collect_lint_suppressions(module);
+    lint_module_with_source_and_config(module, None, config_source)
+}
+
+pub fn lint_module_with_source_and_config(
+    module: &Module,
+    source: Option<&str>,
+    config_source: Option<&str>,
+) -> Result<(), Vec<LintError>> {
+    let config = config_source.map(LintConfig::load).unwrap_or_default();
+    let suppressions = collect_lint_suppressions(module, source);
     let config = config.with_suppressions(suppressions);
     let mut errors = Vec::new();
     let mut aliases: Vec<Ident> = Vec::new();
@@ -465,25 +522,15 @@ pub fn lint_module_with_config(
             && path != "std"
             && path != "std.at"
         {
-            let base = module
-                .source_path
-                .as_deref()
-                .and_then(|path| std::path::Path::new(path).parent());
-            if let Some(base) = base {
-                let candidate = if std::path::Path::new(&path).is_absolute() {
-                    std::path::PathBuf::from(&path)
-                } else {
-                    base.join(&path)
-                };
-                if !candidate.exists() {
-                    push_rule(
-                        &config,
-                        &mut errors,
-                        LintRule::MissingImportPath,
-                        format!("import path does not exist: {}", path),
-                        Some(alias.span),
-                    );
-                }
+            // Keep lint deterministic: avoid filesystem existence checks.
+            if path.trim().is_empty() {
+                push_rule(
+                    &config,
+                    &mut errors,
+                    LintRule::MissingImportPath,
+                    "import path is empty".to_string(),
+                    Some(alias.span),
+                );
             }
         }
         if let Some(existing) = seen_paths.get(&path) {
@@ -567,6 +614,7 @@ pub fn lint_module_with_config(
     lint_unnecessary_needs(module, &config, &mut errors);
     lint_shadowed_bindings(module, &config, &mut errors);
     lint_missing_returns(module, &config, &mut errors);
+    lint_unknown_type_flow(module, &config, &mut errors);
     lint_dead_branches(module, &config, &mut errors);
     lint_naming_conventions(module, &config, &mut errors);
     lint_unused_set_targets(module, &config, &mut errors);
@@ -574,6 +622,8 @@ pub fn lint_module_with_config(
     lint_boolean_literal_comparisons(module, &config, &mut errors);
     lint_empty_bodies(module, &config, &mut errors);
     lint_function_metrics(module, &config, &mut errors);
+    lint_legacy_exception_surface(module, &config, &mut errors);
+    lint_unqualified_import_calls(module, &config, &mut errors);
 
     let mut result = LintResult::new();
     for error in errors {
@@ -584,6 +634,28 @@ pub fn lint_module_with_config(
         Ok(())
     } else {
         Err(result.into_vec())
+    }
+}
+
+fn lint_unknown_type_flow(module: &Module, config: &LintConfig, errors: &mut Vec<LintError>) {
+    if !config.enabled.contains(&LintRule::UnknownTypeFlow) {
+        return;
+    }
+    let result = at_check::typecheck_module_with_mode(module, at_check::TypecheckMode::Strict);
+    let Err(type_errors) = result else {
+        return;
+    };
+    for error in type_errors {
+        if !error.message.contains("unknown in strict mode") {
+            continue;
+        }
+        push_rule(
+            config,
+            errors,
+            LintRule::UnknownTypeFlow,
+            error.message,
+            error.span,
+        );
     }
 }
 
@@ -603,7 +675,7 @@ fn lint_shadowed_bindings(module: &Module, config: &LintConfig, errors: &mut Vec
                     Some(param.name.span),
                 );
             }
-            scopes.last_mut().unwrap().insert(param.name.name.clone());
+            ensure_scope(&mut scopes).insert(param.name.name.clone());
         }
         check_shadowed_stmt(&func.body, &mut scopes, config, errors);
     }
@@ -735,7 +807,9 @@ fn check_infinite_loop_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut V
                 while_span,
                 ..
             } => {
-                if eval_bool_literal(condition) == Some(true) && !contains_termination(body) {
+                if eval_bool_literal(condition) == Some(true)
+                    && !contains_guaranteed_termination(body, true)
+                {
                     push_rule(
                         config,
                         errors,
@@ -837,7 +911,7 @@ fn check_boolean_literal_expr(expr: &Expr, config: &LintConfig, errors: &mut Vec
             left, op, right, ..
         } => {
             if matches!(op, at_syntax::BinaryOp::Eq | at_syntax::BinaryOp::Neq)
-                && (matches!(**left, Expr::Bool(_, ..)) || matches!(**right, Expr::Bool(_, ..)))
+                && (matches!(**left, Expr::Bool(..)) || matches!(**right, Expr::Bool(..)))
             {
                 push_rule(
                     config,
@@ -920,11 +994,11 @@ fn check_boolean_literal_expr(expr: &Expr, config: &LintConfig, errors: &mut Vec
                 check_boolean_literal_expr(&field.value, config, errors);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(payload) = payload {
-                check_boolean_literal_expr(payload, config, errors);
-            }
-        }
+        Expr::EnumLiteral {
+            payload: Some(payload),
+            ..
+        } => check_boolean_literal_expr(payload, config, errors),
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Range { start, end, .. } => {
             check_boolean_literal_expr(start, config, errors);
             check_boolean_literal_expr(end, config, errors);
@@ -1087,6 +1161,973 @@ fn lint_function_metrics(module: &Module, config: &LintConfig, errors: &mut Vec<
     }
 }
 
+fn lint_legacy_exception_surface(
+    module: &Module,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    for func in &module.functions {
+        lint_legacy_exception_stmts(&func.body, config, errors);
+    }
+    lint_legacy_exception_stmts(&module.stmts, config, errors);
+}
+
+fn lint_legacy_exception_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Throw { expr, .. } => {
+                push_rule(
+                    config,
+                    errors,
+                    LintRule::LegacyExceptionSurface,
+                    "legacy exception-style `throw` is deprecated; prefer result/option flows"
+                        .to_string(),
+                    expr_span(expr).or_else(|| stmt_span(stmt)),
+                );
+                lint_legacy_exception_expr(expr, config, errors);
+            }
+            Stmt::Const { value, .. }
+            | Stmt::Let { value, .. }
+            | Stmt::Using { value, .. }
+            | Stmt::Set { value, .. }
+            | Stmt::Expr { expr: value, .. }
+            | Stmt::Defer { expr: value, .. }
+            | Stmt::Yield { expr: value, .. } => lint_legacy_exception_expr(value, config, errors),
+            Stmt::SetMember { base, value, .. } => {
+                lint_legacy_exception_expr(base, config, errors);
+                lint_legacy_exception_expr(value, config, errors);
+            }
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
+                lint_legacy_exception_expr(base, config, errors);
+                lint_legacy_exception_expr(index, config, errors);
+                lint_legacy_exception_expr(value, config, errors);
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                lint_legacy_exception_expr(condition, config, errors);
+                lint_legacy_exception_stmts(body, config, errors);
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                lint_legacy_exception_expr(condition, config, errors);
+                lint_legacy_exception_stmts(then_branch, config, errors);
+                if let Some(else_branch) = else_branch {
+                    lint_legacy_exception_stmts(else_branch, config, errors);
+                }
+            }
+            Stmt::For { iter, body, .. } => {
+                lint_legacy_exception_expr(iter, config, errors);
+                lint_legacy_exception_stmts(body, config, errors);
+            }
+            Stmt::Return {
+                expr: Some(expr), ..
+            } => lint_legacy_exception_expr(expr, config, errors),
+            Stmt::Return { expr: None, .. } => {}
+            Stmt::With { value, body, .. } => {
+                lint_legacy_exception_expr(value, config, errors);
+                lint_legacy_exception_stmts(body, config, errors);
+            }
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                lint_legacy_exception_stmts(stmts, config, errors);
+            }
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Import { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. } => {}
+        }
+    }
+}
+
+fn lint_legacy_exception_expr(expr: &Expr, config: &LintConfig, errors: &mut Vec<LintError>) {
+    match expr {
+        Expr::Unary { expr, .. }
+        | Expr::Try(expr, _)
+        | Expr::Await { expr, .. }
+        | Expr::ArraySpread { expr, .. }
+        | Expr::MapSpread { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::Is { expr, .. }
+        | Expr::Group { expr, .. } => lint_legacy_exception_expr(expr, config, errors),
+        Expr::Binary { left, right, .. } => {
+            lint_legacy_exception_expr(left, config, errors);
+            lint_legacy_exception_expr(right, config, errors);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_legacy_exception_expr(condition, config, errors);
+            lint_legacy_exception_expr(then_branch, config, errors);
+            lint_legacy_exception_expr(else_branch, config, errors);
+        }
+        Expr::ChainedComparison { items, .. }
+        | Expr::Array { items, .. }
+        | Expr::Tuple { items, .. } => {
+            for item in items {
+                lint_legacy_exception_expr(item, config, errors);
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_legacy_exception_expr(condition, config, errors);
+            lint_legacy_exception_expr(then_branch, config, errors);
+            if let Some(else_branch) = else_branch {
+                lint_legacy_exception_expr(else_branch, config, errors);
+            }
+        }
+        Expr::Member { base, .. } => lint_legacy_exception_expr(base, config, errors),
+        Expr::Call { callee, args, .. } => {
+            lint_legacy_exception_expr(callee, config, errors);
+            for arg in args {
+                lint_legacy_exception_expr(arg, config, errors);
+            }
+        }
+        Expr::Match { value, arms, .. } => {
+            lint_legacy_exception_expr(value, config, errors);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    lint_legacy_exception_expr(guard, config, errors);
+                }
+                lint_legacy_exception_expr(&arm.body, config, errors);
+            }
+        }
+        Expr::TryCatch {
+            try_span,
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            push_rule(
+                config,
+                errors,
+                LintRule::LegacyExceptionSurface,
+                "legacy `try { ... } catch { ... }` is deprecated; prefer `?` and `match`"
+                    .to_string(),
+                Some(*try_span),
+            );
+            lint_legacy_exception_expr(try_block, config, errors);
+            if let Some(catch_block) = catch_block {
+                lint_legacy_exception_expr(catch_block, config, errors);
+            }
+            if let Some(finally_block) = finally_block {
+                lint_legacy_exception_expr(finally_block, config, errors);
+            }
+        }
+        Expr::Block { stmts, tail, .. } => {
+            lint_legacy_exception_stmts(stmts, config, errors);
+            if let Some(tail) = tail {
+                lint_legacy_exception_expr(tail, config, errors);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            lint_legacy_exception_expr(base, config, errors);
+            lint_legacy_exception_expr(index, config, errors);
+        }
+        Expr::Range { start, end, .. } => {
+            lint_legacy_exception_expr(start, config, errors);
+            lint_legacy_exception_expr(end, config, errors);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr, _) = part {
+                    lint_legacy_exception_expr(expr, config, errors);
+                }
+            }
+        }
+        Expr::Closure { body, .. } => lint_legacy_exception_expr(body, config, errors),
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                lint_legacy_exception_expr(&field.value, config, errors);
+            }
+        }
+        Expr::EnumLiteral {
+            payload: Some(payload),
+            ..
+        } => lint_legacy_exception_expr(payload, config, errors),
+        Expr::EnumLiteral { payload: None, .. } => {}
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                lint_legacy_exception_expr(key, config, errors);
+                lint_legacy_exception_expr(value, config, errors);
+            }
+        }
+        Expr::Int(_, _, _)
+        | Expr::Float(_, _, _)
+        | Expr::String(_, _, _)
+        | Expr::Bool(_, _, _)
+        | Expr::Ident(_) => {}
+    }
+}
+
+fn lint_unqualified_import_calls(
+    module: &Module,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    if !module
+        .stmts
+        .iter()
+        .any(|stmt| matches!(stmt, Stmt::Import { .. }))
+    {
+        return;
+    }
+
+    let function_names: HashSet<String> = module
+        .functions
+        .iter()
+        .map(|func| func.name.name.clone())
+        .collect();
+
+    for func in &module.functions {
+        let mut local_names = HashSet::new();
+        for param in &func.params {
+            local_names.insert(param.name.name.clone());
+        }
+        collect_declared_names_stmts(&func.body, &mut local_names);
+        lint_unqualified_import_calls_stmts(
+            &func.body,
+            &function_names,
+            &local_names,
+            config,
+            errors,
+        );
+    }
+
+    let mut module_local_names = HashSet::new();
+    collect_declared_names_stmts(&module.stmts, &mut module_local_names);
+    lint_unqualified_import_calls_stmts(
+        &module.stmts,
+        &function_names,
+        &module_local_names,
+        config,
+        errors,
+    );
+}
+
+fn lint_unqualified_import_calls_stmts(
+    stmts: &[Stmt],
+    function_names: &HashSet<String>,
+    local_names: &HashSet<String>,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Import { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. } => {}
+            Stmt::Const { value, .. }
+            | Stmt::Let { value, .. }
+            | Stmt::Using { value, .. }
+            | Stmt::Set { value, .. }
+            | Stmt::Expr { expr: value, .. }
+            | Stmt::Throw { expr: value, .. }
+            | Stmt::Defer { expr: value, .. }
+            | Stmt::Yield { expr: value, .. } => lint_unqualified_import_calls_expr(
+                value,
+                function_names,
+                local_names,
+                config,
+                errors,
+            ),
+            Stmt::SetMember { base, value, .. } => {
+                lint_unqualified_import_calls_expr(
+                    base,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_expr(
+                    value,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
+                lint_unqualified_import_calls_expr(
+                    base,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_expr(
+                    index,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_expr(
+                    value,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                lint_unqualified_import_calls_expr(
+                    condition,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_stmts(
+                    body,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                lint_unqualified_import_calls_expr(
+                    condition,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_stmts(
+                    then_branch,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                if let Some(else_branch) = else_branch {
+                    lint_unqualified_import_calls_stmts(
+                        else_branch,
+                        function_names,
+                        local_names,
+                        config,
+                        errors,
+                    );
+                }
+            }
+            Stmt::For { iter, body, .. } => {
+                lint_unqualified_import_calls_expr(
+                    iter,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_stmts(
+                    body,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Return {
+                expr: Some(expr), ..
+            } => {
+                lint_unqualified_import_calls_expr(
+                    expr,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::Return { expr: None, .. } => {}
+            Stmt::With { value, body, .. } => {
+                lint_unqualified_import_calls_expr(
+                    value,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_stmts(
+                    body,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                lint_unqualified_import_calls_stmts(
+                    stmts,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+    }
+}
+
+fn lint_unqualified_import_calls_expr(
+    expr: &Expr,
+    function_names: &HashSet<String>,
+    local_names: &HashSet<String>,
+    config: &LintConfig,
+    errors: &mut Vec<LintError>,
+) {
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident(ident) = callee.as_ref() {
+                if is_unqualified_import_call_candidate(&ident.name, function_names, local_names) {
+                    push_rule(
+                        config,
+                        errors,
+                        LintRule::UnqualifiedImportCall,
+                        format!(
+                            "unqualified call with imports: use alias-qualified access for `{}`",
+                            ident.name
+                        ),
+                        Some(ident.span),
+                    );
+                }
+            }
+            lint_unqualified_import_calls_expr(callee, function_names, local_names, config, errors);
+            for arg in args {
+                lint_unqualified_import_calls_expr(
+                    arg,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Try(expr, _)
+        | Expr::Await { expr, .. }
+        | Expr::ArraySpread { expr, .. }
+        | Expr::MapSpread { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::Is { expr, .. }
+        | Expr::Group { expr, .. } => {
+            lint_unqualified_import_calls_expr(expr, function_names, local_names, config, errors);
+        }
+        Expr::Binary { left, right, .. } => {
+            lint_unqualified_import_calls_expr(left, function_names, local_names, config, errors);
+            lint_unqualified_import_calls_expr(right, function_names, local_names, config, errors);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_unqualified_import_calls_expr(
+                condition,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+            lint_unqualified_import_calls_expr(
+                then_branch,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+            lint_unqualified_import_calls_expr(
+                else_branch,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+        }
+        Expr::ChainedComparison { items, .. }
+        | Expr::Array { items, .. }
+        | Expr::Tuple { items, .. } => {
+            for item in items {
+                lint_unqualified_import_calls_expr(
+                    item,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            lint_unqualified_import_calls_expr(
+                condition,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+            lint_unqualified_import_calls_expr(
+                then_branch,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+            if let Some(else_branch) = else_branch {
+                lint_unqualified_import_calls_expr(
+                    else_branch,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::Member { base, .. } => {
+            lint_unqualified_import_calls_expr(base, function_names, local_names, config, errors);
+        }
+        Expr::Match { value, arms, .. } => {
+            lint_unqualified_import_calls_expr(value, function_names, local_names, config, errors);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    lint_unqualified_import_calls_expr(
+                        guard,
+                        function_names,
+                        local_names,
+                        config,
+                        errors,
+                    );
+                }
+                lint_unqualified_import_calls_expr(
+                    &arm.body,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::Block { stmts, tail, .. } => {
+            lint_unqualified_import_calls_stmts(stmts, function_names, local_names, config, errors);
+            if let Some(tail) = tail {
+                lint_unqualified_import_calls_expr(
+                    tail,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            lint_unqualified_import_calls_expr(base, function_names, local_names, config, errors);
+            lint_unqualified_import_calls_expr(index, function_names, local_names, config, errors);
+        }
+        Expr::Range { start, end, .. } => {
+            lint_unqualified_import_calls_expr(start, function_names, local_names, config, errors);
+            lint_unqualified_import_calls_expr(end, function_names, local_names, config, errors);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr, _) = part {
+                    lint_unqualified_import_calls_expr(
+                        expr,
+                        function_names,
+                        local_names,
+                        config,
+                        errors,
+                    );
+                }
+            }
+        }
+        Expr::Closure { body, .. } => {
+            lint_unqualified_import_calls_expr(body, function_names, local_names, config, errors);
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                lint_unqualified_import_calls_expr(
+                    &field.value,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::EnumLiteral {
+            payload: Some(payload),
+            ..
+        } => {
+            lint_unqualified_import_calls_expr(payload, function_names, local_names, config, errors)
+        }
+        Expr::EnumLiteral { payload: None, .. } => {}
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            lint_unqualified_import_calls_expr(
+                try_block,
+                function_names,
+                local_names,
+                config,
+                errors,
+            );
+            if let Some(catch_block) = catch_block {
+                lint_unqualified_import_calls_expr(
+                    catch_block,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                lint_unqualified_import_calls_expr(
+                    finally_block,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                lint_unqualified_import_calls_expr(
+                    key,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+                lint_unqualified_import_calls_expr(
+                    value,
+                    function_names,
+                    local_names,
+                    config,
+                    errors,
+                );
+            }
+        }
+        Expr::Int(_, _, _)
+        | Expr::Float(_, _, _)
+        | Expr::String(_, _, _)
+        | Expr::Bool(_, _, _)
+        | Expr::Ident(_) => {}
+    }
+}
+
+fn collect_declared_names_stmts(stmts: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, value, .. }
+            | Stmt::Const { name, value, .. }
+            | Stmt::Using { name, value, .. } => {
+                names.insert(name.name.clone());
+                collect_declared_names_expr(value, names);
+            }
+            Stmt::With {
+                name, value, body, ..
+            } => {
+                names.insert(name.name.clone());
+                collect_declared_names_expr(value, names);
+                collect_declared_names_stmts(body, names);
+            }
+            Stmt::For {
+                item, iter, body, ..
+            } => {
+                names.insert(item.name.clone());
+                collect_declared_names_expr(iter, names);
+                collect_declared_names_stmts(body, names);
+            }
+            Stmt::Set { value, .. }
+            | Stmt::Expr { expr: value, .. }
+            | Stmt::Throw { expr: value, .. }
+            | Stmt::Defer { expr: value, .. }
+            | Stmt::Yield { expr: value, .. } => collect_declared_names_expr(value, names),
+            Stmt::SetMember { base, value, .. } => {
+                collect_declared_names_expr(base, names);
+                collect_declared_names_expr(value, names);
+            }
+            Stmt::SetIndex {
+                base, index, value, ..
+            } => {
+                collect_declared_names_expr(base, names);
+                collect_declared_names_expr(index, names);
+                collect_declared_names_expr(value, names);
+            }
+            Stmt::While {
+                condition, body, ..
+            } => {
+                collect_declared_names_expr(condition, names);
+                collect_declared_names_stmts(body, names);
+            }
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_declared_names_expr(condition, names);
+                collect_declared_names_stmts(then_branch, names);
+                if let Some(else_branch) = else_branch {
+                    collect_declared_names_stmts(else_branch, names);
+                }
+            }
+            Stmt::Return {
+                expr: Some(expr), ..
+            } => collect_declared_names_expr(expr, names),
+            Stmt::Return { expr: None, .. } => {}
+            Stmt::Block { stmts, .. } | Stmt::Test { body: stmts, .. } => {
+                collect_declared_names_stmts(stmts, names);
+            }
+            Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Import { .. }
+            | Stmt::Struct { .. }
+            | Stmt::TypeAlias { .. }
+            | Stmt::Enum { .. } => {}
+        }
+    }
+}
+
+fn collect_declared_names_expr(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::Unary { expr, .. }
+        | Expr::Try(expr, _)
+        | Expr::Await { expr, .. }
+        | Expr::ArraySpread { expr, .. }
+        | Expr::MapSpread { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::Is { expr, .. }
+        | Expr::Group { expr, .. } => collect_declared_names_expr(expr, names),
+        Expr::Binary { left, right, .. } => {
+            collect_declared_names_expr(left, names);
+            collect_declared_names_expr(right, names);
+        }
+        Expr::Ternary {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_declared_names_expr(condition, names);
+            collect_declared_names_expr(then_branch, names);
+            collect_declared_names_expr(else_branch, names);
+        }
+        Expr::ChainedComparison { items, .. }
+        | Expr::Array { items, .. }
+        | Expr::Tuple { items, .. } => {
+            for item in items {
+                collect_declared_names_expr(item, names);
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_declared_names_expr(condition, names);
+            collect_declared_names_expr(then_branch, names);
+            if let Some(else_branch) = else_branch {
+                collect_declared_names_expr(else_branch, names);
+            }
+        }
+        Expr::Member { base, .. } => collect_declared_names_expr(base, names),
+        Expr::Call { callee, args, .. } => {
+            collect_declared_names_expr(callee, names);
+            for arg in args {
+                collect_declared_names_expr(arg, names);
+            }
+        }
+        Expr::Match { value, arms, .. } => {
+            collect_declared_names_expr(value, names);
+            for arm in arms {
+                collect_pattern_bindings(&arm.pattern, names);
+                if let Some(guard) = &arm.guard {
+                    collect_declared_names_expr(guard, names);
+                }
+                collect_declared_names_expr(&arm.body, names);
+            }
+        }
+        Expr::TryCatch {
+            try_block,
+            catch_block,
+            finally_block,
+            ..
+        } => {
+            collect_declared_names_expr(try_block, names);
+            if let Some(catch_block) = catch_block {
+                collect_declared_names_expr(catch_block, names);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_declared_names_expr(finally_block, names);
+            }
+        }
+        Expr::Block { stmts, tail, .. } => {
+            collect_declared_names_stmts(stmts, names);
+            if let Some(tail) = tail {
+                collect_declared_names_expr(tail, names);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_declared_names_expr(base, names);
+            collect_declared_names_expr(index, names);
+        }
+        Expr::Range { start, end, .. } => {
+            collect_declared_names_expr(start, names);
+            collect_declared_names_expr(end, names);
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(expr, _) = part {
+                    collect_declared_names_expr(expr, names);
+                }
+            }
+        }
+        Expr::Closure { params, body, .. } => {
+            for param in params {
+                names.insert(param.name.clone());
+            }
+            collect_declared_names_expr(body, names);
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for field in fields {
+                collect_declared_names_expr(&field.value, names);
+            }
+        }
+        Expr::EnumLiteral {
+            payload: Some(payload),
+            ..
+        } => collect_declared_names_expr(payload, names),
+        Expr::EnumLiteral { payload: None, .. } => {}
+        Expr::MapLiteral { entries, .. } => {
+            for (key, value) in entries {
+                collect_declared_names_expr(key, names);
+                collect_declared_names_expr(value, names);
+            }
+        }
+        Expr::Int(_, _, _)
+        | Expr::Float(_, _, _)
+        | Expr::String(_, _, _)
+        | Expr::Bool(_, _, _)
+        | Expr::Ident(_) => {}
+    }
+}
+
+fn collect_pattern_bindings(pattern: &MatchPattern, names: &mut HashSet<String>) {
+    match pattern {
+        MatchPattern::ResultOk(ident, _)
+        | MatchPattern::ResultErr(ident, _)
+        | MatchPattern::OptionSome(ident, _) => {
+            names.insert(ident.name.clone());
+        }
+        MatchPattern::Tuple { items, .. } => {
+            for item in items {
+                collect_pattern_bindings(item, names);
+            }
+        }
+        MatchPattern::Struct { fields, .. } => {
+            for field in fields {
+                if let Some(binding) = &field.binding {
+                    names.insert(binding.name.clone());
+                }
+            }
+        }
+        MatchPattern::Enum { binding, .. } => {
+            if let Some(binding) = binding {
+                names.insert(binding.name.clone());
+            }
+        }
+        MatchPattern::Binding { name, pattern, .. } => {
+            names.insert(name.name.clone());
+            collect_pattern_bindings(pattern, names);
+        }
+        MatchPattern::Int(_, _)
+        | MatchPattern::Bool(_, _)
+        | MatchPattern::String(_, _)
+        | MatchPattern::OptionNone(_)
+        | MatchPattern::Wildcard(_) => {}
+    }
+}
+
+fn is_unqualified_import_call_candidate(
+    name: &str,
+    function_names: &HashSet<String>,
+    local_names: &HashSet<String>,
+) -> bool {
+    if name.contains('.') {
+        return false;
+    }
+    if function_names.contains(name) {
+        return false;
+    }
+    if local_names.contains(name) {
+        return false;
+    }
+    !is_builtin_like_call(name)
+}
+
+fn is_builtin_like_call(name: &str) -> bool {
+    matches!(
+        name,
+        "assert"
+            | "assert_eq"
+            | "print"
+            | "next"
+            | "len"
+            | "append"
+            | "contains"
+            | "slice"
+            | "split"
+            | "trim"
+            | "substring"
+            | "char_at"
+            | "to_upper"
+            | "to_lower"
+            | "parse_int"
+            | "to_string"
+            | "ok"
+            | "err"
+            | "some"
+            | "none"
+            | "map"
+    )
+}
+
 fn count_stmts(stmts: &[Stmt]) -> usize {
     let mut count = 0;
     for stmt in stmts {
@@ -1210,37 +2251,44 @@ fn is_pascal_case(value: &str) -> bool {
     true
 }
 
-fn contains_termination(stmts: &[Stmt]) -> bool {
+fn contains_guaranteed_termination(stmts: &[Stmt], allow_break: bool) -> bool {
     for stmt in stmts {
-        match stmt {
-            Stmt::Break { .. } | Stmt::Return { .. } | Stmt::Throw { .. } => return true,
-            Stmt::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                if contains_termination(then_branch) {
-                    return true;
-                }
-                if let Some(else_branch) = else_branch {
-                    if contains_termination(else_branch) {
-                        return true;
-                    }
-                }
-            }
-            Stmt::While { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::With { body, .. }
-            | Stmt::Block { stmts: body, .. }
-            | Stmt::Test { body, .. } => {
-                if contains_termination(body) {
-                    return true;
-                }
-            }
-            _ => {}
+        if stmt_guarantees_termination(stmt, allow_break) {
+            return true;
         }
     }
     false
+}
+
+fn stmt_guarantees_termination(stmt: &Stmt, allow_break: bool) -> bool {
+    match stmt {
+        Stmt::Return { .. } | Stmt::Throw { .. } => true,
+        Stmt::Break { .. } => allow_break,
+        Stmt::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let Some(else_branch) = else_branch else {
+                return false;
+            };
+            contains_guaranteed_termination(then_branch, allow_break)
+                && contains_guaranteed_termination(else_branch, allow_break)
+        }
+        Stmt::With { body, .. } | Stmt::Block { stmts: body, .. } | Stmt::Test { body, .. } => {
+            contains_guaranteed_termination(body, allow_break)
+        }
+        // Termination inside nested loops does not guarantee the current loop exits.
+        Stmt::While { .. } | Stmt::For { .. } => false,
+        _ => false,
+    }
+}
+
+fn ensure_scope(scopes: &mut Vec<HashSet<String>>) -> &mut HashSet<String> {
+    if scopes.is_empty() {
+        scopes.push(HashSet::new());
+    }
+    scopes.last_mut().expect("scope must exist")
 }
 
 fn check_shadowed_stmt(
@@ -1266,7 +2314,7 @@ fn check_shadowed_stmt(
                         Some(name.span),
                     );
                 }
-                scopes.last_mut().unwrap().insert(name.name.clone());
+                ensure_scope(scopes).insert(name.name.clone());
             }
             Stmt::For { item, body, .. } => {
                 scopes.push(HashSet::new());
@@ -1281,7 +2329,7 @@ fn check_shadowed_stmt(
                         Some(item.span),
                     );
                 }
-                scopes.last_mut().unwrap().insert(item.name.clone());
+                ensure_scope(scopes).insert(item.name.clone());
                 check_shadowed_stmt(body, scopes, config, errors);
                 scopes.pop();
             }
@@ -1337,16 +2385,16 @@ fn function_always_returns(stmts: &[Stmt]) -> bool {
             Stmt::Return { .. } => return true,
             Stmt::If {
                 then_branch,
-                else_branch,
+                else_branch: Some(else_branch),
                 ..
             } => {
-                if let Some(else_branch) = else_branch {
-                    if function_always_returns(then_branch) && function_always_returns(else_branch)
-                    {
-                        return true;
-                    }
+                if function_always_returns(then_branch) && function_always_returns(else_branch) {
+                    return true;
                 }
             }
+            Stmt::If {
+                else_branch: None, ..
+            } => {}
             Stmt::Block { stmts, .. } => {
                 if function_always_returns(stmts) {
                     return true;
@@ -1423,10 +2471,12 @@ fn check_dead_branches(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<Lin
 fn eval_bool_literal(expr: &Expr) -> Option<bool> {
     match expr {
         Expr::Bool(value, ..) => Some(*value),
-        Expr::Unary { op, expr, .. } => match op {
-            at_syntax::UnaryOp::Not => eval_bool_literal(expr).map(|value| !value),
-            _ => None,
-        },
+        Expr::Unary {
+            op: at_syntax::UnaryOp::Not,
+            expr,
+            ..
+        } => eval_bool_literal(expr).map(|value| !value),
+        Expr::Unary { .. } => None,
         _ => None,
     }
 }
@@ -1516,6 +2566,7 @@ fn stmt_span(stmt: &Stmt) -> Option<Span> {
 
 fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec<LintError>) {
     let mut unreachable_start: Option<Span> = None;
+    let mut unreachable_pending = false;
 
     for stmt in stmts {
         match stmt {
@@ -1526,6 +2577,7 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
             } => {
                 if unreachable_start.is_none() {
                     unreachable_start = Some(*break_span);
+                    unreachable_pending = true;
                 }
             }
             Stmt::Return { expr, .. } => {
@@ -1534,48 +2586,67 @@ fn check_unreachable_stmts(stmts: &[Stmt], config: &LintConfig, errors: &mut Vec
                         .as_ref()
                         .and_then(expr_span)
                         .or_else(|| stmt_span(stmt));
+                    unreachable_pending = true;
                 }
             }
             Stmt::Throw { expr, .. } => {
                 if unreachable_start.is_none() {
                     unreachable_start = expr_span(expr).or_else(|| stmt_span(stmt));
+                    unreachable_pending = true;
                 }
             }
             Stmt::Defer { .. } => {}
             Stmt::With { body, .. } => {
-                if let Some(span) = unreachable_start {
-                    push_rule(
-                        config,
-                        errors,
-                        LintRule::UnreachableCode,
-                        "unreachable code after return/break/continue".to_string(),
-                        Some(span),
-                    );
+                if unreachable_pending {
+                    if let Some(span) = unreachable_start.or_else(|| stmt_span(stmt)) {
+                        push_rule(
+                            config,
+                            errors,
+                            LintRule::UnreachableCode,
+                            "unreachable code after return/break/continue".to_string(),
+                            Some(span),
+                        );
+                    }
                     unreachable_start = None;
+                    unreachable_pending = false;
                 }
                 check_unreachable_stmts(body, config, errors);
             }
             Stmt::Yield { .. } => {
                 if unreachable_start.is_none() {
                     unreachable_start = stmt_span(stmt);
+                    unreachable_pending = true;
                 }
             }
             _ => {
-                if let Some(span) = unreachable_start {
-                    push_rule(
-                        config,
-                        errors,
-                        LintRule::UnreachableCode,
-                        "unreachable code after return/break/continue".to_string(),
-                        Some(span),
-                    );
+                if unreachable_pending {
+                    if let Some(span) = unreachable_start.or_else(|| stmt_span(stmt)) {
+                        push_rule(
+                            config,
+                            errors,
+                            LintRule::UnreachableCode,
+                            "unreachable code after return/break/continue".to_string(),
+                            Some(span),
+                        );
+                    }
                     unreachable_start = None;
+                    unreachable_pending = false;
                 }
             }
         }
 
         // Recursively check nested blocks
         match stmt {
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                check_unreachable_stmts(then_branch, config, errors);
+                if let Some(else_branch) = else_branch {
+                    check_unreachable_stmts(else_branch, config, errors);
+                }
+            }
             Stmt::While { body, .. } => check_unreachable_stmts(body, config, errors),
             Stmt::For { body, .. } => check_unreachable_stmts(body, config, errors),
             Stmt::Block {
@@ -1662,11 +2733,10 @@ fn collect_used_capabilities_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
                 collect_used_capabilities_stmt(stmt, used);
             }
         }
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                collect_used_capabilities_expr(expr, used);
-            }
-        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => collect_used_capabilities_expr(expr, used),
+        Stmt::Return { expr: None, .. } => {}
         Stmt::Throw { expr, .. } => {
             collect_used_capabilities_expr(expr, used);
         }
@@ -1821,11 +2891,13 @@ fn collect_used_capabilities_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_used_capabilities_expr(&field.value, used);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                collect_used_capabilities_expr(expr, used);
-            }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => {
+            collect_used_capabilities_expr(expr, used);
         }
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Group { expr, .. } => {
             collect_used_capabilities_expr(expr, used);
         }
@@ -1890,11 +2962,10 @@ fn lint_unused_match_bindings_stmt(stmt: &Stmt, config: &LintConfig, errors: &mu
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                lint_unused_match_bindings_expr(expr, config, errors);
-            }
-        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => lint_unused_match_bindings_expr(expr, config, errors),
+        Stmt::Return { expr: None, .. } => {}
         Stmt::Throw { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
         }
@@ -2064,11 +3135,13 @@ fn lint_unused_match_bindings_expr(expr: &Expr, config: &LintConfig, errors: &mu
                 lint_unused_match_bindings_expr(&field.value, config, errors);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                lint_unused_match_bindings_expr(expr, config, errors);
-            }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => {
+            lint_unused_match_bindings_expr(expr, config, errors);
         }
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Group { expr, .. } => {
             lint_unused_match_bindings_expr(expr, config, errors);
         }
@@ -2120,7 +3193,7 @@ fn lint_unused_locals(module: &Module, config: &LintConfig, errors: &mut Vec<Lin
                 push_rule(
                     config,
                     errors,
-                    LintRule::UnusedLocal,
+                    LintRule::DuplicateLocal,
                     format!("duplicate local: {}", param.name.name),
                     Some(param.name.span),
                 );
@@ -2191,7 +3264,7 @@ fn collect_local_defs_stmt(
                 push_rule(
                     config,
                     errors,
-                    LintRule::UnusedLocal,
+                    LintRule::DuplicateLocal,
                     format!("duplicate local: {}", name.name),
                     Some(name.span),
                 );
@@ -2295,11 +3368,10 @@ fn collect_local_uses_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                collect_local_uses_expr(expr, used);
-            }
-        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => collect_local_uses_expr(expr, used),
+        Stmt::Return { expr: None, .. } => {}
         Stmt::Throw { expr, .. } => {
             collect_local_uses_expr(expr, used);
         }
@@ -2474,11 +3546,13 @@ fn collect_local_uses_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_local_uses_expr(&field.value, used);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                collect_local_uses_expr(expr, used);
-            }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => {
+            collect_local_uses_expr(expr, used);
         }
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Group { expr, .. } => {
             collect_local_uses_expr(expr, used);
         }
@@ -2554,11 +3628,10 @@ fn collect_alias_usage_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                collect_alias_usage_expr(expr, used);
-            }
-        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => collect_alias_usage_expr(expr, used),
+        Stmt::Return { expr: None, .. } => {}
         Stmt::Throw { expr, .. } => {
             collect_alias_usage_expr(expr, used);
         }
@@ -2716,11 +3789,13 @@ fn collect_alias_usage_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_alias_usage_expr(&field.value, used);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                collect_alias_usage_expr(expr, used);
-            }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => {
+            collect_alias_usage_expr(expr, used);
         }
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Group { expr, .. } => {
             collect_alias_usage_expr(expr, used);
         }
@@ -2796,11 +3871,10 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                collect_called_functions_expr(expr, used);
-            }
-        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => collect_called_functions_expr(expr, used),
+        Stmt::Return { expr: None, .. } => {}
         Stmt::Throw { expr, .. } => {
             collect_called_functions_expr(expr, used);
         }
@@ -2826,10 +3900,11 @@ fn collect_called_functions_stmt(stmt: &Stmt, used: &mut HashSet<String>) {
 
 fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
     match expr {
+        // Track function references in any position (call target, HOF argument, assignment, etc.)
+        Expr::Ident(ident) => {
+            used.insert(ident.name.clone());
+        }
         Expr::Call { callee, args, .. } => {
-            if let Expr::Ident(ident) = callee.as_ref() {
-                used.insert(ident.name.clone());
-            }
             collect_called_functions_expr(callee, used);
             for arg in args {
                 collect_called_functions_expr(arg, used);
@@ -2954,11 +4029,13 @@ fn collect_called_functions_expr(expr: &Expr, used: &mut HashSet<String>) {
                 collect_called_functions_expr(&field.value, used);
             }
         }
-        Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                collect_called_functions_expr(expr, used);
-            }
+        Expr::EnumLiteral {
+            payload: Some(expr),
+            ..
+        } => {
+            collect_called_functions_expr(expr, used);
         }
+        Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Group { expr, .. } => {
             collect_called_functions_expr(expr, used);
         }
@@ -3001,12 +4078,15 @@ pub fn apply_fixes(source: &str, errors: &[LintError]) -> String {
     result
 }
 
-fn collect_lint_suppressions(module: &Module) -> LintSuppressions {
+fn collect_lint_suppressions(module: &Module, source: Option<&str>) -> LintSuppressions {
     let mut suppressions = LintSuppressions::default();
+    if let Some(source) = source {
+        suppressions.line_starts = collect_line_starts(source);
+    }
     let mut next_spans = Vec::new();
     collect_next_stmt_spans(module, &mut next_spans);
     for comment in &module.comments {
-        let text = comment.text.trim();
+        let text = normalize_comment_directive(&comment.text);
         if let Some(rest) = text.strip_prefix("@lint-ignore-next") {
             let rules = parse_suppression_rules(rest.trim());
             if let Some(span) = next_spans
@@ -3020,8 +4100,13 @@ fn collect_lint_suppressions(module: &Module) -> LintSuppressions {
         }
         if let Some(rest) = text.strip_prefix("@lint-ignore-line") {
             let rules = parse_suppression_rules(rest.trim());
-            let span = Span::new(comment.span.start, comment.span.end);
-            suppressions.spans.push(LintSuppression { span, rules });
+            if let Some(line) = suppressions.line_for_offset(comment.span.start) {
+                suppressions.lines.push(LintLineSuppression { line, rules });
+            } else {
+                // Fallback when source text is unavailable.
+                let span = Span::new(comment.span.start, comment.span.end);
+                suppressions.spans.push(LintSuppression { span, rules });
+            }
             continue;
         }
         if let Some(rest) = text.strip_prefix("@lint-ignore") {
@@ -3037,6 +4122,29 @@ fn collect_lint_suppressions(module: &Module) -> LintSuppressions {
         }
     }
     suppressions
+}
+
+fn collect_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, ch) in source.char_indices() {
+        if ch == '\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn normalize_comment_directive(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("//") {
+        return rest.trim_start();
+    }
+    if let Some(rest) = trimmed.strip_prefix("/*") {
+        if let Some(rest) = rest.strip_suffix("*/") {
+            return rest.trim();
+        }
+    }
+    trimmed
 }
 
 fn parse_suppression_rules(list: &str) -> Option<HashSet<LintRule>> {
@@ -3112,7 +4220,10 @@ pub fn count_fixable(errors: &[LintError]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{lint_module, LintConfig, LintRule, LintSeverity};
+    use super::{
+        lint_module, lint_module_with_config, lint_module_with_source_and_config, LintConfig,
+        LintRule, LintSeverity,
+    };
     use at_parser::parse_module;
     use at_parser::parse_module_with_errors;
 
@@ -3148,6 +4259,51 @@ main();
                 .unwrap_or(LintSeverity::Warn),
             LintSeverity::Error
         );
+        assert_eq!(
+            config
+                .severity
+                .get(&LintRule::UnknownTypeFlow)
+                .copied()
+                .unwrap_or(LintSeverity::Warn),
+            LintSeverity::Error
+        );
+    }
+
+    #[test]
+    fn unknown_type_flow_warns_by_default() {
+        let source = r#"
+fn f() {
+    let id = |x| x;
+    id(1);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        let unknown = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::UnknownTypeFlow))
+            .expect("expected unknown type flow lint");
+        assert_eq!(unknown.severity, LintSeverity::Warn);
+    }
+
+    #[test]
+    fn unknown_type_flow_is_error_in_strict_profile() {
+        let source = r#"
+fn f() {
+    let id = |x| x;
+    id(1);
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module_with_config(&module, Some("profile = \"strict\""))
+            .expect_err("expected lint errors");
+        let unknown = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::UnknownTypeFlow))
+            .expect("expected unknown type flow lint");
+        assert_eq!(unknown.severity, LintSeverity::Error);
     }
 
     #[test]
@@ -3188,17 +4344,18 @@ fn f() {
         let errors = lint_module(&module).expect_err("expected lint errors");
         assert!(errors
             .iter()
-            .any(|err| err.message.contains("duplicate local")));
+            .any(|err| err.rule == Some(LintRule::DuplicateLocal)));
     }
 
     #[test]
     fn allows_shadowing_in_block() {
         let source = r#"
-fn f() {
+fn f() -> unit {
     let _x = 1;
     {
         let _x = 2;
     }
+    return;
 }
 f();
 "#;
@@ -3209,9 +4366,10 @@ f();
     #[test]
     fn allows_duplicate_ignored_locals() {
         let source = r#"
-fn f(_x: int, _x: int) {
+fn f(_x: int, _x: int) -> unit {
     let _y = 1;
     let _y = 2;
+    return;
 }
 f(1, 2);
 "#;
@@ -3260,5 +4418,182 @@ fn f() {
         let span = unreachable.span.expect("span");
         assert_ne!(span.start, 0);
         assert_ne!(span.end, 0);
+    }
+
+    #[test]
+    fn legacy_exception_surface_warns_by_default() {
+        let source = r#"
+fn f() {
+    throw err("boom");
+}
+
+fn g() {
+    return try { ok(1) } catch { err("no") };
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        let legacy = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::LegacyExceptionSurface))
+            .expect("expected legacy exception lint");
+        assert_eq!(legacy.severity, LintSeverity::Warn);
+    }
+
+    #[test]
+    fn unqualified_import_call_warns_by_default() {
+        let source = r#"
+import "./lib.at" as lib;
+
+fn f() {
+    return version();
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        let unqualified = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::UnqualifiedImportCall))
+            .expect("expected unqualified import call lint");
+        assert_eq!(unqualified.severity, LintSeverity::Warn);
+    }
+
+    #[test]
+    fn staged_deprecation_rules_are_errors_in_strict_profile() {
+        let source = r#"
+import "./lib.at" as lib;
+
+fn f() {
+    throw err("boom");
+    return version();
+}
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module_with_config(&module, Some("profile = \"strict\""))
+            .expect_err("expected lint errors");
+        let legacy = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::LegacyExceptionSurface))
+            .expect("expected legacy exception lint");
+        let unqualified = errors
+            .iter()
+            .find(|err| err.rule == Some(LintRule::UnqualifiedImportCall))
+            .expect("expected unqualified import call lint");
+        assert_eq!(legacy.severity, LintSeverity::Error);
+        assert_eq!(unqualified.severity, LintSeverity::Error);
+    }
+
+    #[test]
+    fn lint_ignore_line_suppresses_diagnostic_on_same_line() {
+        let source = r#"
+fn f() {
+    let x = 1; // @lint-ignore-line unused-local
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let result = lint_module_with_source_and_config(&module, Some(source), None);
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|err| err.rule == Some(LintRule::UnusedLocal)),
+                "unused-local should be suppressed on the directive line: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unreachable_inside_if_branch_is_reported() {
+        let source = r#"
+fn f() {
+    if true {
+        return;
+        let x = 1;
+    }
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.rule == Some(LintRule::UnreachableCode)),
+            "expected unreachable code lint in if-branch: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn infinite_loop_requires_guaranteed_termination() {
+        let source = r#"
+fn f(flag: bool) {
+    while true {
+        if flag {
+            break;
+        }
+    }
+}
+f(true);
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module).expect_err("expected lint errors");
+        assert!(
+            errors
+                .iter()
+                .any(|err| err.rule == Some(LintRule::InfiniteLoop)),
+            "expected infinite loop lint when break is not guaranteed: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn infinite_loop_allows_unconditional_break() {
+        let source = r#"
+fn f() {
+    while true {
+        break;
+    }
+}
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors = lint_module(&module);
+        if let Err(errors) = errors {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|err| err.rule == Some(LintRule::InfiniteLoop)),
+                "did not expect infinite-loop lint with unconditional break: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_reference_counts_as_usage() {
+        let source = r#"
+fn helper() -> int {
+    return 1;
+}
+
+fn f() {
+    let g = helper;
+    g();
+}
+
+f();
+"#;
+        let module = parse_module(source).expect("parse module");
+        let errors =
+            lint_module_with_config(&module, Some("[rules]\nunknown_type_flow = \"off\"\n"));
+        if let Err(errors) = errors {
+            assert!(
+                !errors.iter().any(|err| {
+                    err.rule == Some(LintRule::UnusedFunction) && err.message.contains("helper")
+                }),
+                "helper should count as used when referenced: {errors:?}"
+            );
+        }
     }
 }
