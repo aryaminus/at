@@ -1559,41 +1559,55 @@ impl TypeChecker {
                         .find(|entry| entry.name.name == variant.name)
                     {
                         match (&expected.payload, payload) {
-                            (Some(expected_ty), Some(expr)) => {
-                                let value_ty = self.check_expr(expr);
-                                if let Some(param_name) =
-                                    Self::infer_type_param_name(expected_ty, &param_names)
-                                {
-                                    let entry =
-                                        env.entry(param_name).or_insert(SimpleType::Unknown);
-                                    if matches!(entry, SimpleType::Unknown) {
-                                        *entry = value_ty.clone();
-                                    } else {
-                                        self.check_compatible(
-                                            entry,
-                                            &value_ty,
-                                            &format!(
-                                                "type mismatch for enum {}::{}",
-                                                name.name, variant.name
-                                            ),
-                                            Some(variant.span),
-                                        );
-                                    }
+                            (Some(expected_tys), Some(exprs)) => {
+                                if expected_tys.len() != exprs.len() {
+                                    self.push_error(
+                                        format!(
+                                            "enum {}::{} expects {} field(s), got {}",
+                                            name.name,
+                                            variant.name,
+                                            expected_tys.len(),
+                                            exprs.len()
+                                        ),
+                                        Some(variant.span),
+                                    );
                                 }
-                                let expected_ty = self.type_from_ref_with_env(
-                                    expected_ty,
-                                    Some(&env),
-                                    Some(&param_names),
-                                );
-                                self.check_compatible(
-                                    &expected_ty,
-                                    &value_ty,
-                                    &format!(
-                                        "type mismatch for enum {}::{}",
-                                        name.name, variant.name
-                                    ),
-                                    Some(variant.span),
-                                );
+                                for (expected_ty, expr) in expected_tys.iter().zip(exprs.iter()) {
+                                    let value_ty = self.check_expr(expr);
+                                    if let Some(param_name) =
+                                        Self::infer_type_param_name(expected_ty, &param_names)
+                                    {
+                                        let entry =
+                                            env.entry(param_name).or_insert(SimpleType::Unknown);
+                                        if matches!(entry, SimpleType::Unknown) {
+                                            *entry = value_ty.clone();
+                                        } else {
+                                            self.check_compatible(
+                                                entry,
+                                                &value_ty,
+                                                &format!(
+                                                    "type mismatch for enum {}::{}",
+                                                    name.name, variant.name
+                                                ),
+                                                Some(variant.span),
+                                            );
+                                        }
+                                    }
+                                    let expected_ty = self.type_from_ref_with_env(
+                                        expected_ty,
+                                        Some(&env),
+                                        Some(&param_names),
+                                    );
+                                    self.check_compatible(
+                                        &expected_ty,
+                                        &value_ty,
+                                        &format!(
+                                            "type mismatch for enum {}::{}",
+                                            name.name, variant.name
+                                        ),
+                                        Some(variant.span),
+                                    );
+                                }
                             }
                             (None, Some(_)) => {
                                 self.push_error(
@@ -1618,8 +1632,10 @@ impl TypeChecker {
                             Some(variant.span),
                         );
                     }
-                } else if let Some(expr) = payload {
-                    self.check_expr(expr);
+                } else if let Some(exprs) = payload {
+                    for expr in exprs {
+                        self.check_expr(expr);
+                    }
                 }
                 let mut enum_args = Vec::new();
                 if !param_names.is_empty() {
@@ -2992,7 +3008,7 @@ impl TypeChecker {
             at_syntax::MatchPattern::Enum {
                 name,
                 variant,
-                binding,
+                bindings,
                 ..
             } => {
                 let enum_variants = self.enums.get(&name.name).cloned();
@@ -3038,31 +3054,47 @@ impl TypeChecker {
                         .iter()
                         .find(|entry| entry.name.name == variant.name)
                     {
-                        match (&expected_variant.payload, binding) {
-                            (Some(expected_ty), Some(binding)) => {
-                                let expected_ty = self.type_from_ref_with_env(
-                                    expected_ty,
-                                    Some(&env),
-                                    Some(&param_names),
-                                );
-                                self.bind_local(binding, expected_ty);
+                        match (&expected_variant.payload, bindings.is_empty()) {
+                            (Some(expected_tys), false) => {
+                                if expected_tys.len() != bindings.len() {
+                                    self.push_error(
+                                        format!(
+                                            "enum {}::{} expects {} field(s), got {} binding(s)",
+                                            name.name,
+                                            variant.name,
+                                            expected_tys.len(),
+                                            bindings.len()
+                                        ),
+                                        Some(variant.span),
+                                    );
+                                }
+                                for (expected_ty, binding) in
+                                    expected_tys.iter().zip(bindings.iter())
+                                {
+                                    let expected_ty = self.type_from_ref_with_env(
+                                        expected_ty,
+                                        Some(&env),
+                                        Some(&param_names),
+                                    );
+                                    self.bind_local(binding, expected_ty);
+                                }
                             }
-                            (None, Some(binding)) => {
+                            (None, false) => {
                                 self.push_error(
                                     format!(
                                         "enum {}::{} does not take a value",
                                         name.name, variant.name
                                     ),
-                                    Some(binding.span),
+                                    Some(variant.span),
                                 );
                             }
-                            (Some(_), None) => {
+                            (Some(_), true) => {
                                 self.push_error(
                                     format!("enum {}::{} expects a value", name.name, variant.name),
                                     Some(variant.span),
                                 );
                             }
-                            (None, None) => {}
+                            (None, true) => {}
                         }
                     } else {
                         self.push_error(

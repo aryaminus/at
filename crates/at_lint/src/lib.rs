@@ -585,9 +585,13 @@ fn walk_expr(visitor: &mut (impl LintVisitor + Sized), expr: &Expr) {
             }
         }
         Expr::EnumLiteral {
-            payload: Some(payload),
+            payload: Some(exprs),
             ..
-        } => walk_expr(visitor, payload),
+        } => {
+            for expr in exprs {
+                walk_expr(visitor, expr);
+            }
+        }
         Expr::EnumLiteral { payload: None, .. } => {}
         Expr::MapLiteral { entries, .. } => {
             for entry in entries {
@@ -2000,8 +2004,8 @@ fn collect_pattern_bindings(pattern: &MatchPattern, names: &mut HashSet<String>)
                 }
             }
         }
-        MatchPattern::Enum { binding, .. } => {
-            if let Some(binding) = binding {
+        MatchPattern::Enum { bindings, .. } => {
+            for binding in bindings {
                 names.insert(binding.name.clone());
             }
         }
@@ -2333,9 +2337,7 @@ fn match_pattern_idents(pattern: &at_syntax::MatchPattern) -> Vec<Ident> {
             .iter()
             .filter_map(|field| field.binding.clone().or_else(|| Some(field.name.clone())))
             .collect(),
-        at_syntax::MatchPattern::Enum { binding, .. } => {
-            binding.clone().map_or_else(Vec::new, |ident| vec![ident])
-        }
+        at_syntax::MatchPattern::Enum { bindings, .. } => bindings.clone(),
         at_syntax::MatchPattern::Binding { name, pattern, .. } => {
             let mut items = vec![name.clone()];
             items.extend(match_pattern_idents(pattern));

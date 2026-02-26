@@ -413,7 +413,12 @@ fn format_stmt(stmt: &Stmt, out: &mut String, indent: usize, comment_state: &mut
                 out.push_str(&variant.name.name);
                 if let Some(payload) = &variant.payload {
                     out.push('(');
-                    format_type_ref(payload, out);
+                    for (i, ty) in payload.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        format_type_ref(ty, out);
+                    }
                     out.push(')');
                 }
                 out.push_str(",\n");
@@ -1195,11 +1200,16 @@ fn format_expr_prec_indent(
             out.push_str(&name.name);
             out.push_str("::");
             out.push_str(&variant.name);
-            if let Some(expr) = payload {
+            if let Some(exprs) = payload {
                 out.push('(');
-                format_expr_prec_indent(expr, out, 0, indent, comment_state);
-                if let Some(expr_span) = expr_span(expr) {
-                    comment_state.emit_inline_between(out, expr_span, expr_span + 1);
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    format_expr_prec_indent(expr, out, 0, indent, comment_state);
+                    if let Some(span) = expr_span(expr) {
+                        comment_state.emit_inline_between(out, span, span + 1);
+                    }
                 }
                 out.push(')');
             }
@@ -1537,9 +1547,13 @@ fn collect_needs_expr(expr: &Expr, needs: &mut Vec<String>, import_aliases: &Has
             }
         }
         Expr::EnumLiteral {
-            payload: Some(expr),
+            payload: Some(exprs),
             ..
-        } => collect_needs_expr(expr, needs, import_aliases),
+        } => {
+            for expr in exprs {
+                collect_needs_expr(expr, needs, import_aliases);
+            }
+        }
         Expr::EnumLiteral { payload: None, .. } => {}
         Expr::Closure { body, .. } => {
             collect_needs_expr(body, needs, import_aliases);
@@ -1655,15 +1669,20 @@ fn format_match_pattern(pattern: &MatchPattern, out: &mut String) {
         MatchPattern::Enum {
             name,
             variant,
-            binding,
+            bindings,
             ..
         } => {
             out.push_str(&name.name);
             out.push_str("::");
             out.push_str(&variant.name);
-            if let Some(binding) = binding {
+            if !bindings.is_empty() {
                 out.push('(');
-                out.push_str(&binding.name);
+                for (i, binding) in bindings.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&binding.name);
+                }
                 out.push(')');
             }
         }

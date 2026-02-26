@@ -189,7 +189,7 @@ pub enum Expr {
         id: NodeId,
         name: Ident,
         variant: Ident,
-        payload: Option<Box<Expr>>,
+        payload: Option<Vec<Expr>>,
     },
     MapLiteral {
         span: Span,
@@ -232,7 +232,7 @@ pub struct StructLiteralField {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EnumVariant {
     pub name: Ident,
-    pub payload: Option<TypeRef>,
+    pub payload: Option<Vec<TypeRef>>,
     pub id: NodeId,
 }
 
@@ -300,7 +300,7 @@ pub enum MatchPattern {
         id: NodeId,
         name: Ident,
         variant: Ident,
-        binding: Option<Ident>,
+        bindings: Vec<Ident>,
     },
     Binding {
         id: NodeId,
@@ -540,7 +540,9 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
         Stmt::Enum { variants, .. } => {
             for variant in variants {
                 if let Some(payload) = &variant.payload {
-                    visitor.visit_type_ref(payload);
+                    for ty in payload {
+                        visitor.visit_type_ref(ty);
+                    }
                 }
             }
         }
@@ -732,8 +734,10 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::EnumLiteral { payload, .. } => {
-            if let Some(expr) = payload {
-                visitor.visit_expr(expr);
+            if let Some(exprs) = payload {
+                for expr in exprs {
+                    visitor.visit_expr(expr);
+                }
             }
         }
         Expr::MapLiteral { entries, .. } => {

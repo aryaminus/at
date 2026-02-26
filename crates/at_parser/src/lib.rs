@@ -735,9 +735,13 @@ impl<'a> Parser<'a> {
                 let variant_name = self.expect_ident()?;
                 let payload = if self.current.kind == TokenKind::LParen {
                     self.advance();
-                    let ty = self.parse_type_ref()?;
+                    let mut types = vec![self.parse_type_ref()?];
+                    while self.current.kind == TokenKind::Comma {
+                        self.advance();
+                        types.push(self.parse_type_ref()?);
+                    }
                     self.expect(TokenKind::RParen)?;
-                    Some(ty)
+                    Some(types)
                 } else {
                     None
                 };
@@ -1923,9 +1927,16 @@ impl<'a> Parser<'a> {
         let variant = self.expect_ident()?;
         let payload = if self.current.kind == TokenKind::LParen {
             self.advance();
-            let expr = self.parse_expr()?;
+            let mut exprs = vec![self.parse_expr()?];
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                if self.current.kind == TokenKind::RParen {
+                    break; // trailing comma
+                }
+                exprs.push(self.parse_expr()?);
+            }
             self.expect(TokenKind::RParen)?;
-            Some(Box::new(expr))
+            Some(exprs)
         } else {
             None
         };
@@ -2037,7 +2048,21 @@ impl<'a> Parser<'a> {
                 None
             };
             self.expect(TokenKind::FatArrow)?;
-            let body = self.parse_expr()?;
+            let body = match &self.current.kind {
+                TokenKind::Return | TokenKind::Throw | TokenKind::Break | TokenKind::Continue => {
+                    // These are statements, not expressions.
+                    // Wrap in a synthetic block so they can be used as match arm bodies.
+                    let block_span = self.current.span;
+                    let stmt = self.parse_stmt()?;
+                    Expr::Block {
+                        block_span,
+                        id: self.alloc_id(),
+                        stmts: vec![stmt],
+                        tail: None,
+                    }
+                }
+                _ => self.parse_expr()?,
+            };
             for pattern in patterns {
                 arms.push(MatchArm {
                     id: self.alloc_id(),
@@ -2181,19 +2206,26 @@ impl<'a> Parser<'a> {
         if self.current.kind == TokenKind::ColonColon {
             self.advance();
             let variant = self.expect_ident()?;
-            let binding = if self.current.kind == TokenKind::LParen {
+            let bindings = if self.current.kind == TokenKind::LParen {
                 self.advance();
-                let binding = self.expect_ident()?;
+                let mut bindings = vec![self.expect_ident()?];
+                while self.current.kind == TokenKind::Comma {
+                    self.advance();
+                    if self.current.kind == TokenKind::RParen {
+                        break; // trailing comma
+                    }
+                    bindings.push(self.expect_ident()?);
+                }
                 self.expect(TokenKind::RParen)?;
-                Some(binding)
+                bindings
             } else {
-                None
+                Vec::new()
             };
             return Ok(MatchPattern::Enum {
                 id: self.alloc_id(),
                 name: head,
                 variant,
-                binding,
+                bindings,
             });
         }
         match head.name.as_str() {

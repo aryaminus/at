@@ -1184,7 +1184,10 @@ impl Compiler {
         }
     }
 
-    pub fn compile_test_body(&mut self, stmts: &[Stmt]) -> Result<(Chunk, usize), VmError> {
+    pub fn compile_test_body(
+        &mut self,
+        stmts: &[Stmt],
+    ) -> Result<(Chunk, usize, Vec<FunctionChunk>), VmError> {
         self.scopes.clear();
         self.next_local = 0;
         self.free_slots.clear();
@@ -1195,7 +1198,8 @@ impl Compiler {
             self.compile_stmt(stmt, &mut chunk)?;
         }
         chunk.push(Op::Halt, None);
-        Ok((chunk, self.next_local))
+        let closures = self.closure_chunks.drain(..).collect();
+        Ok((chunk, self.next_local, closures))
     }
 
     fn compile_function(&mut self, func: &Function) -> Result<(Chunk, usize), VmError> {
@@ -1682,34 +1686,39 @@ impl Compiler {
                 self.pop_scope();
             }
             Expr::Array { items, .. } => {
-                let mut array_count = 0;
-                let mut chunk_count = 0;
-                let mut has_spread = false;
-                for item in items {
-                    match item {
-                        Expr::ArraySpread { .. } => {
-                            // Flush accumulated non-spread items BEFORE compiling the spread
-                            if array_count > 0 {
-                                chunk.push(Op::Array(array_count), expr_span(expr));
-                                array_count = 0;
+                if items.is_empty() {
+                    // Empty array literal: push an empty array directly
+                    chunk.push(Op::Array(0), expr_span(expr));
+                } else {
+                    let mut array_count = 0;
+                    let mut chunk_count = 0;
+                    let mut has_spread = false;
+                    for item in items {
+                        match item {
+                            Expr::ArraySpread { .. } => {
+                                // Flush accumulated non-spread items BEFORE compiling the spread
+                                if array_count > 0 {
+                                    chunk.push(Op::Array(array_count), expr_span(expr));
+                                    array_count = 0;
+                                    chunk_count += 1;
+                                }
+                                self.compile_expr(item, chunk)?;
+                                has_spread = true;
                                 chunk_count += 1;
                             }
-                            self.compile_expr(item, chunk)?;
-                            has_spread = true;
-                            chunk_count += 1;
-                        }
-                        _ => {
-                            self.compile_expr(item, chunk)?;
-                            array_count += 1;
+                            _ => {
+                                self.compile_expr(item, chunk)?;
+                                array_count += 1;
+                            }
                         }
                     }
-                }
-                if array_count > 0 {
-                    chunk.push(Op::Array(array_count), expr_span(expr));
-                    chunk_count += 1;
-                }
-                if has_spread {
-                    chunk.push(Op::ArraySpread(chunk_count), expr_span(expr));
+                    if array_count > 0 {
+                        chunk.push(Op::Array(array_count), expr_span(expr));
+                        chunk_count += 1;
+                    }
+                    if has_spread {
+                        chunk.push(Op::ArraySpread(chunk_count), expr_span(expr));
+                    }
                 }
             }
             Expr::ArraySpread { expr, .. } => {
@@ -1728,35 +1737,40 @@ impl Compiler {
                 chunk.push(Op::Tuple(items.len()), expr_span(expr));
             }
             Expr::MapLiteral { entries, .. } => {
-                let mut map_count = 0;
-                let mut chunk_count = 0;
-                let mut has_spread = false;
-                for entry in entries {
-                    match entry {
-                        MapEntry::Spread(spread_expr) => {
-                            self.compile_expr(spread_expr, chunk)?;
-                            chunk.push(Op::MapSpread(1), expr_span(spread_expr));
-                            if map_count > 0 {
-                                chunk.push(Op::Map(map_count), expr_span(expr));
-                                map_count = 0;
+                if entries.is_empty() {
+                    // Empty map literal: push an empty map directly
+                    chunk.push(Op::Map(0), expr_span(expr));
+                } else {
+                    let mut map_count = 0;
+                    let mut chunk_count = 0;
+                    let mut has_spread = false;
+                    for entry in entries {
+                        match entry {
+                            MapEntry::Spread(spread_expr) => {
+                                self.compile_expr(spread_expr, chunk)?;
+                                chunk.push(Op::MapSpread(1), expr_span(spread_expr));
+                                if map_count > 0 {
+                                    chunk.push(Op::Map(map_count), expr_span(expr));
+                                    map_count = 0;
+                                    chunk_count += 1;
+                                }
+                                has_spread = true;
                                 chunk_count += 1;
                             }
-                            has_spread = true;
-                            chunk_count += 1;
-                        }
-                        MapEntry::KeyValue { key, value } => {
-                            self.compile_expr(key, chunk)?;
-                            self.compile_expr(value, chunk)?;
-                            map_count += 1;
+                            MapEntry::KeyValue { key, value } => {
+                                self.compile_expr(key, chunk)?;
+                                self.compile_expr(value, chunk)?;
+                                map_count += 1;
+                            }
                         }
                     }
-                }
-                if map_count > 0 {
-                    chunk.push(Op::Map(map_count), expr_span(expr));
-                    chunk_count += 1;
-                }
-                if has_spread {
-                    chunk.push(Op::MapSpread(chunk_count), expr_span(expr));
+                    if map_count > 0 {
+                        chunk.push(Op::Map(map_count), expr_span(expr));
+                        chunk_count += 1;
+                    }
+                    if has_spread {
+                        chunk.push(Op::MapSpread(chunk_count), expr_span(expr));
+                    }
                 }
             }
             Expr::As { expr, ty, .. } => {
@@ -1817,8 +1831,17 @@ impl Compiler {
                 payload,
                 ..
             } => {
-                if let Some(expr) = payload {
-                    self.compile_expr(expr, chunk)?;
+                if let Some(exprs) = payload {
+                    if exprs.len() == 1 {
+                        // Single-field enum: push the value directly
+                        self.compile_expr(&exprs[0], chunk)?;
+                    } else {
+                        // Multi-field enum: push all values, then wrap in a tuple
+                        for expr in exprs {
+                            self.compile_expr(expr, chunk)?;
+                        }
+                        chunk.push(Op::Tuple(exprs.len()), Some(name.span));
+                    }
                 }
                 chunk.push(
                     Op::Enum {
@@ -2177,12 +2200,12 @@ impl Compiler {
                         at_syntax::MatchPattern::Enum {
                             name,
                             variant,
-                            binding,
+                            bindings,
                             ..
                         } => Op::MatchEnum {
                             name: name.name.clone(),
                             variant: variant.name.clone(),
-                            has_payload: binding.is_some(),
+                            has_payload: !bindings.is_empty(),
                             target: usize::MAX,
                         },
                         at_syntax::MatchPattern::Binding { pattern, .. } => {
@@ -2235,14 +2258,36 @@ impl Compiler {
                     binding_span = Some(ident.span);
                 }
                 at_syntax::MatchPattern::OptionNone(_) => {}
-                at_syntax::MatchPattern::Enum { binding, .. } => {
-                    if let Some(binding) = binding {
+                at_syntax::MatchPattern::Enum { bindings, .. } => {
+                    if bindings.is_empty() {
+                        // No payload — MatchEnum already consumed the value, nothing to pop
+                    } else if bindings.len() == 1 {
+                        // Single-field: payload is a plain value on the stack
+                        let binding = &bindings[0];
                         let slot = self.bind_local_checked(&binding.name, binding.span)?;
                         chunk.push(Op::StoreLocal(slot), Some(binding.span));
                         binding_slot = Some(slot);
                         binding_span = Some(binding.span);
                     } else {
-                        chunk.push(Op::Pop, Some(match_span));
+                        // Multi-field: payload is a Tuple on the stack.
+                        // Store the tuple in a temp slot, then destructure.
+                        let first_binding = &bindings[0];
+                        let tuple_slot =
+                            self.bind_local_checked("__enum_tuple__", first_binding.span)?;
+                        chunk.push(Op::StoreLocal(tuple_slot), Some(first_binding.span));
+                        for (i, binding) in bindings.iter().enumerate() {
+                            if binding.name == "_" {
+                                continue;
+                            }
+                            chunk.push(Op::LoadLocal(tuple_slot), Some(binding.span));
+                            let idx = chunk.add_const(Value::Int(i as i64));
+                            chunk.push(Op::Const(idx), Some(binding.span));
+                            chunk.push(Op::Index, Some(binding.span));
+                            let slot = self.bind_local_checked(&binding.name, binding.span)?;
+                            chunk.push(Op::StoreLocal(slot), Some(binding.span));
+                        }
+                        binding_slot = Some(tuple_slot);
+                        binding_span = Some(first_binding.span);
                     }
                 }
                 at_syntax::MatchPattern::Struct { fields, .. } => {
@@ -2336,8 +2381,8 @@ impl Compiler {
                             chunk.push(Op::LoadLocal(slot), Some(match_span));
                         }
                     }
-                    at_syntax::MatchPattern::Enum { binding, .. } => {
-                        if binding.is_some() {
+                    at_syntax::MatchPattern::Enum { bindings, .. } => {
+                        if !bindings.is_empty() {
                             let slot = binding_slot.ok_or_else(|| {
                                 compile_error("missing match binding".to_string(), Some(match_span))
                             })?;
@@ -2884,8 +2929,10 @@ impl Compiler {
                 }
             }
             Expr::EnumLiteral { payload, .. } => {
-                if let Some(expr) = payload {
-                    self.collect_free_vars_expr(expr, bound, captures, seen);
+                if let Some(exprs) = payload {
+                    for expr in exprs {
+                        self.collect_free_vars_expr(expr, bound, captures, seen);
+                    }
                 }
             }
             Expr::StructLiteral { fields, .. } => {
@@ -3043,7 +3090,7 @@ impl Compiler {
             | at_syntax::MatchPattern::Tuple { .. }
             | at_syntax::MatchPattern::Wildcard(_) => None,
             at_syntax::MatchPattern::Struct { .. } => None,
-            at_syntax::MatchPattern::Enum { binding, .. } => binding.as_ref().map(|b| &b.name),
+            at_syntax::MatchPattern::Enum { bindings, .. } => bindings.first().map(|b| &b.name),
         };
         if let Some(name) = name {
             if let Some(scope) = bound.last_mut() {
@@ -3062,10 +3109,12 @@ impl Compiler {
                     }
                 }
             }
-            at_syntax::MatchPattern::Enum { binding, .. } => {
-                if let (Some(scope), Some(binding)) = (bound.last_mut(), binding.as_ref()) {
-                    if binding.name != "_" {
-                        scope.insert(binding.name.clone());
+            at_syntax::MatchPattern::Enum { bindings, .. } => {
+                if let Some(scope) = bound.last_mut() {
+                    for binding in bindings {
+                        if binding.name != "_" {
+                            scope.insert(binding.name.clone());
+                        }
                     }
                 }
             }
@@ -6079,6 +6128,12 @@ impl Vm {
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Bool(left < right));
                         }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool((left as f64) < right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left < (right as f64)));
+                        }
                         _ => {
                             return Err(runtime_error_at(
                                 "invalid comparison operands".to_string(),
@@ -6100,6 +6155,12 @@ impl Vm {
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Bool(left <= right));
+                        }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool((left as f64) <= right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left <= (right as f64)));
                         }
                         _ => {
                             return Err(runtime_error_at(
@@ -6123,6 +6184,12 @@ impl Vm {
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Bool(left > right));
                         }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool((left as f64) > right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left > (right as f64)));
+                        }
                         _ => {
                             return Err(runtime_error_at(
                                 "invalid comparison operands".to_string(),
@@ -6144,6 +6211,12 @@ impl Vm {
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Bool(left >= right));
+                        }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Bool((left as f64) >= right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Bool(left >= (right as f64)));
                         }
                         _ => {
                             return Err(runtime_error_at(

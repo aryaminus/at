@@ -429,7 +429,7 @@ fn main() {
         let mut failures = 0;
         for stmt in &module.stmts {
             if let at_syntax::Stmt::Test { name, body, .. } = stmt {
-                let (chunk, main_locals) = match compiler.compile_test_body(body) {
+                let (chunk, main_locals, test_closures) = match compiler.compile_test_body(body) {
                     Ok(res) => res,
                     Err(err) => {
                         eprintln!(
@@ -440,8 +440,10 @@ fn main() {
                         continue;
                     }
                 };
+                let mut functions = program.functions.clone();
+                functions.extend(test_closures);
                 let test_program = at_vm::Program {
-                    functions: program.functions.clone(),
+                    functions,
                     main: chunk,
                     main_locals,
                     sources: program.sources.clone(),
