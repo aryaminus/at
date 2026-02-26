@@ -1,79 +1,81 @@
 name: homebrew
 
 on:
-  release:
-    types: [published]
+    release:
+        types: [published]
 
 jobs:
-  tap:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-      - name: Build release URLs
-        id: vars
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-      - name: Fetch release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view v${{ steps.vars.outputs.version }} --json assets > /tmp/release.json
-      - name: Generate Homebrew formula
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION=${{ steps.vars.outputs.version }}
-          LINUX_URL=$(jq -r '.assets[] | select(.name == "at-x86_64-unknown-linux-gnu.tar.gz") | .url' /tmp/release.json)
-          MAC_INTEL_URL=$(jq -r '.assets[] | select(.name == "at-x86_64-apple-darwin.tar.gz") | .url' /tmp/release.json)
-          MAC_ARM_URL=$(jq -r '.assets[] | select(.name == "at-aarch64-apple-darwin.tar.gz") | .url' /tmp/release.json)
-          curl -L "$LINUX_URL" -o /tmp/at-linux.tar.gz
-          curl -L "$MAC_INTEL_URL" -o /tmp/at-macos-intel.tar.gz
-          curl -L "$MAC_ARM_URL" -o /tmp/at-macos-arm.tar.gz
-          LINUX_SHA=$(shasum -a 256 /tmp/at-linux.tar.gz | awk '{print $1}')
-          MAC_INTEL_SHA=$(shasum -a 256 /tmp/at-macos-intel.tar.gz | awk '{print $1}')
-          MAC_ARM_SHA=$(shasum -a 256 /tmp/at-macos-arm.tar.gz | awk '{print $1}')
+    tap:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+            - name: Install jq
+              run: sudo apt-get update && sudo apt-get install -y jq
+            - name: Build release URLs
+              id: vars
+              run: |
+                  VERSION=${GITHUB_REF#refs/tags/v}
+                  echo "version=$VERSION" >> $GITHUB_OUTPUT
+            - name: Fetch release assets
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  gh release view v${{ steps.vars.outputs.version }} --json assets > /tmp/release.json
+            - name: Generate Homebrew formula
+              env:
+                  HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+              run: |
+                  VERSION=${{ steps.vars.outputs.version }}
+                  LINUX_URL=$(jq -r '.assets[] | select(.name == "at-x86_64-unknown-linux-gnu.tar.gz") | .url' /tmp/release.json)
+                  MAC_INTEL_URL=$(jq -r '.assets[] | select(.name == "at-x86_64-apple-darwin.tar.gz") | .url' /tmp/release.json)
+                  MAC_ARM_URL=$(jq -r '.assets[] | select(.name == "at-aarch64-apple-darwin.tar.gz") | .url' /tmp/release.json)
+                  curl -L "$LINUX_URL" -o /tmp/at-linux.tar.gz
+                  curl -L "$MAC_INTEL_URL" -o /tmp/at-macos-intel.tar.gz
+                  curl -L "$MAC_ARM_URL" -o /tmp/at-macos-arm.tar.gz
+                  LINUX_SHA=$(shasum -a 256 /tmp/at-linux.tar.gz | awk '{print $1}')
+                  MAC_INTEL_SHA=$(shasum -a 256 /tmp/at-macos-intel.tar.gz | awk '{print $1}')
+                  MAC_ARM_SHA=$(shasum -a 256 /tmp/at-macos-arm.tar.gz | awk '{print $1}')
 
-          cat > /tmp/at.rb <<EOF
-          class At < Formula
-            desc "Agent-native programming language"
-            homepage "https://github.com/aryaminus/at"
-            version "${VERSION}"
+                  cat > /tmp/at.rb <<EOF
+                  class At < Formula
+                    desc "Agent-native programming language"
+                    homepage "https://github.com/aryaminus/at"
+                    version "${VERSION}"
 
-            on_macos do
-              if Hardware::CPU.intel?
-                url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-x86_64-apple-darwin.tar.gz"
-                sha256 "${MAC_INTEL_SHA}"
-              else
-                url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-aarch64-apple-darwin.tar.gz"
-                sha256 "${MAC_ARM_SHA}"
-              end
-            end
+                    on_macos do
+                      if Hardware::CPU.intel?
+                        url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-x86_64-apple-darwin.tar.gz"
+                        sha256 "${MAC_INTEL_SHA}"
+                      else
+                        url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-aarch64-apple-darwin.tar.gz"
+                        sha256 "${MAC_ARM_SHA}"
+                      end
+                    end
 
-            on_linux do
-              url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-x86_64-unknown-linux-gnu.tar.gz"
-              sha256 "${LINUX_SHA}"
-            end
+                    on_linux do
+                      url "https://github.com/aryaminus/at/releases/download/v${VERSION}/at-x86_64-unknown-linux-gnu.tar.gz"
+                      sha256 "${LINUX_SHA}"
+                    end
 
-            def install
-              bin.install Dir["at-*"].first => "at"
-            end
+                    def install
+                      bin.install Dir["at-*"].first => "at"
+                    end
 
-            test do
-              system "#{bin}/at", "--version"
-            end
-          end
-          EOF
+                    test do
+                      system "#{bin}/at", "--version"
+                    end
+                  end
+                  EOF
 
-          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/aryaminus/homebrew-at.git /tmp/homebrew-at
-          mkdir -p /tmp/homebrew-at/Formula
-          cp /tmp/at.rb /tmp/homebrew-at/Formula/at.rb
-          cd /tmp/homebrew-at
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/at.rb
-          git commit -m "at ${VERSION}"
-          git push
+                  git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/aryaminus/homebrew-at.git /tmp/homebrew-at
+                  mkdir -p /tmp/homebrew-at/Formula
+                  cp /tmp/at.rb /tmp/homebrew-at/Formula/at.rb
+                  cd /tmp/homebrew-at
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+                  git add Formula/at.rb
+                  git commit -m "at ${VERSION}"
+                  git push

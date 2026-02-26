@@ -37,7 +37,7 @@ jobs:
                   git add Cargo.toml Cargo.lock package.json
                   git commit -m "chore(release): bump version to ${VERSION}"
                   git tag "v${VERSION}"
-            - name: Push changes and tags
-              run: |
-                  git push origin main
-                  git push --tags
+            - name: Push changes
+              run: git push origin main
+            - name: Push tags
+              run: git push --tags

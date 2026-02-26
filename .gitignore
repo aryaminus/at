@@ -31,3 +31,8 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Benchmarks
+benchmarks/autocodebench_lite.jsonl
+benchmarks/temp/
+benchmarks/results/
