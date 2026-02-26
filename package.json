@@ -1,22 +1,24 @@
 {
-  "name": "@aryaminus/at",
-  "version": "0.1.14",
-  "private": false,
-  "description": "WASM bindings for the at language",
-  "type": "module",
-  "files": [
-    "dist"
-  ],
-  "scripts": {
-    "build:wasm": "wasm-pack build crates/at_wasm --target bundler --out-dir ../../dist --scope aryaminus",
-    "prepublishOnly": "npm run build:wasm",
-    "test": "cargo test",
-    "lint": "cargo test -p at_lint"
-  },
-  "devDependencies": {
-    "wasm-pack": "^0.12.1"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
+	"name": "@aryaminus/at",
+	"version": "0.1.14",
+	"private": false,
+	"description": "WASM bindings for the at language",
+	"type": "module",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build:wasm": "wasm-pack build crates/at_wasm --target bundler --out-dir ../../dist --scope aryaminus",
+		"prepublishOnly": "npm run build:wasm",
+		"test": "cargo test",
+		"lint": "cargo test -p at_lint"
+	},
+	"devDependencies": {
+		"wasm-pack": "^0.12.1"
+	},
+	"repository": "https://github.com/aryaminus/at.git",
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://npm.pkg.github.com"
+	}
 }

@@ -38,3 +38,17 @@ benchmarks/temp/
 benchmarks/results/
 benchmarks/__pycache__/
 benchmarks/**/__pycache__/
+
+# Node
+node_modules/
+package-lock.json
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env/
+venv/
+env/
+.venv/
