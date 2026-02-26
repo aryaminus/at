@@ -58,6 +58,8 @@ jobs:
                   7z a "../${NAME}.zip" "${NAME}.exe"
             - name: Upload assets
               uses: softprops/action-gh-release@v2
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               with:
                   files: |
                       at-${{ matrix.target }}.${{ matrix.ext }}
