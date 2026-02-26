@@ -10,6 +10,159 @@
 - **Predictable**: Results over exceptions, minimal magic
 - **Fast**: Cold start in milliseconds, small binary footprint
 
+## Packaging
+
+### npm (WASM)
+
+```bash
+npm install -g @aryaminus/at
+```
+
+Use `at` binaries for CLI usage; the npm package provides WASM bindings.
+
+### Homebrew
+
+```bash
+brew tap aryaminus/at
+brew install at
+```
+
+### Verify Installation
+
+```bash
+at --version
+at --help
+```
+
+## Quick Start
+
+```bash
+# Run a program
+at run examples/sum.at
+
+# Type-check (fails on errors; warns are non-fatal)
+at check file.at
+
+# Run tests (file or directory)
+at test file.at
+at test tests/
+
+# Start REPL
+at repl
+
+# Format code
+at fmt file.at
+
+# Run benchmarks
+at bench file.at --runs 10
+
+# Show dependencies
+at deps file.at
+
+# Lint code
+at lint file.at
+
+# Manage cache
+at cache list
+at cache prune --max-files 100
+
+# Start MCP server
+at mcp-server tools.at
+
+# Start LSP server
+at lsp
+
+# Get help
+at --help
+at run --help
+```
+
+## Example
+
+```at
+fn greet(name: string) -> string {
+    return "Hello, " + name + "!";
+}
+
+fn safe_div(a: int, b: int) -> result<int, string> {
+    return if b == 0 {
+        err("division by zero")
+    } else {
+        ok(a / b)
+    };
+}
+
+fn process(items: array<int>) -> int {
+    let sum = 0;
+    for item in items {
+        set sum = sum + item;
+    }
+    return sum;
+}
+
+test "greeting works" {
+    let msg = greet("World");
+    assert_eq(msg, "Hello, World!");
+}
+
+test "division handles errors" {
+    let result = safe_div(10, 0);
+    assert(is_err(result));
+}
+
+fn main() {
+    print(greet("at"));
+    
+    let numbers = [1, 2, 3, 4, 5];
+    let total = process(numbers);
+    print(total);
+    
+    return 0;
+}
+```
+
+## Installation
+
+Canonical install docs live in `docs/install.md`.
+
+### Cargo (git)
+
+```bash
+cargo install --git https://github.com/aryaminus/at --bin at
+```
+
+### Pre-built Binaries
+
+Download from GitHub releases for your platform:
+
+```bash
+# macOS (Intel)
+curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv at-x86_64-apple-darwin /usr/local/bin/at
+
+# macOS (Apple Silicon)
+curl -L https://github.com/aryaminus/at/releases/latest/download/at-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv at-aarch64-apple-darwin /usr/local/bin/at
+
+# Linux
+curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv at-x86_64-unknown-linux-gnu /usr/local/bin/at
+```
+
+### Publishing
+
+Releases are automated on merges to `main`. A version bump commit and `vX.Y.Z` tag are created by CI.
+
+### Install Smoke Matrix
+
+| Target | Install path | Verification |
+|---|---|---|
+| Linux/macOS | Release tarball | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Windows | Release zip | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
+| Source | `cargo install --path crates/at_cli` | `at --version`, `at run examples/sum.at` |
+| Source (git) | `cargo install --git https://github.com/aryaminus/at --bin at` | `at --version`, `at run examples/sum.at` |
+| WASM | `npm install -g @aryaminus/at` | run wrapper smoke in `docs/wasm.md` |
+
 ## Current Status
 
 **All core features implemented:**
@@ -61,163 +214,8 @@ CI enforces:
 - `cargo clippy` correctness gate
 - non-correctness clippy warning budget (`.clippy-warning-baseline.toml`)
 - workspace tests + example run/check sweep
-- release binary size budget (`<= 8,000,000` bytes)
+- release binary size budget (`<= 8,500,000` bytes)
 - benchmark stability threshold via `examples/run_bench.sh` + `examples/bench_compare.py`
-
-## Packaging
-
-### npm (WASM)
-
-```bash
-npm install -g @aryaminus/at
-```
-
-Use `at` binaries for CLI usage; the npm package provides WASM bindings.
-
-## Quick Start
-
-```bash
-# Run a program
-at run examples/sum.at
-
-# Type-check (fails on errors; warns are non-fatal)
-at check file.at
-
-# Run tests (file or directory)
-at test file.at
-at test tests/
-
-# Start REPL
-at repl
-
-# Format code
-at fmt file.at
-
-# Run benchmarks
-at bench file.at --runs 10
-
-# Show dependencies
-at deps file.at
-
-# Lint code
-at lint file.at
-
-# Manage cache
-at cache list
-at cache prune --max-files 100
-
-# Start MCP server
-at mcp-server tools.at
-
-# Start LSP server
-at lsp
-
-# Get help
-at --help
-at run --help
-```
-
-## Installation
-
-Canonical install docs live in `docs/install.md`.
-
-### Cargo (git)
-
-```bash
-cargo install --git https://github.com/aryaminus/at --bin at
-```
-
-### Pre-built Binaries
-
-Download from GitHub releases for your platform:
-
-```bash
-# macOS (Intel)
-curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv at-x86_64-apple-darwin /usr/local/bin/at
-
-# macOS (Apple Silicon)
-curl -L https://github.com/aryaminus/at/releases/latest/download/at-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv at-aarch64-apple-darwin /usr/local/bin/at
-
-# Linux
-curl -L https://github.com/aryaminus/at/releases/latest/download/at-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv at-x86_64-unknown-linux-gnu /usr/local/bin/at
-```
-
-### Publishing
-
-Releases are automated on merges to `main`. A version bump commit and `vX.Y.Z` tag are created by CI.
-
-### Homebrew
-
-```bash
-brew tap aryaminus/at
-brew install at
-```
-
-### Verify Installation
-
-```bash
-at --version
-at --help
-at run examples/sum.at
-at check examples/features.at
-```
-
-### Install Smoke Matrix
-
-| Target | Install path | Verification |
-|---|---|---|
-| Linux/macOS | Release tarball | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
-| Windows | Release zip | `at --version`, `at run examples/sum.at`, `at check examples/features.at` |
-| Source | `cargo install --path crates/at_cli` | `at --version`, `at run examples/sum.at` |
-| Source (git) | `cargo install --git https://github.com/aryaminus/at --bin at` | `at --version`, `at run examples/sum.at` |
-| WASM | `npm install -g @aryaminus/at` | run wrapper smoke in `docs/wasm.md` |
-
-## Example
-
-```at
-fn greet(name: string) -> string {
-    return "Hello, " + name + "!";
-}
-
-fn safe_div(a: int, b: int) -> result<int, string> {
-    return if b == 0 {
-        err("division by zero")
-    } else {
-        ok(a / b)
-    };
-}
-
-fn process(items: array<int>) -> int {
-    let sum = 0;
-    for item in items {
-        set sum = sum + item;
-    }
-    return sum;
-}
-
-test "greeting works" {
-    let msg = greet("World");
-    assert_eq(msg, "Hello, World!");
-}
-
-test "division handles errors" {
-    let result = safe_div(10, 0);
-    assert(is_err(result));
-}
-
-fn main() {
-    print(greet("at"));
-    
-    let numbers = [1, 2, 3, 4, 5];
-    let total = process(numbers);
-    print(total);
-    
-    return 0;
-}
-```
 
 ## Documentation
 
