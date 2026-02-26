@@ -41,6 +41,10 @@ jobs:
                   git tag -d "v${VERSION}" || true
                   git tag "v${VERSION}"
             - name: Push changes
-              run: git push origin main
+              run: |
+                  git pull --rebase origin main
+                  git push origin main
             - name: Push tags
-              run: git push origin "refs/tags/v${VERSION}" --force
+              run: |
+                  VERSION=$(cat /tmp/version.txt)
+                  git push origin "refs/tags/v${VERSION}" --force
