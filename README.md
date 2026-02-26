@@ -16,7 +16,7 @@
 
 - Types: `int`, `float`, `bool`, `string`, `unit`, `array<T>`, `option<T>`, `result<T,E>`
 - Control flow: `if` (expression, optional else), `while`, `for`, `break`, `continue`
-- Pattern matching: `match` with `ok`, `err`, `some`, `none`, `_` patterns
+- Pattern matching: `match` with `ok`, `err`, `some`, `none`, `_` patterns; multi-field enum variants
 - Error handling: `?` (try) operator, `option`, `result`
 - Staged deprecation warnings for legacy `throw` and `try { ... } catch { ... }` usage
 - Effects: `needs`/`using` for capability management
@@ -24,9 +24,11 @@
 - Comments: `//` line and `/* */` block comments
 - String escapes: `\n`, `\t`, `\r`, `\0`, `\\`, `\"`
 - Arrays: Immutable arrays with `len`, `append`, `contains`, `slice`
+- Mixed arithmetic: `int` and `float` can be mixed freely (int promoted to float)
 - Operators: `+`, `-`, `*`, `/`, `%`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Test blocks: `test "name" { ... }` with `assert` and `assert_eq`
 - Tool functions: `tool fn` for MCP integration
+- 40+ builtins: math (`abs`, `min`, `max`, `floor`, `ceil`, `round`, `pow`, `sqrt`, `sum`), string (`join`, `replace`, `starts_with`, `ends_with`, `repeat`, `parse_float`), character (`char_code`, `from_char_code`, `is_digit`, `is_alpha`, `is_upper`, `is_lower`), array (`sort`, `reverse`, `index_of`, `count`, `range`), and more
 
 **Staged deprecation status (compatibility mode):**
 
