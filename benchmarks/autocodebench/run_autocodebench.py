@@ -82,7 +82,7 @@ OUTCOME_ERROR = "error"
 def resolve_paths():
     """Return key paths relative to the script's location."""
     script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent
+    project_root = script_dir.parent.parent
 
     return {
         "script_dir": script_dir,
@@ -92,7 +92,7 @@ def resolve_paths():
         "at_release": project_root / "target" / "release" / "at",
         "at_debug": project_root / "target" / "debug" / "at",
         "temp_dir": script_dir / "temp",
-        "results_dir": script_dir / "results",
+        "results_dir": script_dir.parent / "results",
     }
 
 

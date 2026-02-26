@@ -374,6 +374,36 @@ pub enum Builtin {
     ToString,
     Keys,
     Values,
+    // Math
+    Abs,
+    Min,
+    Max,
+    Floor,
+    Ceil,
+    Round,
+    Pow,
+    Sqrt,
+    Sum,
+    // String
+    Join,
+    Replace,
+    StartsWith,
+    EndsWith,
+    Repeat,
+    ParseFloat,
+    // Character
+    CharCode,
+    FromCharCode,
+    IsDigit,
+    IsAlpha,
+    IsUpper,
+    IsLower,
+    // Array
+    Sort,
+    Reverse,
+    IndexOf,
+    Count,
+    Range,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1912,12 +1942,15 @@ impl Compiler {
                     ));
                 }
                 if let Expr::Ident(ident) = callee.as_ref() {
-                    if let Some(builtin) = map_builtin("", &ident.name, args.len()) {
-                        for arg in args {
-                            self.compile_expr(arg, chunk)?;
+                    // User-defined functions shadow builtins
+                    if !self.functions.contains_key(&ident.name) {
+                        if let Some(builtin) = map_builtin("", &ident.name, args.len()) {
+                            for arg in args {
+                                self.compile_expr(arg, chunk)?;
+                            }
+                            chunk.push(Op::Builtin(builtin), Some(ident.span));
+                            return Ok(());
                         }
-                        chunk.push(Op::Builtin(builtin), Some(ident.span));
-                        return Ok(());
                     }
                     if ident.name == "map" {
                         if args.len() != 2 {
@@ -4955,9 +4988,19 @@ impl Vm {
                                 Value::Array(items) => {
                                     Value::Bool(items.iter().any(|item| item == &value))
                                 }
+                                Value::String(haystack) => {
+                                    if let Value::String(needle) = &value {
+                                        Value::Bool(haystack.contains(needle.as_str()))
+                                    } else {
+                                        return Err(runtime_error_at(
+                                            "contains on string expects string needle".to_string(),
+                                            span_at(chunk, frame_ip),
+                                        ));
+                                    }
+                                }
                                 _ => {
                                     return Err(runtime_error_at(
-                                        "contains expects array".to_string(),
+                                        "contains expects array or string".to_string(),
                                         span_at(chunk, frame_ip),
                                     ))
                                 }
@@ -5259,6 +5302,672 @@ impl Vm {
                                 }
                             }
                         }
+                        // ── Math builtins ─────────────────────────
+                        Builtin::Abs => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Int(n) => Value::Int(n.abs()),
+                                Value::Float(n) => Value::Float(n.abs()),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "abs expects int or float".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Min => {
+                            let b = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let a = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&a, &b) {
+                                (Value::Int(x), Value::Int(y)) => Value::Int((*x).min(*y)),
+                                (Value::Float(x), Value::Float(y)) => Value::Float(x.min(*y)),
+                                (Value::Int(x), Value::Float(y)) => {
+                                    Value::Float((*x as f64).min(*y))
+                                }
+                                (Value::Float(x), Value::Int(y)) => Value::Float(x.min(*y as f64)),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "min expects numbers".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Max => {
+                            let b = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let a = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&a, &b) {
+                                (Value::Int(x), Value::Int(y)) => Value::Int((*x).max(*y)),
+                                (Value::Float(x), Value::Float(y)) => Value::Float(x.max(*y)),
+                                (Value::Int(x), Value::Float(y)) => {
+                                    Value::Float((*x as f64).max(*y))
+                                }
+                                (Value::Float(x), Value::Int(y)) => Value::Float(x.max(*y as f64)),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "max expects numbers".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Floor => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Float(n) => Value::Int(n.floor() as i64),
+                                Value::Int(n) => Value::Int(n),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "floor expects number".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Ceil => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Float(n) => Value::Int(n.ceil() as i64),
+                                Value::Int(n) => Value::Int(n),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "ceil expects number".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Round => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Float(n) => Value::Int(n.round() as i64),
+                                Value::Int(n) => Value::Int(n),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "round expects number".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Pow => {
+                            let exp = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let base = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&base, &exp) {
+                                (Value::Int(b), Value::Int(e)) => {
+                                    if *e >= 0 {
+                                        Value::Int(b.pow(*e as u32))
+                                    } else {
+                                        Value::Float((*b as f64).powi(*e as i32))
+                                    }
+                                }
+                                (Value::Float(b), Value::Int(e)) => Value::Float(b.powi(*e as i32)),
+                                (Value::Float(b), Value::Float(e)) => Value::Float(b.powf(*e)),
+                                (Value::Int(b), Value::Float(e)) => {
+                                    Value::Float((*b as f64).powf(*e))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "pow expects numbers".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Sqrt => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Float(n) => Value::Float(n.sqrt()),
+                                Value::Int(n) => Value::Float((n as f64).sqrt()),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "sqrt expects number".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Sum => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Array(items) => {
+                                    let mut int_sum: i64 = 0;
+                                    let mut is_float = false;
+                                    let mut float_sum: f64 = 0.0;
+                                    for item in items.iter() {
+                                        match item {
+                                            Value::Int(n) => {
+                                                int_sum += n;
+                                                float_sum += *n as f64;
+                                            }
+                                            Value::Float(n) => {
+                                                is_float = true;
+                                                float_sum += n;
+                                            }
+                                            _ => {
+                                                return Err(runtime_error_at(
+                                                    "sum expects array of numbers".to_string(),
+                                                    span_at(chunk, frame_ip),
+                                                ))
+                                            }
+                                        }
+                                    }
+                                    if is_float {
+                                        Value::Float(float_sum)
+                                    } else {
+                                        Value::Int(int_sum)
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "sum expects array".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        // ── String builtins ───────────────────────
+                        Builtin::Join => {
+                            let sep = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let arr = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&arr, &sep) {
+                                (Value::Array(items), Value::String(sep)) => {
+                                    let strs: Vec<String> = items
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::String(s) => (**s).clone(),
+                                            other => format_value(other),
+                                        })
+                                        .collect();
+                                    Value::String(Rc::new(strs.join(sep)))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "join expects (array, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Replace => {
+                            let new = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let old = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let s = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&s, &old, &new) {
+                                (Value::String(s), Value::String(old), Value::String(new)) => {
+                                    Value::String(Rc::new(s.replace(old.as_str(), new.as_str())))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "replace expects (string, string, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::StartsWith => {
+                            let prefix = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let s = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&s, &prefix) {
+                                (Value::String(s), Value::String(p)) => {
+                                    Value::Bool(s.starts_with(p.as_str()))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "starts_with expects (string, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::EndsWith => {
+                            let suffix = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let s = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&s, &suffix) {
+                                (Value::String(s), Value::String(p)) => {
+                                    Value::Bool(s.ends_with(p.as_str()))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "ends_with expects (string, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Repeat => {
+                            let n = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let s = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&s, &n) {
+                                (Value::String(s), Value::Int(n)) => {
+                                    Value::String(Rc::new(s.repeat(*n as usize)))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "repeat expects (string, int)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::ParseFloat => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => match s.trim().parse::<f64>() {
+                                    Ok(f) => Value::Option(Some(Rc::new(Value::Float(f)))),
+                                    Err(_) => Value::Option(None),
+                                },
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "parse_float expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        // ── Character builtins ────────────────────
+                        Builtin::CharCode => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => {
+                                    if let Some(ch) = s.chars().next() {
+                                        Value::Int(ch as i64)
+                                    } else {
+                                        return Err(runtime_error_at(
+                                            "char_code: empty string".to_string(),
+                                            span_at(chunk, frame_ip),
+                                        ));
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "char_code expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::FromCharCode => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Int(n) => {
+                                    if let Some(ch) = char::from_u32(n as u32) {
+                                        Value::String(Rc::new(ch.to_string()))
+                                    } else {
+                                        return Err(runtime_error_at(
+                                            format!("from_char_code: invalid code point {}", n),
+                                            span_at(chunk, frame_ip),
+                                        ));
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "from_char_code expects int".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsDigit => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => Value::Bool(
+                                    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+                                ),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "is_digit expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsAlpha => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => Value::Bool(
+                                    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()),
+                                ),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "is_alpha expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsUpper => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => Value::Bool(
+                                    !s.is_empty()
+                                        && s.chars()
+                                            .all(|c| !c.is_alphabetic() || c.is_uppercase()),
+                                ),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "is_upper expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IsLower => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::String(s) => Value::Bool(
+                                    !s.is_empty()
+                                        && s.chars()
+                                            .all(|c| !c.is_alphabetic() || c.is_lowercase()),
+                                ),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "is_lower expects string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        // ── Array builtins ─────────────────────────
+                        Builtin::Sort => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Array(items) => {
+                                    let mut sorted = (*items).clone();
+                                    sorted.sort_by(|a, b| match (a, b) {
+                                        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                                        (Value::Float(x), Value::Float(y)) => {
+                                            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                                        }
+                                        (Value::String(x), Value::String(y)) => x.cmp(y),
+                                        (Value::Int(x), Value::Float(y)) => (*x as f64)
+                                            .partial_cmp(y)
+                                            .unwrap_or(std::cmp::Ordering::Equal),
+                                        (Value::Float(x), Value::Int(y)) => x
+                                            .partial_cmp(&(*y as f64))
+                                            .unwrap_or(std::cmp::Ordering::Equal),
+                                        _ => std::cmp::Ordering::Equal,
+                                    });
+                                    Value::Array(Rc::new(sorted))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "sort expects array".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Reverse => {
+                            let val = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match val {
+                                Value::Array(items) => {
+                                    let mut reversed = (*items).clone();
+                                    reversed.reverse();
+                                    Value::Array(Rc::new(reversed))
+                                }
+                                Value::String(s) => {
+                                    Value::String(Rc::new(s.chars().rev().collect()))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "reverse expects array or string".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::IndexOf => {
+                            let needle = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let haystack = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&haystack, &needle) {
+                                (Value::String(s), Value::String(sub)) => {
+                                    match s.find(sub.as_str()) {
+                                        Some(pos) => Value::Int(pos as i64),
+                                        None => Value::Int(-1),
+                                    }
+                                }
+                                (Value::Array(items), _) => {
+                                    match items.iter().position(|item| item == &needle) {
+                                        Some(pos) => Value::Int(pos as i64),
+                                        None => Value::Int(-1),
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "index_of expects (string, string) or (array, value)"
+                                            .to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Count => {
+                            let target = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let collection = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&collection, &target) {
+                                (Value::String(s), Value::String(sub)) => {
+                                    Value::Int(s.matches(sub.as_str()).count() as i64)
+                                }
+                                (Value::Array(items), _) => Value::Int(
+                                    items.iter().filter(|item| *item == &target).count() as i64,
+                                ),
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "count expects (string, string) or (array, value)"
+                                            .to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::Range => {
+                            let end = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let start = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&start, &end) {
+                                (Value::Int(s), Value::Int(e)) => {
+                                    let items: Vec<Value> = (*s..*e).map(Value::Int).collect();
+                                    Value::Array(Rc::new(items))
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "range expects (int, int)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
                         Builtin::Next => {
                             let gen = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
@@ -5443,6 +6152,12 @@ impl Vm {
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left + right));
                         }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left as f64 + right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Float(left + right as f64));
+                        }
                         (Value::String(left), Value::String(right)) => {
                             let mut combined = String::with_capacity(left.len() + right.len());
                             combined.push_str(&left);
@@ -5495,6 +6210,12 @@ impl Vm {
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left - right));
                         }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left as f64 - right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Float(left - right as f64));
+                        }
                         _ => {
                             return Err(runtime_error_at(
                                 "invalid binary operands".to_string(),
@@ -5523,6 +6244,12 @@ impl Vm {
                         }
                         (Value::Float(left), Value::Float(right)) => {
                             self.stack.push(Value::Float(left * right));
+                        }
+                        (Value::Int(left), Value::Float(right)) => {
+                            self.stack.push(Value::Float(left as f64 * right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            self.stack.push(Value::Float(left * right as f64));
                         }
                         _ => {
                             return Err(runtime_error_at(
@@ -5565,6 +6292,24 @@ impl Vm {
                             }
                             self.stack.push(Value::Float(left / right));
                         }
+                        (Value::Int(left), Value::Float(right)) => {
+                            if right == 0.0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left as f64 / right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            if right == 0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left / right as f64));
+                        }
                         _ => {
                             return Err(runtime_error_at(
                                 "invalid binary operands".to_string(),
@@ -5605,6 +6350,24 @@ impl Vm {
                                 ));
                             }
                             self.stack.push(Value::Float(left % right));
+                        }
+                        (Value::Int(left), Value::Float(right)) => {
+                            if right == 0.0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left as f64 % right));
+                        }
+                        (Value::Float(left), Value::Int(right)) => {
+                            if right == 0 {
+                                return Err(runtime_error_at(
+                                    "division by zero".to_string(),
+                                    span_at(chunk, frame_ip),
+                                ));
+                            }
+                            self.stack.push(Value::Float(left % right as f64));
                         }
                         _ => {
                             return Err(runtime_error_at(
@@ -6877,6 +7640,36 @@ fn map_builtin(base: &str, name: &str, args: usize) -> Option<Builtin> {
         ("", "to_string") => Some(Builtin::ToString),
         ("", "keys") => Some(Builtin::Keys),
         ("", "values") => Some(Builtin::Values),
+        // Math
+        ("", "abs") => Some(Builtin::Abs),
+        ("", "min") => Some(Builtin::Min),
+        ("", "max") => Some(Builtin::Max),
+        ("", "floor") => Some(Builtin::Floor),
+        ("", "ceil") => Some(Builtin::Ceil),
+        ("", "round") => Some(Builtin::Round),
+        ("", "pow") => Some(Builtin::Pow),
+        ("", "sqrt") => Some(Builtin::Sqrt),
+        ("", "sum") => Some(Builtin::Sum),
+        // String
+        ("", "join") => Some(Builtin::Join),
+        ("", "replace") => Some(Builtin::Replace),
+        ("", "starts_with") => Some(Builtin::StartsWith),
+        ("", "ends_with") => Some(Builtin::EndsWith),
+        ("", "repeat") => Some(Builtin::Repeat),
+        ("", "parse_float") => Some(Builtin::ParseFloat),
+        // Character
+        ("", "char_code") => Some(Builtin::CharCode),
+        ("", "from_char_code") => Some(Builtin::FromCharCode),
+        ("", "is_digit") => Some(Builtin::IsDigit),
+        ("", "is_alpha") => Some(Builtin::IsAlpha),
+        ("", "is_upper") => Some(Builtin::IsUpper),
+        ("", "is_lower") => Some(Builtin::IsLower),
+        // Array
+        ("", "sort") => Some(Builtin::Sort),
+        ("", "reverse") => Some(Builtin::Reverse),
+        ("", "index_of") => Some(Builtin::IndexOf),
+        ("", "count") => Some(Builtin::Count),
+        ("", "range") => Some(Builtin::Range),
         _ => None,
     }
 }

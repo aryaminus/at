@@ -1,6 +1,6 @@
 # Benchmark Suite for `at`
 
-Empirical benchmarks proving `at` is the optimal language for AI agent code generation. The suite measures three key claims without requiring any LLM, plus an LLM-based evaluation using the AutoCodeBenchmark dataset.
+Empirical benchmarks proving `at` is the optimal language for AI agent code generation. The suite measures three key claims without requiring any LLM, plus two LLM-based evaluations: HumanEval-at (pass@1 on hand-translated problems) and AutoCodeBenchmark (large-scale multi-language translation).
 
 ## Benchmarks
 
@@ -34,7 +34,29 @@ python3 determinism/run_determinism_bench.py --runs 100
 
 Results: 0% flakiness rate across 1,100 executions. Every test produces identical results on every run.
 
-### 4. AutoCodeBenchmark (`run_autocodebench.py`)
+### 4. HumanEval-at (`humaneval_at/`)
+
+15 hand-translated seed problems with canonical `at` solutions for validation. For LLM evaluation, downloads the full OpenAI HumanEval dataset (164 Python problems) and uses an LLM to translate each into `at`.
+
+Validate canonical solutions (no LLM needed):
+
+```bash
+python3 humaneval_at/run_humaneval.py --validate
+```
+
+Run pass@1 on the full 164-problem HumanEval set with an LLM:
+
+```bash
+pip install openai
+export OPENAI_BASE_URL="http://localhost:11434/v1"
+export OPENAI_API_KEY="ollama"
+python3 humaneval_at/run_humaneval.py --model "qwen2.5-coder:7b"
+python3 humaneval_at/run_humaneval.py --model "gpt-4o" --count 20  # subset
+```
+
+Results: All 15 canonical solutions pass (~4ms each via `at test`).
+
+### 5. AutoCodeBenchmark (`autocodebench/`)
 
 **Requires LLM + openai package.** Downloads problems from [Tencent AutoCodeBenchmark](https://huggingface.co/datasets/tencent/AutoCodeBenchmark) (1,590 problems, 20 languages), uses an LLM to translate solutions into `at`, and measures Pass@1 and token savings.
 
@@ -42,7 +64,7 @@ Results: 0% flakiness rate across 1,100 executions. Every test produces identica
 pip install openai tiktoken
 export OPENAI_BASE_URL="http://localhost:11434/v1"
 export OPENAI_API_KEY="ollama"
-python3 run_autocodebench.py --models "glm-4.5" --count 10
+python3 autocodebench/run_autocodebench.py --models "glm-4.5" --count 10
 ```
 
 ## Unified Runner
@@ -86,6 +108,8 @@ Results are written to the `results/` directory as JSON files:
 - `results/token_efficiency.json` -- Token counts per language per problem
 - `results/execution_speed.json` -- Timing data per language per problem
 - `results/determinism.json` -- Pass/fail counts across N runs
+- `results/humaneval_*.jsonl` -- Per-instance HumanEval-at results
+- `results/humaneval_*_summary.json` -- Aggregate HumanEval-at metrics
 - `results/<run_id>.jsonl` -- Per-instance AutoCodeBench results
 - `results/<run_id>_summary.json` -- Aggregate AutoCodeBench metrics
 

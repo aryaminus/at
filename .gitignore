@@ -33,8 +33,9 @@ Thumbs.db
 .env.local
 
 # Benchmarks
-benchmarks/autocodebench_lite.jsonl
-benchmarks/temp/
+benchmarks/autocodebench/autocodebench_lite.jsonl
+benchmarks/autocodebench/temp/
+benchmarks/humaneval_at/HumanEval.jsonl.gz
 benchmarks/results/
 benchmarks/__pycache__/
 benchmarks/**/__pycache__/

@@ -34,9 +34,15 @@ BENCHMARKS = {
     },
     "autocodebench": {
         "name": "AutoCodeBenchmark",
-        "script": SCRIPT_DIR / "run_autocodebench.py",
+        "script": SCRIPT_DIR / "autocodebench" / "run_autocodebench.py",
         "requires_llm": True,
         "description": "LLM-based evaluation using Tencent AutoCodeBenchmark",
+    },
+    "humaneval": {
+        "name": "HumanEval-at",
+        "script": SCRIPT_DIR / "humaneval_at" / "run_humaneval.py",
+        "requires_llm": True,
+        "description": "HumanEval pass@1 evaluation translated to at syntax",
     },
 }
 
@@ -97,6 +103,9 @@ def main():
             cmd.append("--json")
 
         if suite_id == "tokens" and args.validate:
+            cmd.append("--validate")
+
+        if suite_id == "humaneval" and args.validate:
             cmd.append("--validate")
 
         if suite_id == "determinism":

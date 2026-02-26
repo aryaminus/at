@@ -2629,8 +2629,12 @@ impl TypeChecker {
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr]) -> SimpleType {
         if let Expr::Ident(ident) = callee {
-            if let Some(result) = self.check_builtin_call(&ident.name, args, Some(ident.span)) {
-                return result;
+            // User-defined functions shadow builtins: only check builtin if
+            // no user function with this name exists.
+            if !self.functions.contains_key(&ident.name) {
+                if let Some(result) = self.check_builtin_call(&ident.name, args, Some(ident.span)) {
+                    return result;
+                }
             }
             if let Some(sig) = self.functions.get(&ident.name).cloned() {
                 if !sig.is_async {
@@ -3456,17 +3460,32 @@ impl TypeChecker {
             "contains" => {
                 self.check_arity(name, args, 2, span);
                 let mut array_inner = None;
+                let mut is_string = false;
                 if let Some(arg) = args.first() {
                     let arg_ty = self.check_expr(arg);
-                    if !matches!(arg_ty, SimpleType::Array(_)) && arg_ty != SimpleType::Unknown {
-                        self.push_error("contains expects array".to_string(), expr_span(arg));
+                    if arg_ty == SimpleType::String {
+                        is_string = true;
+                    } else if !matches!(arg_ty, SimpleType::Array(_))
+                        && arg_ty != SimpleType::Unknown
+                    {
+                        self.push_error(
+                            "contains expects array or string".to_string(),
+                            expr_span(arg),
+                        );
                     } else if let SimpleType::Array(inner) = arg_ty {
                         array_inner = Some((*inner).clone());
                     }
                 }
                 if let Some(value) = args.get(1) {
                     let value_ty = self.check_expr(value);
-                    if let Some(inner) = array_inner.as_ref() {
+                    if is_string {
+                        if value_ty != SimpleType::String && value_ty != SimpleType::Unknown {
+                            self.push_error(
+                                "contains on string expects string needle".to_string(),
+                                expr_span(value),
+                            );
+                        }
+                    } else if let Some(inner) = array_inner.as_ref() {
                         if !matches!(value_ty, SimpleType::Unknown) {
                             self.check_compatible(
                                 inner,
@@ -3971,6 +3990,244 @@ impl TypeChecker {
                     }
                 }
                 Some(SimpleType::Bool)
+            }
+            // Math builtins
+            "abs" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    match &ty {
+                        SimpleType::Int => return Some(SimpleType::Int),
+                        SimpleType::Float => return Some(SimpleType::Float),
+                        SimpleType::Unknown => {}
+                        _ => {
+                            self.push_error("abs expects int or float".to_string(), expr_span(arg))
+                        }
+                    }
+                }
+                Some(SimpleType::Unknown)
+            }
+            "min" | "max" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(
+                        ty,
+                        SimpleType::Int | SimpleType::Float | SimpleType::Unknown
+                    ) {
+                        self.push_error(format!("{} expects numbers", name), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Unknown)
+            }
+            "floor" | "ceil" | "round" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(
+                        ty,
+                        SimpleType::Int | SimpleType::Float | SimpleType::Unknown
+                    ) {
+                        self.push_error(format!("{} expects number", name), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Int)
+            }
+            "pow" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(
+                        ty,
+                        SimpleType::Int | SimpleType::Float | SimpleType::Unknown
+                    ) {
+                        self.push_error("pow expects numbers".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Unknown)
+            }
+            "sqrt" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(
+                        ty,
+                        SimpleType::Int | SimpleType::Float | SimpleType::Unknown
+                    ) {
+                        self.push_error("sqrt expects number".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Float)
+            }
+            "sum" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(ty, SimpleType::Array(_) | SimpleType::Unknown) {
+                        self.push_error("sum expects array".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Unknown)
+            }
+            // String builtins
+            "join" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if !matches!(ty, SimpleType::Array(_) | SimpleType::Unknown) {
+                        self.push_error(
+                            "join expects array as first arg".to_string(),
+                            expr_span(arg),
+                        );
+                    }
+                }
+                if let Some(arg) = args.get(1) {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error(
+                            "join expects string separator".to_string(),
+                            expr_span(arg),
+                        );
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "replace" => {
+                self.check_arity(name, args, 3, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("replace expects strings".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "starts_with" | "ends_with" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error(format!("{} expects strings", name), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Bool)
+            }
+            "repeat" => {
+                self.check_arity(name, args, 2, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error(
+                            "repeat expects string as first arg".to_string(),
+                            expr_span(arg),
+                        );
+                    }
+                }
+                if let Some(arg) = args.get(1) {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::Int && ty != SimpleType::Unknown {
+                        self.push_error(
+                            "repeat expects int as second arg".to_string(),
+                            expr_span(arg),
+                        );
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "parse_float" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("parse_float expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Option(Box::new(SimpleType::Float)))
+            }
+            // Character builtins
+            "char_code" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("char_code expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Int)
+            }
+            "from_char_code" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::Int && ty != SimpleType::Unknown {
+                        self.push_error("from_char_code expects int".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
+            "is_digit" | "is_alpha" | "is_upper" | "is_lower" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error(format!("{} expects string", name), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Bool)
+            }
+            // Array builtins
+            "sort" => {
+                self.check_arity(name, args, 1, span);
+                let mut inner = SimpleType::Unknown;
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    if let SimpleType::Array(i) = ty {
+                        inner = (*i).clone();
+                    } else if ty != SimpleType::Unknown {
+                        self.push_error("sort expects array".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Array(Box::new(inner)))
+            }
+            "reverse" => {
+                self.check_arity(name, args, 1, span);
+                if let Some(arg) = args.first() {
+                    let ty = self.check_expr(arg);
+                    match ty {
+                        SimpleType::Array(inner) => return Some(SimpleType::Array(inner)),
+                        SimpleType::String => return Some(SimpleType::String),
+                        SimpleType::Unknown => {}
+                        _ => self.push_error(
+                            "reverse expects array or string".to_string(),
+                            expr_span(arg),
+                        ),
+                    }
+                }
+                Some(SimpleType::Unknown)
+            }
+            "index_of" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    self.check_expr(arg);
+                }
+                Some(SimpleType::Int)
+            }
+            "count" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    self.check_expr(arg);
+                }
+                Some(SimpleType::Int)
+            }
+            "range" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::Int && ty != SimpleType::Unknown {
+                        self.push_error("range expects int".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Array(Box::new(SimpleType::Int)))
             }
             _ => None,
         }
@@ -5675,7 +5932,7 @@ fn f() {
         let errors = typecheck_module(&module).expect_err("expected type errors");
         assert!(errors
             .iter()
-            .any(|err| err.message.contains("contains expects array")));
+            .any(|err| err.message.contains("contains expects array or string")));
     }
 
     #[test]

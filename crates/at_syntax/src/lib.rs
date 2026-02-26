@@ -971,6 +971,166 @@ pub static BUILTIN_TABLE: &[BuiltinMeta] = &[
         arity: 1,
         capability: None,
     },
+    // Math builtins
+    BuiltinMeta {
+        name: "abs",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "min",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "max",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "floor",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "ceil",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "round",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "pow",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "sqrt",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "sum",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    // String builtins
+    BuiltinMeta {
+        name: "join",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "replace",
+        base: "",
+        arity: 3,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "starts_with",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "ends_with",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "repeat",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "parse_float",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    // Character builtins
+    BuiltinMeta {
+        name: "char_code",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "from_char_code",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "is_digit",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "is_alpha",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "is_upper",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "is_lower",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    // Array builtins
+    BuiltinMeta {
+        name: "sort",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "reverse",
+        base: "",
+        arity: 1,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "index_of",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "count",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "range",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
 ];
 
 /// Look up a builtin by base namespace, name, and argument count.
