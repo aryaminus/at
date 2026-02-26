@@ -151,6 +151,11 @@ let total = reduce(nums, 0, |acc, x| acc + x);
 ### Map
 `keys(map)`, `values(map)`
 
+### Regex
+`regex_match(str, pattern)` -> `bool`, `regex_find(str, pattern)` -> `array<string>`, `regex_replace(str, pattern, replacement)` -> `string`
+
+Note: Use `{{` to escape literal `{` in regex patterns inside string literals (e.g., `"[0-9]{{3}}"` for the regex `[0-9]{3}`).
+
 ### Option & Result
 `some(v)`, `none()`, `is_some(opt)`, `is_none(opt)`, `ok(v)`, `err(v)`, `is_ok(res)`, `is_err(res)`
 
@@ -197,6 +202,22 @@ Before modifying or generating `at` code, verify:
 As an agent, you can use these tools to iteratively validate your code:
 
 - `at check` - Type-check and lint in one pass (instant, catches all errors before runtime)
-- `at test` - Run tests (aggressively cached, very fast feedback loop)
+- `at test <file|dir>` - Run tests in a file or recursively in a directory (aggressively cached, very fast feedback loop)
 - `at run <file>` - Execute a script
 - `at fix` - Auto-formats code and fixes lints
+
+## 6. Limitations
+
+These are things `at` intentionally does not support or has not yet implemented:
+
+- **No classes or inheritance.** Only structs and enums (algebraic data types).
+- **No mutable references.** All data is immutable/copy-on-write (`Rc`-shared). `set` creates new copies.
+- **No standard I/O beyond `print`.** No `read_line`, no file I/O builtins (would require `fs` capability and corresponding builtins which do not exist yet).
+- **No hash/set data structure.** Only arrays and ordered maps. Use a map with dummy values as a workaround.
+- **No package manager.** Remote imports are direct URL fetches with caching.
+- **No null.** Uses `option` (`some`/`none`) instead.
+- **No implicit returns.** Must use `return` keyword (though block expressions have implicit tail values).
+- **Integer arithmetic is overflow-checked.** Large computations will error rather than wrap.
+- **Single-threaded.** Async is cooperative, not parallel. No OS-level threading.
+- **No recursion depth guarantees.** A configurable `max_frames` limit exists for sandboxed execution.
+- **String interpolation uses `{expr}`.** Use `{{` to write a literal `{` in strings (relevant for regex patterns with quantifiers like `{3}`).

@@ -1131,6 +1131,24 @@ pub static BUILTIN_TABLE: &[BuiltinMeta] = &[
         arity: 2,
         capability: None,
     },
+    BuiltinMeta {
+        name: "regex_match",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "regex_find",
+        base: "",
+        arity: 2,
+        capability: None,
+    },
+    BuiltinMeta {
+        name: "regex_replace",
+        base: "",
+        arity: 3,
+        capability: None,
+    },
 ];
 
 /// Look up a builtin by base namespace, name, and argument count.

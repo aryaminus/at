@@ -26,8 +26,9 @@
 - Arrays: Immutable arrays with `len`, `append`, `contains`, `slice`
 - Mixed arithmetic: `int` and `float` can be mixed freely (int promoted to float)
 - Operators: `+`, `-`, `*`, `/`, `%`, `&&`, `||`, `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Test blocks: `test "name" { ... }` with `assert` and `assert_eq`
+- Test blocks: `test "name" { ... }` with `assert` and `assert_eq`; multi-file test discovery (`at test <dir>`)
 - Tool functions: `tool fn` for MCP integration
+- Regular expressions: `regex_match`, `regex_find`, `regex_replace` with capture group support
 - 40+ builtins: math (`abs`, `min`, `max`, `floor`, `ceil`, `round`, `pow`, `sqrt`, `sum`), string (`join`, `replace`, `starts_with`, `ends_with`, `repeat`, `parse_float`), character (`char_code`, `from_char_code`, `is_digit`, `is_alpha`, `is_upper`, `is_lower`), array (`sort`, `reverse`, `index_of`, `count`, `range`), and more
 
 **Staged deprecation status (compatibility mode):**
@@ -82,8 +83,9 @@ at run examples/sum.at
 # Type-check (fails on errors; warns are non-fatal)
 at check file.at
 
-# Run tests
+# Run tests (file or directory)
 at test file.at
+at test tests/
 
 # Start REPL
 at repl

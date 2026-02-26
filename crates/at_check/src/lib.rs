@@ -4229,6 +4229,36 @@ impl TypeChecker {
                 }
                 Some(SimpleType::Array(Box::new(SimpleType::Int)))
             }
+            "regex_match" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("regex_match expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Bool)
+            }
+            "regex_find" => {
+                self.check_arity(name, args, 2, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("regex_find expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::Array(Box::new(SimpleType::String)))
+            }
+            "regex_replace" => {
+                self.check_arity(name, args, 3, span);
+                for arg in args.iter() {
+                    let ty = self.check_expr(arg);
+                    if ty != SimpleType::String && ty != SimpleType::Unknown {
+                        self.push_error("regex_replace expects string".to_string(), expr_span(arg));
+                    }
+                }
+                Some(SimpleType::String)
+            }
             _ => None,
         }
     }

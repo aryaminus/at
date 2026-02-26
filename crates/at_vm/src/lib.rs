@@ -404,6 +404,10 @@ pub enum Builtin {
     IndexOf,
     Count,
     Range,
+    // Regex
+    RegexMatch,
+    RegexFind,
+    RegexReplace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5968,6 +5972,122 @@ impl Vm {
                                 }
                             }
                         }
+                        Builtin::RegexMatch => {
+                            let pattern = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&text, &pattern) {
+                                (Value::String(s), Value::String(p)) => {
+                                    match regex_lite::Regex::new(p) {
+                                        Ok(re) => Value::Bool(re.is_match(s)),
+                                        Err(e) => {
+                                            return Err(runtime_error_at(
+                                                format!("invalid regex: {e}"),
+                                                span_at(chunk, frame_ip),
+                                            ))
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "regex_match expects (string, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::RegexFind => {
+                            let pattern = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&text, &pattern) {
+                                (Value::String(s), Value::String(p)) => {
+                                    match regex_lite::Regex::new(p) {
+                                        Ok(re) => {
+                                            let matches: Vec<Value> = re
+                                                .find_iter(s)
+                                                .map(|m| {
+                                                    Value::String(Rc::new(m.as_str().to_string()))
+                                                })
+                                                .collect();
+                                            Value::Array(Rc::new(matches))
+                                        }
+                                        Err(e) => {
+                                            return Err(runtime_error_at(
+                                                format!("invalid regex: {e}"),
+                                                span_at(chunk, frame_ip),
+                                            ))
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "regex_find expects (string, string)".to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
+                        Builtin::RegexReplace => {
+                            let replacement = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let pattern = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            let text = self.stack.pop().ok_or_else(|| {
+                                runtime_error_at(
+                                    "stack underflow".to_string(),
+                                    span_at(chunk, frame_ip),
+                                )
+                            })?;
+                            match (&text, &pattern, &replacement) {
+                                (Value::String(s), Value::String(p), Value::String(r)) => {
+                                    match regex_lite::Regex::new(p) {
+                                        Ok(re) => Value::String(Rc::new(
+                                            re.replace_all(s, r.as_str()).to_string(),
+                                        )),
+                                        Err(e) => {
+                                            return Err(runtime_error_at(
+                                                format!("invalid regex: {e}"),
+                                                span_at(chunk, frame_ip),
+                                            ))
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(runtime_error_at(
+                                        "regex_replace expects (string, string, string)"
+                                            .to_string(),
+                                        span_at(chunk, frame_ip),
+                                    ))
+                                }
+                            }
+                        }
                         Builtin::Next => {
                             let gen = self.stack.pop().ok_or_else(|| {
                                 runtime_error_at(
@@ -7670,6 +7790,10 @@ fn map_builtin(base: &str, name: &str, args: usize) -> Option<Builtin> {
         ("", "index_of") => Some(Builtin::IndexOf),
         ("", "count") => Some(Builtin::Count),
         ("", "range") => Some(Builtin::Range),
+        // Regex
+        ("", "regex_match") => Some(Builtin::RegexMatch),
+        ("", "regex_find") => Some(Builtin::RegexFind),
+        ("", "regex_replace") => Some(Builtin::RegexReplace),
         _ => None,
     }
 }

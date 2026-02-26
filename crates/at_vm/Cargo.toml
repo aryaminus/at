@@ -14,6 +14,7 @@ sha2 = "0.10"
 hex = "0.4"
 indexmap = { version = "2", features = ["serde"] }
 getrandom = { version = "0.2", features = ["js"] }
+regex-lite = "0.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = "=2.12.1"

@@ -22,6 +22,30 @@ const REMOTE_FETCH_TIMEOUT_SECS: u64 = 10;
 const REMOTE_FETCH_RETRIES: usize = 3;
 const REMOTE_FETCH_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Recursively collect all `.at` files under a directory.
+fn collect_at_files(dir: &Path, out: &mut Vec<String>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip hidden directories and common non-source dirs
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    continue;
+                }
+            }
+            collect_at_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("at") {
+            if let Some(s) = path.to_str() {
+                out.push(s.to_string());
+            }
+        }
+    }
+}
+
 fn print_usage() {
     eprintln!("at - An agent-native programming language");
     eprintln!();
@@ -30,7 +54,7 @@ fn print_usage() {
     eprintln!("  at run <file.at> [run options]  Run a file");
     eprintln!("  at repl                         Start interactive REPL");
     eprintln!("  at fmt [--write] <file.at>      Format a file");
-    eprintln!("  at test <file.at>               Run tests in a file");
+    eprintln!("  at test <file.at|dir>           Run tests in a file or directory");
     eprintln!("  at fix <file.at>                Format and auto-fix a file");
     eprintln!("  at check <file.at> [options]    Type-check a file");
     eprintln!("  at lint <file.at>               Lint a file");
@@ -369,107 +393,179 @@ fn main() {
 
     if args[1] == "test" {
         if args.len() < 3 {
-            eprintln!("usage: at test <file.at> [--no-cache]");
+            eprintln!("usage: at test <file.at|directory> [--no-cache]");
             std::process::exit(1);
         }
         let path = &args[2];
         let no_cache = args.iter().any(|arg| arg == "--no-cache");
 
-        let loaded = match load_module(path) {
-            Ok(loaded) => loaded,
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
+        // Collect files: if path is a directory, recursively find all .at files
+        let files: Vec<String> = if Path::new(path).is_dir() {
+            let mut found = Vec::new();
+            collect_at_files(Path::new(path), &mut found);
+            found.sort(); // deterministic ordering
+            found
+        } else {
+            vec![path.clone()]
         };
 
-        // Test caching: hash the source and all dependencies
-        let source_hash = {
-            let mut hasher = Sha256::new();
-
-            // Hash the main file
-            let source = match fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("error reading {path}: {e}");
-                    std::process::exit(1);
-                }
-            };
-            hasher.update(source.as_bytes());
-
-            // Hash all imported files (sorted for determinism)
-            let mut imports = loaded.imports.clone();
-            imports.sort();
-            for import_path in imports {
-                if let Ok(content) = fs::read_to_string(&import_path) {
-                    hasher.update(import_path.as_bytes());
-                    hasher.update(content.as_bytes());
-                }
-            }
-
-            format!("{:x}", hasher.finalize())
-        };
-        let cache_dir = Path::new(".at").join("test-cache");
-        let cache_file = cache_dir.join(format!("{source_hash}.passed"));
-        if !no_cache && cache_file.exists() {
-            println!("cached - all tests passed (use --no-cache to force re-run)");
-            return;
-        }
-
-        let module = loaded.module;
-        let mut compiler = Compiler::new();
-        let program = match compiler.compile_module(&module) {
-            Ok(program) => program,
-            Err(err) => {
-                eprintln!("{}", format_compile_error(&err, None, Some(path)));
-                std::process::exit(1);
-            }
-        };
-
-        let mut failures = 0;
-        for stmt in &module.stmts {
-            if let at_syntax::Stmt::Test { name, body, .. } = stmt {
-                let (chunk, main_locals, test_closures) = match compiler.compile_test_body(body) {
-                    Ok(res) => res,
-                    Err(err) => {
-                        eprintln!(
-                            "fail - {name}: {}",
-                            format_compile_error(&err, None, Some(path))
-                        );
-                        failures += 1;
-                        continue;
-                    }
-                };
-                let mut functions = program.functions.clone();
-                functions.extend(test_closures);
-                let test_program = at_vm::Program {
-                    functions,
-                    main: chunk,
-                    main_locals,
-                    sources: program.sources.clone(),
-                    entry: program.entry.clone(),
-                    capability_names: program.capability_names.clone(),
-                };
-                let mut vm = Vm::new();
-                match vm.run(&test_program) {
-                    Ok(_) => println!("ok - {name}"),
-                    Err(err) => {
-                        eprintln!("fail - {name}: {err:?}");
-                        failures += 1;
-                    }
-                }
-            }
-        }
-
-        if failures > 0 {
-            // Remove stale cache on failure
-            let _ = fs::remove_file(&cache_file);
+        if files.is_empty() {
+            eprintln!("no .at files found in {path}");
             std::process::exit(1);
         }
 
-        // Cache the pass result
-        let _ = fs::create_dir_all(&cache_dir);
-        let _ = fs::write(&cache_file, "");
+        let mut total_pass = 0;
+        let mut total_fail = 0;
+        let mut total_skip = 0;
+        let multi = files.len() > 1;
+
+        for file_path in &files {
+            let loaded = match load_module(file_path) {
+                Ok(loaded) => loaded,
+                Err(err) => {
+                    if multi {
+                        // In multi-file mode, skip files that fail to load
+                        eprintln!("skip - {file_path}: {err}");
+                        total_skip += 1;
+                        continue;
+                    } else {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            // Check if this file has any test blocks
+            let has_tests = loaded
+                .module
+                .stmts
+                .iter()
+                .any(|s| matches!(s, at_syntax::Stmt::Test { .. }));
+            if !has_tests {
+                continue; // silently skip files with no tests
+            }
+
+            // Test caching: hash the source and all dependencies
+            let source_hash = {
+                let mut hasher = Sha256::new();
+
+                // Hash the main file
+                let source = match fs::read_to_string(file_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error reading {file_path}: {e}");
+                        if multi {
+                            total_skip += 1;
+                            continue;
+                        } else {
+                            std::process::exit(1);
+                        }
+                    }
+                };
+                hasher.update(source.as_bytes());
+
+                // Hash all imported files (sorted for determinism)
+                let mut imports = loaded.imports.clone();
+                imports.sort();
+                for import_path in imports {
+                    if let Ok(content) = fs::read_to_string(&import_path) {
+                        hasher.update(import_path.as_bytes());
+                        hasher.update(content.as_bytes());
+                    }
+                }
+
+                format!("{:x}", hasher.finalize())
+            };
+            let cache_dir = Path::new(".at").join("test-cache");
+            let cache_file = cache_dir.join(format!("{source_hash}.passed"));
+            if !no_cache && cache_file.exists() {
+                if multi {
+                    println!("cached - {file_path}");
+                } else {
+                    println!("cached - all tests passed (use --no-cache to force re-run)");
+                }
+                continue;
+            }
+
+            let module = loaded.module;
+            let mut compiler = Compiler::new();
+            let program = match compiler.compile_module(&module) {
+                Ok(program) => program,
+                Err(err) => {
+                    eprintln!(
+                        "fail - {file_path}: {}",
+                        format_compile_error(&err, None, Some(file_path))
+                    );
+                    total_fail += 1;
+                    continue;
+                }
+            };
+
+            if multi {
+                println!("\n--- {file_path} ---");
+            }
+
+            let mut file_failures = 0;
+            for stmt in &module.stmts {
+                if let at_syntax::Stmt::Test { name, body, .. } = stmt {
+                    let (chunk, main_locals, test_closures) = match compiler.compile_test_body(body)
+                    {
+                        Ok(res) => res,
+                        Err(err) => {
+                            eprintln!(
+                                "fail - {name}: {}",
+                                format_compile_error(&err, None, Some(file_path))
+                            );
+                            file_failures += 1;
+                            total_fail += 1;
+                            continue;
+                        }
+                    };
+                    let mut functions = program.functions.clone();
+                    functions.extend(test_closures);
+                    let test_program = at_vm::Program {
+                        functions,
+                        main: chunk,
+                        main_locals,
+                        sources: program.sources.clone(),
+                        entry: program.entry.clone(),
+                        capability_names: program.capability_names.clone(),
+                    };
+                    let mut vm = Vm::new();
+                    match vm.run(&test_program) {
+                        Ok(_) => {
+                            println!("ok - {name}");
+                            total_pass += 1;
+                        }
+                        Err(err) => {
+                            eprintln!("fail - {name}: {err:?}");
+                            file_failures += 1;
+                            total_fail += 1;
+                        }
+                    }
+                }
+            }
+
+            if file_failures == 0 {
+                // Cache the pass result for this file
+                let _ = fs::create_dir_all(&cache_dir);
+                let _ = fs::write(&cache_file, "");
+            } else {
+                // Remove stale cache on failure
+                let _ = fs::remove_file(&cache_file);
+            }
+        }
+
+        if multi {
+            println!(
+                "\n{total_pass} passed, {total_fail} failed, {total_skip} skipped ({} files)",
+                files.len()
+            );
+        }
+
+        if total_fail > 0 {
+            std::process::exit(1);
+        }
         return;
     }
 
