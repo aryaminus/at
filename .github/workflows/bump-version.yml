@@ -36,9 +36,11 @@ jobs:
               run: |
                   VERSION=$(cat /tmp/version.txt)
                   git add Cargo.toml Cargo.lock package.json
+                  git restore --staged benchmarks/ || true
                   git commit -m "chore(release): bump version to ${VERSION}"
+                  git tag -d "v${VERSION}" || true
                   git tag "v${VERSION}"
             - name: Push changes
               run: git push origin main
             - name: Push tags
-              run: git push --tags
+              run: git push origin "refs/tags/v${VERSION}" --force
