@@ -36,3 +36,5 @@ Thumbs.db
 benchmarks/autocodebench_lite.jsonl
 benchmarks/temp/
 benchmarks/results/
+benchmarks/__pycache__/
+benchmarks/**/__pycache__/
