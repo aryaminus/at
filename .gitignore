@@ -41,7 +41,6 @@ benchmarks/**/__pycache__/
 
 # Node
 node_modules/
-package-lock.json
 dist/
 
 # Python
