@@ -1,0 +1,25 @@
+// Explicit capabilities: dependencies are visible to the agent
+pub fn get_timestamp() -> int needs { time } {
+    return time.now();
+}
+using time = time.fixed("2026-02-26T12:00:38Z");
+print(get_timestamp());
+
+// Results over exceptions: no hidden control flow
+pub fn safe_divide(a: int, b: int) -> result<int, string> {
+    return if b == 0 {
+        err("division by zero")
+    } else {
+        ok(a / b)
+    };
+}
+
+// Predictable pattern matching for tools
+pub fn tool_handler(a: int, b: int) -> string {
+    let result = safe_divide(a, b);
+    return match result {
+        ok(val) => "Success: {val}",
+        err(msg) => "Agent error: " + msg,
+    };
+}
+print(tool_handler(10, 2));
